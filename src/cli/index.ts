@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { parseArgs } from 'node:util';
 import { runDoctor, runSetupWizard } from './wizard/index.js';
+import { bootDaemon } from './daemon.js';
 
 async function main(): Promise<number> {
   const { positionals, values } = parseArgs({
@@ -19,9 +20,13 @@ async function main(): Promise<number> {
   switch (command) {
     case 'setup':
       return values.doctor ? runDoctor() : runSetupWizard();
-    case 'start':
-      console.log('not yet implemented — run `law setup` first');
+    case 'start': {
+      // Signal handling, drain and the reverse-order shutdown land in plan 05; the
+      // listening socket is what keeps the process alive until then.
+      const daemon = await bootDaemon();
+      console.log(`listening on 127.0.0.1:${daemon.port} -> ${daemon.publicUrl}`);
       return 0;
+    }
     case 'status':
       console.log('not yet implemented — run `law setup` first');
       return 0;

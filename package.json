@@ -8,6 +8,7 @@
   },
   "scripts": {
     "verify": "tsc && node --test \"dist/**/*.test.js\"",
+    "smoke": "tsx scripts/boot-smoke.ts",
     "typecheck": "tsc --noEmit",
     "test": "node --test \"dist/**/*.test.js\"",
     "build": "tsc",
