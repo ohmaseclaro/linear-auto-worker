@@ -19,7 +19,31 @@ Out of scope: deciding *when* to run (Phase 6) and reporting the result to Linea
 
 ### Agent invocation
 
-- **D-01:** `--permission-mode dontAsk`. Verified present on the installed CLI v2.1.259
+- **D-01 (AMENDED 2026-09-06, post-research):** `--permission-mode dontAsk` **plus
+  `--allowedTools "Write" "Edit" "Bash"`**. Measurement showed `dontAsk` alone denies the
+  `Write` tool (`decision_reason_type: "mode"`), creates nothing, and exits 0 with
+  `is_error: false` — trap T1 reached via the very flag chosen to avoid it. With
+  `--allowedTools` the same probe had zero denials and produced a real git commit. The
+  operator's intent (never stall, but not a blanket grant) is preserved; only the
+  incomplete flag set changed. Also pass `--permission-prompts none`: verified redundant
+  today rather than contradictory, and it guards against a future default change.
+  **Open, and it matters:** `Write/Edit/Bash` is verified sufficient for writes and a git
+  chain, but NOT against a real GSD run, which also uses Task, Skill, Glob, Grep and
+  TodoWrite. Under-granting reproduces the silent-nothing failure. Ship a probe as a file
+  plus a documented manual command for the integration gate — never as a plan-blocking step.
+- **D-15 (AMENDED):** Build the child environment by **allowlist**, not by deleting
+  `LINEAR_API_KEY` and `NGROK_AUTHTOKEN`. Inherited `CLAUDE*` vars (22 of them when the
+  daemon is launched from inside a Claude session) cause an `asyncAgent` denial — so
+  permission behaviour would otherwise depend on how the operator started the daemon.
+- **D-10 (AMENDED):** SIGINT stays first for resumability, but it **does not reap the
+  tree** — verified to kill only the group leader. Escalation to SIGTERM on the process
+  group is mandatory, with a liveness check between each step.
+- **ACCEPTED RISK (new, requires no action but must be stated):** because `--bare` is
+  forbidden (D-02), a mapped repo's own `.claude/settings.json` hooks execute unprompted
+  in the spawned session. **Every mapped repo is therefore implicitly fully trusted.**
+  That is the correct trade — `--bare` would kill the GSD install the product depends on —
+  but it is a real trust boundary and must be documented for the operator, not discovered.
+- **D-01 (original wording, superseded):** `--permission-mode dontAsk`. Verified present on the installed CLI v2.1.259
   (choices: acceptEdits, auto, bypassPermissions, manual, dontAsk, plan). Chosen so a run
   never stalls waiting on a permission prompt with no human present, without the blanket
   grant of `bypassPermissions`.
