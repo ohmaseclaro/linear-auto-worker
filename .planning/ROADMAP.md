@@ -116,7 +116,14 @@ Plans:
   5. The worker — never the agent — pushes the branch and opens a draft pull request with a templated body; a push is refused outright on the default branch, blocked on a secret detected in the diff, and flagged prominently when the diff touches CI or workflow files
   6. Secrets held by the worker are absent from the spawned child's environment, and ticket text is stripped of control and zero-width characters before entering the prompt
 
-**Plans**: TBD
+**Plans**: 6 plans across 2 waves
+
+- [ ] 04-01-PLAN.md — Tracer: one issue from a fresh worktree through a supervised agent to a worker-opened PR, fixing the signatures of all eleven execution modules (wave 1)
+- [ ] 04-02-PLAN.md — Worktree lifecycle: collision suffixing, the per-repo mutex, verdict-gated removal, and the boot reconcile (AGNT-01/02/03) (wave 2)
+- [ ] 04-03-PLAN.md — Invocation surface: the flag list with a test per quiet misconfiguration, the env allowlist, the prompt trust boundary, plus the GSD allowlist probe and the operator trust document (AGNT-04/05/09/10/11) (wave 2)
+- [ ] 04-04-PLAN.md — Carry-buffer stream parser and the event router whose GSD assertion fails loudly (AGNT-06/07) (wave 2)
+- [ ] 04-05-PLAN.md — Escalating process-group kill with liveness checks, two-stream drain, and the evidence verdict including needs_input (AGNT-08, QA-01) (wave 2)
+- [ ] 04-06-PLAN.md — Worker-owned delivery: three pre-push gates, the templated PR body, push-then-open (DELV-01/02/03/04/08/09) (wave 2)
 
 ### Phase 5: Outbound
 
