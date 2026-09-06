@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 1
 current_phase_name: Domain Contract, State Machine & Schema
 status: planning
-stopped_at: Completed 07-04-PLAN.md
-last_updated: "2026-09-06T18:45:00.380Z"
+stopped_at: "Completed 07-06-PLAN.md — the milestone's first gate run: 513/513, verify exit 0"
+last_updated: "2026-09-06T20:23:27.319Z"
 last_activity: 2026-09-06
 last_activity_desc: Roadmap created; 70/70 v1 requirements mapped across 8 phases
 progress:
   total_phases: 8
-  completed_phases: 7
+  completed_phases: 8
   total_plans: 35
-  completed_plans: 33
+  completed_plans: 35
 ---
 
 # Project State
@@ -32,7 +32,7 @@ Plan: 0 of TBD in current phase
 Status: Ready to plan
 Last activity: 2026-09-06 — Roadmap created; 70/70 v1 requirements mapped across 8 phases
 
-Progress: [█░░░░░░░░░] 10%
+Progress: [██████████] 100%
 
 ## Performance Metrics
 
@@ -60,6 +60,7 @@ Progress: [█░░░░░░░░░] 10%
 |------|----------|-------|-------|
 | Phase 02 P01 | 25min | 2 tasks | 7 files |
 | Phase 02 P02 | 8min | 2 tasks | 4 files |
+| Phase 07 P06 | 3h | 3 tasks | 20 files |
 
 ## Accumulated Context
 
@@ -74,6 +75,8 @@ Recent decisions affecting current work:
 - Roadmap: the wizard ships last (Phase 8) but the config shape it writes is fixed in Phases 1-2, because four layers read it
 - [Phase ?]: Split config.ts into a tracer-minimal Task 1 version and a fully-validated Task 2 version (02-01)
 - [Phase ?]: 02-02: SqliteStore CRUD is a generic patch-based repository with zero transition validation; findActiveRunByIssue treats delivered/partial/failed/cancelled as terminal (plan text omitted partial, corrected as Rule 1 fix)
+- [Phase ?]: 07-06: dependency injection over mock.module for the wizard's ESM boundaries — mock.module is undefined on Node 22 without an experimental flag that would then live in the canonical gate forever
+- [Phase ?]: 07-06: the canonical verify stays ONE script — tsc, assets, all unit+integration tests, boot smoke — because splitting it in three means two stop being run
 
 ### Pending Todos
 
@@ -91,6 +94,8 @@ Research corrections that must be applied during planning (research/SUMMARY.md "
 
 Open verifications flagged for phase planning: ngrok static-domain pinning via the in-process SDK and `webhookTimestamp` units (Phase 3); `--session-id` with `-p` and `--json-schema` surviving `--resume` (Phase 4).
 
+- ROADMAP Phase 7 criteria 1 and 5 are UNVERIFIED pending a live run of 07-HUMAN-UAT.md (needs a real Linear workspace, a live ngrok tunnel and real gh)
+
 ## Deferred Items
 
 Items acknowledged and carried forward from previous milestone close:
@@ -101,6 +106,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-09-06T18:45:00.366Z
-Stopped at: Completed 07-04-PLAN.md
+Last session: 2026-09-06T20:23:27.238Z
+Stopped at: Completed 07-06-PLAN.md — the milestone's first gate run: 513/513, verify exit 0
 Resume file: None

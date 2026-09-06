@@ -92,9 +92,11 @@ Decimal phases appear between their surrounding integers in numeric order.
   3. An event the bot itself caused is dropped by four independent guards — actor identity, invisible comment marker, a short self-write suppression window, and delivery-ID uniqueness — and an event with a null actor is treated as untrusted rather than as not-the-bot
   4. A counter of dropped self-events climbs while the bot is commenting, so a filter that is not wired in is visible rather than silent
   5. Assigning the bot to an issue produces exactly one pickup, decided from a fresh fetch of the issue rather than from the webhook payload, and a later unrelated edit to that same issue produces none
+
 **Plans**: 5 plans across 2 waves
 
 Plans:
+
 - [ ] 03-01-PLAN.md — ngrok tunnel: checked URL, singleton assertion, sanitised auth failure (TUN-01/02/03)
 - [ ] 03-02-PLAN.md — Webhook reconciler: persist-then-register, correct pagination, re-enable, prune (HOOK-02/03/09)
 - [ ] 03-03-PLAN.md — Loop-prevention layers 1-3 as named pure predicates (HOOK-07)
@@ -183,16 +185,16 @@ Plans:
   4. A real signed webhook produces a queued run while the execution layer is still faked, proving the ingress seam before any Claude session is spent on it
   5. A run that asks a question survives a full daemon restart and resumes on the operator's threaded reply
 
-**Plans**: 6 plans
+**Plans**: 6/6 plans executed
 
 Plans:
 
-- [ ] 07-01-PLAN.md — Make the merged eight-branch tree installable; reconcile package.json/tsconfig, gate the dependency set, take the first full-tree typecheck
-- [ ] 07-02-PLAN.md — Fold every `Contract additions requested` into src/domain/ and drive the whole tree to a clean compile
-- [ ] 07-03-PLAN.md — Tracer: composition root + boot smoke; a signed webhook becomes a queued run with execution still faked
-- [ ] 07-04-PLAN.md — Wire the real worktree/agent, deliverer and notifier into the engine
-- [ ] 07-05-PLAN.md — Complete the ordered boot (bind before tunnel) and the reverse-order shutdown
-- [ ] 07-06-PLAN.md — Extend the canonical verify with the boot smoke, run the first full gate, write the live-gated human checklist
+- [x] 07-01-PLAN.md — Make the merged eight-branch tree installable; reconcile package.json/tsconfig, gate the dependency set, take the first full-tree typecheck
+- [x] 07-02-PLAN.md — Fold every `Contract additions requested` into src/domain/ and drive the whole tree to a clean compile
+- [x] 07-03-PLAN.md — Tracer: composition root + boot smoke; a signed webhook becomes a queued run with execution still faked
+- [x] 07-04-PLAN.md — Wire the real worktree/agent, deliverer and notifier into the engine
+- [x] 07-05-PLAN.md — Complete the ordered boot (bind before tunnel) and the reverse-order shutdown
+- [x] 07-06-PLAN.md — Extend the canonical verify with the boot smoke, run the first full gate, write the live-gated human checklist
 
 **Live-gated:** success criteria 1 and 5 require a real Linear workspace, a live ngrok tunnel and real `gh`. They are built in this phase and verified manually via `07-HUMAN-UAT.md`; no plan task blocks on them.
 
@@ -209,8 +211,10 @@ Plans:
   3. The operator builds the project→repo map by picking from listed Linear teams and projects and discovered local repos, never by hand-editing JSON, and captures the optional Slack webhook and per-mapping toggles in the same flow
   4. Every mapped repo is checked for a remote and a resolvable default branch — which is recorded in the mapping — and the operator is warned about any repo missing a `CLAUDE.md` or `AGENTS.md`, named as the highest-leverage success factor
   5. The wizard finishes by registering the Linear webhook, so setup ends with a system that is already working rather than one that is merely configured
+
 **Plans**: 5 plans
 Plans:
+
 - [x] 08-01-PLAN.md — CLI entry (`law setup|start|status`) + tracer + full toolchain preflight (D-01/D-08) + local repo discovery (D-02)
 - [ ] 08-02-PLAN.md — Linear API key validate+admin-probe and ngrok authtoken acquisition, persisted to `.env` at 0600 (SETUP-02/03/04)
 - [ ] 08-03-PLAN.md — Interactive Linear team/project + repo checklist mapping, Slack + toggle capture, re-run-in-place editing (SETUP-05/06)
@@ -264,7 +268,7 @@ Phase 1 first. Phases 2-6 in parallel. Phase 7 after all of them. Phase 8 last.
 | 4. Execution | 0/TBD | Not started | - |
 | 5. Outbound | 0/2 | Not started | - |
 | 6. Orchestration | 0/TBD | Not started | - |
-| 7. Integration & Daemon Lifecycle | 0/6 | Planned | - |
+| 7. Integration & Daemon Lifecycle | 6/6 | In Progress|  |
 | 8. Setup Wizard & Safety Pass | 1/5 | In Progress|  |
 
 ---
