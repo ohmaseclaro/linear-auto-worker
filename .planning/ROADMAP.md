@@ -167,7 +167,13 @@ Plans:
   3. The operator builds the project→repo map by picking from listed Linear teams and projects and discovered local repos, never by hand-editing JSON, and captures the optional Slack webhook and per-mapping toggles in the same flow
   4. Every mapped repo is checked for a remote and a resolvable default branch — which is recorded in the mapping — and the operator is warned about any repo missing a `CLAUDE.md` or `AGENTS.md`, named as the highest-leverage success factor
   5. The wizard finishes by registering the Linear webhook, so setup ends with a system that is already working rather than one that is merely configured
-**Plans**: TBD
+**Plans**: 5 plans
+Plans:
+- [ ] 08-01-PLAN.md — CLI entry (`law setup|start|status`) + tracer + full toolchain preflight (D-01/D-08) + local repo discovery (D-02)
+- [ ] 08-02-PLAN.md — Linear API key validate+admin-probe and ngrok authtoken acquisition, persisted to `.env` at 0600 (SETUP-02/03/04)
+- [ ] 08-03-PLAN.md — Interactive Linear team/project + repo checklist mapping, Slack + toggle capture, re-run-in-place editing (SETUP-05/06)
+- [ ] 08-04-PLAN.md — CLAUDE.md/AGENTS.md warning+generate, remote/default-branch/ownerRepo capture, submodule + branch-protection warnings (SETUP-07/08)
+- [ ] 08-05-PLAN.md — Config assembly + idempotent write, webhook reconcile-by-label + `--doctor`, full wizard wiring, HUMAN-UAT.md (SETUP-09)
 
 ## Requirement Coverage
 
@@ -217,7 +223,7 @@ Phase 1 first. Phases 2-6 in parallel. Phase 7 after all of them. Phase 8 last.
 | 5. Outbound | 0/2 | Not started | - |
 | 6. Orchestration | 0/TBD | Not started | - |
 | 7. Integration & Daemon Lifecycle | 0/6 | Planned | - |
-| 8. Setup Wizard & Safety Pass | 0/TBD | Not started | - |
+| 8. Setup Wizard & Safety Pass | 0/5 | Planned | - |
 
 ---
 *Roadmap created: 2026-09-06*
