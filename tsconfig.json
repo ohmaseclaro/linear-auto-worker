@@ -25,5 +25,13 @@
     "verbatimModuleSyntax": true,
     "erasableSyntaxOnly": true
   },
+  // COVERAGE (07-01). "src" is the whole compile surface, and it is complete:
+  // `tsc --listFiles` reaches all seven layers -- domain 10, infra 12, ingress 13,
+  // orchestration 11, execution 23, outbound 11, cli 16 files. Tests are colocated
+  // (`src/**/*.test.ts`), so there is no separate test/ root to include; a bare "src"
+  // also picks up any layer added later, which an explicit per-layer list would silently
+  // miss. `scripts/` is deliberately OUT: scripts/probe-gsd-allowlist.ts spawns a real
+  // `claude` and costs real money, and its own header names living outside src/ as the
+  // mechanism that keeps it away from the `node --test` gate.
   "include": ["src"]
 }
