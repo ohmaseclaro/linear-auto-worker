@@ -1,5 +1,10 @@
 # Phase 3 — Deferred live verification
 
+> **SUPERSEDED — do not run this file directly.**
+> Every item below is folded into the milestone's single consolidated checklist,
+> `.planning/phases/07-integration-daemon-lifecycle/07-HUMAN-UAT.md`, in the order an
+> operator should actually do them. Kept for its reasoning; run the consolidated one.
+
 **Status:** deferred, non-blocking. One item.
 
 This phase ships three assumptions it cannot settle from a test. All three are readable
