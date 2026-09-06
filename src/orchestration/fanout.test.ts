@@ -257,3 +257,436 @@ test('deriveParentStatus is pure: called twice over the same children it writes 
   assert.equal(between, before, 'nothing was written between the two reads');
   assert.equal(JSON.stringify(children), before, 'and nothing was written by either of them');
 });
+
+// ---------------------------------------------------------------------------
+// Fan-out at the engine's pickup (D-03, D-12, DELV-06, DELV-07)
+//
+// These drive the real engine rather than asserting on `planSubRuns` output,
+// because the claims are about arity and independence at runtime: how many
+// slots three children occupy, how many acknowledgements one ticket produces,
+// and -- the one that matters -- what happens to a delivered child's pull
+// request when its sibling fails.
+// ---------------------------------------------------------------------------
+
+import { InMemoryStore } from '../domain/fakes.js';
+import { createScheduler } from './scheduler.js';
+import { createRunEngine } from './run-engine.js';
+import { createQuestions } from './questions.js';
+import type {
+  AgentResult,
+  AgentRunner,
+  Config,
+  Deliverer,
+  LinearClient,
+  Logger,
+  Store,
+  WorktreeManager,
+} from '../domain/ports.js';
+
+const silent: Logger = {
+  child: () => silent,
+  info: () => {},
+  warn: () => {},
+  error: () => {},
+  debug: () => {},
+};
+
+const ALL_STATES: RunState[] = [
+  'queued',
+  'preparing',
+  'running',
+  'awaiting_answer',
+  'delivering',
+  'delivered',
+  'partial',
+  'failed',
+  'cancelled',
+];
+
+/**
+ * `Store.listRunsByParent(parentRunId)` is requested from Phase 1 under
+ * `Contract additions requested`. Supplied here from `listByState` so this
+ * test does not block on it landing -- and note what it enumerates: the nine
+ * CHILD states. The parent has no state, so it can never appear in its own
+ * child list.
+ */
+function withParentLookup(store: InMemoryStore): Store {
+  const s = store as unknown as Record<string, unknown>;
+  s.listRunsByParent ??= (parentRunId: string) =>
+    ALL_STATES.flatMap((state) => store.listByState(state)).filter(
+      (r) => r.parentRunId === parentRunId,
+    );
+  return store as unknown as Store;
+}
+
+function issueN(n: number) {
+  return {
+    id: `issue-${n}`,
+    identifier: `ENG-${n}`,
+    title: `Ticket ${n}`,
+    description: null,
+    url: `https://linear.app/x/issue/ENG-${n}`,
+    branchName: `eng-${n}-ticket`,
+    assigneeId: 'bot',
+    projectId: `proj-${n}`,
+    teamId: 'team-1',
+    stateId: 'state-todo',
+    stateType: 'unstarted',
+  };
+}
+
+/** `proj-1` -> three repos, `proj-2` -> one repo. Shaped against the ADDENDUM. */
+function multiRepoConfig(concurrency: number): Config {
+  return {
+    operatorUserId: 'operator-1',
+    logDir: '/home/op/.linear-auto-worker/logs',
+    defaults: {
+      concurrency,
+      questionTimeoutMs: 4 * 60 * 60 * 1000,
+      baseBranch: 'main',
+      postLinearComments: true,
+      draftPr: true,
+      questionsEnabled: true,
+      maxRunMs: 60 * 60 * 1000,
+    },
+    mappings: {
+      'proj-1': {
+        repos: [
+          { repoDir: '/repo/api', repoSlug: 'org/api', baseBranch: 'main', enabled: true },
+          { repoDir: '/repo/web', repoSlug: 'org/web', baseBranch: 'main', enabled: true },
+          { repoDir: '/repo/infra', repoSlug: 'org/infra', baseBranch: 'main', enabled: true },
+        ],
+      },
+      'proj-2': {
+        repos: [{ repoDir: '/repo/solo', repoSlug: 'org/solo', baseBranch: 'main', enabled: true }],
+      },
+    },
+  } as unknown as Config;
+}
+
+const DELIVERS: AgentResult = {
+  status: 'complete',
+  summary: 'Shipped it.',
+  prTitle: 'ENG: do the thing',
+  prBody: 'Does the thing.',
+};
+
+const BREAKS: AgentResult = {
+  status: 'failed',
+  summary: 'could not build',
+  failureReason: 'tsc exited 2',
+};
+
+/**
+ * Scripted per repo rather than per call, because with three children running
+ * concurrently a call-ordered script decides nothing reliably -- and the whole
+ * point of these tests is which repo got which outcome.
+ */
+function agentByRepo(
+  byRepo: Record<string, AgentResult>,
+  gate?: Promise<void>,
+): AgentRunner {
+  return {
+    async run(req: { env: Record<string, string> }) {
+      if (gate) await gate;
+      const result = byRepo[req.env.LAW_REPO];
+      if (!result) throw new Error(`no scripted result for ${req.env.LAW_REPO}`);
+      return result;
+    },
+  } as unknown as AgentRunner;
+}
+
+function fanoutHarness(opts: {
+  agent: AgentRunner;
+  issues: Array<ReturnType<typeof issueN>>;
+  concurrency?: number;
+}) {
+  const config = multiRepoConfig(opts.concurrency ?? 3);
+  const raw = new InMemoryStore();
+  const store = withParentLookup(raw);
+  const scheduler = createScheduler({ config, log: silent });
+
+  const comments: Array<{ issueId: string; body: string }> = [];
+  const order: string[] = [];
+  let n = 0;
+  const linear = {
+    async getIssue(id: string) {
+      const found = opts.issues.find((i) => i.id === id);
+      if (!found) throw new Error(`no such issue: ${id}`);
+      return found;
+    },
+    async createComment(issueId: string, body: string) {
+      order.push('comment.create');
+      comments.push({ issueId, body });
+      return { id: `comment-${++n}` };
+    },
+    async updateComment() {},
+    async setIssueState() {
+      order.push('issue.state');
+    },
+    async addSubscriber() {
+      order.push('issue.subscribe');
+    },
+  } as unknown as LinearClient;
+
+  // The worktree port fails the test if it is reached before the ticket-level
+  // acknowledgement has finished -- plan 02's ordering constraint still binds,
+  // and fan-out must not have moved the ack inside the per-child loop.
+  const worktrees = {
+    async create(runId: string, repo: { repoDir: string }, branch: string) {
+      for (const step of ['comment.create', 'issue.state', 'issue.subscribe']) {
+        if (!order.includes(step)) throw new Error(`worktree reached before ${step}`);
+      }
+      return { runId, repoDir: repo.repoDir, path: `/wt/${runId}`, branch, baseBranch: 'main' };
+    },
+    async remove() {},
+    async exists() {
+      return true;
+    },
+    async gc() {
+      return [];
+    },
+  } as unknown as WorktreeManager;
+
+  const deliverer = {
+    async deliver(_wt: unknown, repo: { repoSlug: string }) {
+      return { url: `https://github.com/${repo.repoSlug}/pull/7` };
+    },
+  } as unknown as Deliverer;
+
+  let questions: ReturnType<typeof createQuestions>;
+  const engine = createRunEngine({
+    store,
+    scheduler,
+    agent: opts.agent,
+    worktrees,
+    deliverer,
+    linear,
+    config,
+    log: silent,
+    questions: () => questions,
+  });
+  questions = createQuestions({ store, engine, config, log: silent });
+
+  const runsOf = (issueId: string) =>
+    ALL_STATES.flatMap((s) => raw.listByState(s)).filter((r) => r.issueId === issueId);
+
+  return { store: raw, scheduler, engine, comments, order, runsOf, config };
+}
+
+test('one ticket over three repos inserts one parent, three children, and one acknowledgement', async () => {
+  const h = fanoutHarness({
+    agent: agentByRepo({
+      'org/api': DELIVERS,
+      'org/web': DELIVERS,
+      'org/infra': DELIVERS,
+    }),
+    issues: [issueN(1)],
+  });
+
+  await h.engine.handle({ kind: 'run.requested', issueId: 'issue-1' });
+
+  // The acknowledgement is per TICKET, not per child: three children must not
+  // produce three ack comments, three In Progress transitions and three
+  // subscriptions on one issue (plan 02's D-09 ordering, unchanged).
+  assert.deepEqual(
+    h.order.slice(0, 3),
+    ['comment.create', 'issue.state', 'issue.subscribe'],
+    'acknowledge, In Progress, subscribe -- once, in order, before any worktree work',
+  );
+  assert.equal(h.order.filter((o) => o === 'issue.state').length, 1, 'one In Progress transition');
+  assert.equal(h.order.filter((o) => o === 'issue.subscribe').length, 1, 'one subscription');
+
+  await h.engine.settle();
+
+  const rows = h.runsOf('issue-1');
+  const children = rows.filter((r) => r.kind === 'repo');
+  assert.equal(children.length, 3, 'one child run per repo (DELV-06)');
+  assert.equal(new Set(children.map((c) => c.parentRunId)).size, 1, 'all three name one parent');
+  assert.deepEqual(
+    children.map((c) => c.repoSlug).sort(),
+    ['org/api', 'org/infra', 'org/web'],
+    'each child owns exactly one repo',
+  );
+  assert.equal(new Set(children.map((c) => c.branch)).size, 3, 'three distinct branches');
+  assert.equal(new Set(children.map((c) => c.worktreePath)).size, 3, 'three distinct worktrees');
+  assert.equal(new Set(children.map((c) => c.sessionId)).size, 3, 'three distinct sessions');
+});
+
+test('a ticket mapped to one repo is unchanged: one run, no parent', async () => {
+  const h = fanoutHarness({ agent: agentByRepo({ 'org/solo': DELIVERS }), issues: [issueN(2)] });
+
+  await h.engine.handle({ kind: 'run.requested', issueId: 'issue-2' });
+  await h.engine.settle();
+
+  const rows = h.runsOf('issue-2');
+  assert.equal(rows.length, 1, 'the common case is not wrapped in a parent of one');
+  assert.equal(rows[0].parentRunId, null);
+  assert.equal(rows[0].state, 'delivered');
+});
+
+test('three children occupy three slots, and a fourth unrelated run waits (D-03)', async () => {
+  let open!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    open = resolve;
+  });
+
+  const h = fanoutHarness({
+    agent: agentByRepo(
+      { 'org/api': DELIVERS, 'org/web': DELIVERS, 'org/infra': DELIVERS, 'org/solo': DELIVERS },
+      gate,
+    ),
+    issues: [issueN(1), issueN(2)],
+    concurrency: 3,
+  });
+
+  await h.engine.handle({ kind: 'run.requested', issueId: 'issue-1' });
+  // Let the three drivers reach the agent, where they park on the gate.
+  await new Promise((r) => setImmediate(r));
+
+  assert.equal(
+    h.scheduler.inUse(),
+    3,
+    'each child is a real claude process, so each costs a slot -- the cap bounds local RAM',
+  );
+
+  await h.engine.handle({ kind: 'run.requested', issueId: 'issue-2' });
+  const [fourth] = h.runsOf('issue-2');
+  assert.equal(h.scheduler.positionOf(fourth.id), 1, 'the fourth run waits; the cap is not exceeded');
+  assert.equal(h.scheduler.inUse(), 3);
+
+  open();
+  await h.engine.settle();
+  assert.equal(h.scheduler.inUse(), 0, 'and every slot comes back');
+});
+
+// ---------------------------------------------------------------------------
+// DELV-07 at the engine — the deliverable
+// ---------------------------------------------------------------------------
+
+test('a failing child leaves its delivered sibling untouched, and the ticket derives partial', async () => {
+  const h = fanoutHarness({
+    agent: agentByRepo({
+      'org/api': DELIVERS,
+      'org/web': BREAKS,
+      'org/infra': BREAKS,
+    }),
+    issues: [issueN(1)],
+  });
+
+  await h.engine.handle({ kind: 'run.requested', issueId: 'issue-1' });
+  await h.engine.settle();
+
+  const children = h.runsOf('issue-1').filter((r) => r.kind === 'repo');
+  const api = children.find((c) => c.repoSlug === 'org/api')!;
+  const web = children.find((c) => c.repoSlug === 'org/web')!;
+
+  // The failure this whole phase exists to prevent: repo B failing must not
+  // discard repo A's already-shipped pull request.
+  assert.equal(api.state, 'delivered', 'the delivered child is not reclassified by its siblings');
+  assert.equal(
+    api.prUrl,
+    'https://github.com/org/api/pull/7',
+    "the delivered child's pull request url is untouched by two failing siblings",
+  );
+  assert.equal(web.state, 'failed');
+  assert.equal(web.prUrl, null, 'and the failed child never claims a pull request it does not have');
+
+  // Independent per-repo outcomes: no fail-fast, no sibling abort, no cleanup
+  // triggered by one child's failure.
+  assert.equal(
+    children.filter((c) => c.state === 'cancelled').length,
+    0,
+    'a failing child cancels nobody -- "abort the rest on first failure" is the bug, not the fix',
+  );
+
+  // And the ticket-level answer is derived, on this read, from exactly those rows.
+  assert.deepEqual(deriveParentStatus(children), { settled: true, state: 'partial' });
+  assert.equal(
+    h.store.getRun(api.id)!.prUrl,
+    'https://github.com/org/api/pull/7',
+    'reading the parent status changed nothing about the delivered child',
+  );
+});
+
+test('the parent row still carries no state after every child has settled', async () => {
+  const h = fanoutHarness({
+    agent: agentByRepo({ 'org/api': DELIVERS, 'org/web': BREAKS, 'org/infra': DELIVERS }),
+    issues: [issueN(1)],
+  });
+
+  await h.engine.handle({ kind: 'run.requested', issueId: 'issue-1' });
+  await h.engine.settle();
+
+  const parent = h.runsOf('issue-1').find((r) => r.kind === 'ticket');
+  assert.ok(parent, 'the parent row exists');
+  assert.equal(
+    parent!.state,
+    null,
+    'nothing wrote a parent state at any point -- D-12, and the reason parent and children cannot disagree',
+  );
+  assert.equal(h.store.listRunEvents(parent!.id).length, 0, 'the parent never transitioned');
+});
+
+test('Linear gets one rollup for the ticket, not one terminal comment per child', async () => {
+  const h = fanoutHarness({
+    agent: agentByRepo({ 'org/api': DELIVERS, 'org/web': BREAKS, 'org/infra': DELIVERS }),
+    issues: [issueN(1)],
+  });
+
+  await h.engine.handle({ kind: 'run.requested', issueId: 'issue-1' });
+  await h.engine.settle();
+
+  // One acknowledgement plus one rollup. Three children posting three terminal
+  // comments is how an operator learns to mute the bot.
+  assert.equal(h.comments.length, 2, 'one ack, one rollup');
+  const rollup = h.comments[1].body;
+  assert.match(rollup, /partial/, 'the rollup carries the derived ticket status');
+  for (const slug of ['org/api', 'org/web', 'org/infra']) {
+    assert.ok(rollup.includes(slug), `the rollup names ${slug} and its own outcome`);
+  }
+  assert.match(rollup, /pull\/7/, 'and the delivered repos keep their pull request urls in the rollup');
+});
+
+// ---------------------------------------------------------------------------
+// Cancellation across children (D-11, INTK-08)
+// ---------------------------------------------------------------------------
+
+test('cancelling the ticket cancels every non-terminal child and leaves terminal ones alone', async () => {
+  const h = fanoutHarness({
+    agent: agentByRepo({ 'org/api': DELIVERS, 'org/web': DELIVERS, 'org/infra': DELIVERS }),
+    issues: [issueN(1)],
+    concurrency: 1,
+  });
+  // One slot, held by an outsider, so all three children park at `queued`.
+  const releaseHolder = await h.scheduler.acquire('outsider');
+
+  await h.engine.handle({ kind: 'run.requested', issueId: 'issue-1' });
+  const children = h.runsOf('issue-1').filter((r) => r.kind === 'repo');
+  assert.equal(children.length, 3);
+
+  // Drive one child terminal by hand, so the cancel has a mixed set to face.
+  h.store.updateRun(children[0].id, { state: 'delivered', prUrl: 'https://github.com/org/api/pull/7' });
+
+  await h.engine.handle({ kind: 'run.cancelled', issueId: 'issue-1', reason: 'bot unassigned' });
+
+  const after = h.runsOf('issue-1').filter((r) => r.kind === 'repo');
+  const shipped = after.find((c) => c.id === children[0].id)!;
+  assert.equal(shipped.state, 'delivered', 'terminal is terminal -- a cancel does not claw back a PR');
+  assert.equal(shipped.prUrl, 'https://github.com/org/api/pull/7', 'and its url is untouched');
+  for (const c of after.filter((c) => c.id !== children[0].id)) {
+    assert.equal(c.state, 'cancelled', 'every non-terminal child stops (INTK-08)');
+  }
+
+  // The parent needs no cancel handling of its own: its status is derived from
+  // exactly these children, which is now delivered + cancelled + cancelled.
+  assert.deepEqual(deriveParentStatus(after), { settled: true, state: 'partial' });
+
+  releaseHolder();
+  await h.engine.settle();
+  assert.equal(
+    h.runsOf('issue-1').filter((r) => r.kind === 'repo' && r.state === 'cancelled').length,
+    2,
+    'taking their turn in the queue does not revive them',
+  );
+});

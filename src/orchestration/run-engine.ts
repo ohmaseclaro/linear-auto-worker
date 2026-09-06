@@ -6,7 +6,6 @@
  * Contains no SQL. Every read and write goes through the `Store` port; raw
  * statements live in Phase 2's store implementation.
  */
-import { randomUUID } from 'node:crypto';
 import { canTransition, RUN_STATE_TABLE } from '../domain/state-machine.js';
 import { IllegalTransitionError } from '../domain/errors.js';
 // T32: the self-event marker is declared once, in the domain barrel. Every
@@ -28,6 +27,7 @@ import type {
 } from '../domain/ports.js';
 import type { Scheduler } from './scheduler.js';
 import type { Questions } from './questions.js';
+import { deriveParentStatus, planSubRuns, type FanoutPlan } from './fanout.js';
 
 export interface RunEngine {
   /**
@@ -111,38 +111,25 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
    * it cannot go through `transition()` (there is nothing to move from). Its
    * genesis `run_events` row is appended in the same transaction so the event
    * log still mirrors the state sequence exactly.
+   *
+   * The parent of a multi-repo ticket gets no genesis event, because it has no
+   * state to record (D-12, Phase 1 D-04). Each child appends its own rows, so
+   * a per-repo outcome stays individually reconstructable (T-06-27).
    */
-  function createRun(issue: LinearIssue, repo: { repoDir: string; repoSlug: string }): Run {
-    const at = now();
-    const run: Run = {
-      id: randomUUID(),
-      parentRunId: null,
-      kind: 'repo',
-      issueId: issue.id,
-      issueKey: issue.identifier,
-      issueTitle: issue.title,
-      issueUrl: issue.url,
-      repoDir: repo.repoDir,
-      repoSlug: repo.repoSlug,
-      branch: issue.branchName,
-      worktreePath: null,
-      // T4: pre-assigned and persisted before any spawn, never parsed out of
-      // the event stream.
-      sessionId: randomUUID(),
-      pid: null,
-      state: 'queued',
-      attempt: 0,
-      questionRound: 0,
-      prUrl: null,
-      failureReason: null,
-      createdAt: at,
-      updatedAt: at,
-    };
+  function insertPlan(plan: FanoutPlan): void {
     store.transaction(() => {
-      store.insertRun(run);
-      store.appendRunEvent({ runId: run.id, from: null, to: 'queued', at, detail: issue.identifier });
+      if (plan.parent) store.insertRun(plan.parent);
+      for (const child of plan.children) {
+        store.insertRun(child);
+        store.appendRunEvent({
+          runId: child.id,
+          from: null,
+          to: 'queued',
+          at: child.createdAt,
+          detail: child.repoSlug ? `${child.issueKey} -> ${child.repoSlug}` : child.issueKey,
+        });
+      }
     });
-    return run;
   }
 
   /** D-07: project-keyed with a team-level fallback, so a project-less issue
@@ -162,11 +149,19 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
   const ackKey = (runId: RunId) => `ack:${runId}`;
   const cancelKey = (runId: RunId) => `cancel:${runId}`;
   const terminalKey = (runId: RunId) => `terminal:${runId}`;
+  const rollupKey = (parentRunId: RunId) => `rollup:${parentRunId}`;
 
   interface Ack {
     commentId: string;
     /** Last position published, so an unchanged position edits nothing. */
     position: number;
+    /**
+     * The mapped repo list, for a multi-repo ticket. Carried on the ack rather
+     * than re-read from config so a mapping edited mid-run cannot rewrite an
+     * acknowledgement that was already posted -- the same reason the repo is
+     * recorded on the run row.
+     */
+    repos?: readonly string[];
   }
 
   function readAck(runId: RunId): Ack | null {
@@ -198,10 +193,16 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
     }
   }
 
-  function ackText(run: Run, position: number): string {
+  function ackText(run: Run, position: number, repos?: readonly string[]): string {
+    // D-12: one acknowledgement per TICKET, so a ticket over three repos names
+    // all three here rather than posting three comments.
+    const where =
+      repos && repos.length > 1
+        ? `${repos.length} repos (${repos.map((r) => `\`${r}\``).join(', ')})`
+        : `\`${run.repoSlug}\``;
     return position > 0
       ? `Picked up **${run.issueKey}** — queued, position ${position}. Starting as soon as a slot frees up.`
-      : `Picked up **${run.issueKey}** — starting work in \`${run.repoSlug}\`.`;
+      : `Picked up **${run.issueKey}** — starting work in ${where}.`;
   }
 
   /**
@@ -214,12 +215,12 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
    * `drive()` takes as a parameter, so the work path cannot start without this
    * having run — there would be nothing to pass it.
    */
-  async function acknowledge(run: Run): Promise<string | null> {
+  async function acknowledge(run: Run, repos?: readonly string[]): Promise<string | null> {
     const position = scheduler.positionOf(run.id);
     const created = await attempt('ack', run.id, () =>
-      linear.createComment(run.issueId, botBody(ackText(run, position))),
+      linear.createComment(run.issueId, botBody(ackText(run, position, repos))),
     );
-    if (created) writeAck(run.id, { commentId: created.id, position });
+    if (created) writeAck(run.id, { commentId: created.id, position, repos });
 
     await attempt('in-progress', run.id, () => linear.setIssueState(run.issueId, 'started'));
 
@@ -248,7 +249,7 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
       const position = scheduler.positionOf(run.id);
       if (position === 0 || position === ack.position) continue;
       const updated = await attempt('position', run.id, () =>
-        linear.updateComment(ack.commentId, botBody(ackText(run, position))),
+        linear.updateComment(ack.commentId, botBody(ackText(run, position, ack.repos))),
       );
       if (updated !== null) writeAck(run.id, { ...ack, position });
     }
@@ -304,8 +305,52 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
     // worse than a missing one here, and the call itself cannot throw.
     if (store.kvGet(terminalKey(runId))) return;
     store.kvSet(terminalKey(runId), run.state);
+    // A child of a multi-repo ticket reports through the ticket rollup below
+    // instead of on its own: three children posting three terminal comments
+    // plus a rollup is the wall of bot noise D-10 exists to prevent. Slack
+    // still gets one message per child -- emitting both shapes is Phase 5's.
+    if (run.parentRunId) {
+      await announceTicketRollup(run.parentRunId);
+      return;
+    }
     await attempt('terminal', runId, () =>
       linear.createComment(run.issueId, botBody(terminalText(run))),
+    );
+  }
+
+  function rollupLine(child: Run): string {
+    const detail =
+      child.prUrl ?? (child.state === 'failed' ? (child.failureReason ?? 'no diagnosis') : '');
+    return `- \`${child.repoSlug}\` — **${child.state}**${detail ? ` — ${detail}` : ''}`;
+  }
+
+  /**
+   * The ticket-level outcome (D-12, DELV-07). Read through `deriveParentStatus`
+   * and written NOWHERE: the parent row has no state column value, so parent
+   * and children cannot disagree, and a failing child therefore cannot
+   * reclassify a delivered sibling's pull request. If this ever grows a cache
+   * of the derived status, that cache is the disagreement D-12 forbids.
+   *
+   * Posted once, by whichever child happens to settle last. Partial success is
+   * the normal case here, not an edge case, so the rollup lists every repo's
+   * own outcome rather than collapsing to a single verdict.
+   */
+  async function announceTicketRollup(parentRunId: RunId): Promise<void> {
+    const parent = store.getRun(parentRunId);
+    if (!parent) return;
+    const children = store.listRunsByParent(parentRunId);
+    const status = deriveParentStatus(children);
+    // Still in flight: a repo that has not finished is not a ticket that has.
+    if (!status.settled) return;
+    if (store.kvGet(rollupKey(parentRunId))) return;
+    store.kvSet(rollupKey(parentRunId), status.state);
+    const body = [
+      `**${parent.issueKey}** — ${status.state} across ${children.length} repos.`,
+      '',
+      ...children.map(rollupLine),
+    ].join('\n');
+    await attempt('rollup', parentRunId, () =>
+      linear.createComment(parent.issueId, botBody(body)),
     );
   }
 
@@ -554,23 +599,53 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
             log.warn({ issueId: issue.id }, 'no repo mapping for issue; ignoring');
             return;
           }
-          // ponytail: one repo here. Plan 05 fans a ticket into one child run
-          // per repo; each child is already a first-class run to this engine.
-          const run = createRun(issue, mapping.repos[0]);
-          // Park for a slot first. This holds nothing, spends nothing and
-          // returns immediately -- it exists only so the acknowledgement below
-          // can carry a real `positionOf()` rather than guessing.
-          const slot = scheduler.acquire(run.id);
+          // D-12 / DELV-06. Fan-out happens HERE, at the engine, and never
+          // inside an agent session: one child run per mapped repo, each with
+          // its own worktree, branch, session and state. One repo stays one run
+          // with no parent, exactly as before.
+          const plan = planSubRuns(issue, mapping, { now });
+          if (plan.children.length === 0) {
+            log.warn({ issueId: issue.id }, 'mapping has no repos; ignoring');
+            return;
+          }
+          insertPlan(plan);
+          // Park each child for its OWN slot (D-03). Each is a real `claude`
+          // process, so a ticket over three repos legitimately fills a
+          // three-slot daemon -- the cap bounds local RAM, and a design where
+          // N repos cost one slot would quietly break the thing it is for.
+          // The parent is a row, not a runnable thing: it is never enqueued.
+          // Parking holds nothing and returns immediately; it exists only so
+          // the acknowledgement below can carry a real `positionOf()`.
+          const slots = plan.children.map((child) => scheduler.acquire(child.id));
           // D-09, in order and before the worktree port is reachable at all:
           // insert at `queued` (above), acknowledge, In Progress, subscribe.
-          const ackCommentId = await acknowledge(run);
-          track(drive(run.id, ackCommentId, slot));
+          //
+          // Once per TICKET, not once per child. Three children must not
+          // produce three ack comments, three In Progress transitions and three
+          // subscriptions. The lead child owns the single ack comment, so it is
+          // also the only one whose queue position edits it -- the others have
+          // no ack entry and `refreshQueuePositions` already no-ops on that.
+          const repos = plan.children.map((c) => c.repoSlug!);
+          const ackCommentId = await acknowledge(plan.children[0], repos);
+          plan.children.forEach((child, i) => {
+            // No sequencing between children beyond the global semaphore.
+            track(drive(child.id, i === 0 ? ackCommentId : null, slots[i]));
+          });
           return;
         }
         case 'run.cancelled': {
           // Unassignment is an issue-level event. A multi-repo ticket has one
-          // child run per repo (D-03/D-12) and all of them stop.
-          const active = store.findActiveRunByIssue(event.issueId);
+          // child run per repo (D-03/D-12) and all of them stop, each under
+          // plan 02's per-state cancel rules: a child with no live process
+          // transitions now, one with a live process gets the cancel-requested
+          // flag, and an already-terminal child is left exactly as it is.
+          //
+          // The parent needs no cancel handling of its own -- its status is
+          // derived from precisely these children. It is filtered out because
+          // it has no state to look up in the transition table.
+          const active = store
+            .findActiveRunByIssue(event.issueId)
+            .filter((run) => run.kind !== 'ticket');
           if (active.length === 0) {
             log.info({ issueId: event.issueId }, 'cancel for an issue with no active run');
             return;
