@@ -44,14 +44,17 @@ import { randomBytes } from 'node:crypto';
 
 import { loadFoundation } from '../infra/index.js';
 import { LinearClientImpl } from '../outbound/linear-client.js';
+import { Notifier, type RunEvent as NotifyEvent } from '../outbound/notify/notifier.js';
+import { SlackChannel } from '../outbound/notify/slack-channel.js';
 import { defaultRoot } from '../infra/config.js';
+import { resolveToggles } from '../domain/types.js';
 import { createSqliteStore } from '../infra/store/sqlite-store.js';
 import { asDomainStore } from '../infra/store/domain-store.js';
 import { createReceiver } from '../ingress/receiver.js';
 import { createRouter, type Router } from '../ingress/router.js';
 import { KEY_SECRET } from '../ingress/registrar.js';
 import { closeTunnel, openTunnel } from '../ingress/tunnel.js';
-import { createScheduler } from '../orchestration/scheduler.js';
+import { createScheduler, type Scheduler } from '../orchestration/scheduler.js';
 import { createQuestions, type Questions } from '../orchestration/questions.js';
 import { createRunEngine, type RunEngine } from '../orchestration/run-engine.js';
 import { recoverAtBoot } from '../orchestration/recovery.js';
@@ -63,6 +66,8 @@ import {
 } from './adapters.js';
 import type { AgentSpawn } from '../execution/supervisor.js';
 import { nonTerminalStates } from '../orchestration/recovery.js';
+import { isTerminal } from '../domain/state-machine.js';
+import type { RepoRun, RunState } from '../domain/types.js';
 import type {
   AgentRunner,
   Config,
@@ -111,6 +116,12 @@ export interface DaemonHandle {
   config: Config;
   store: Store;
   engine: RunEngine;
+  /**
+   * Paused at boot and left that way (07-CONTEXT D-01): nothing may leave `queued` here.
+   * Exposed rather than hidden because plan 05 owns starting it as part of the boot
+   * lifecycle, and the run-path test starts it to walk one run end to end.
+   */
+  scheduler: Scheduler;
   log: Logger;
   /** Plan 05 fills this in with drain + reverse-order shutdown (D-03/D-06). */
   shutdown(): Promise<void>;
@@ -252,6 +263,110 @@ async function resolveStartedStates(
   return resolved;
 }
 
+/**
+ * The fan-out, built here and reached ONLY through the run engine.
+ *
+ * ## Why the Linear comment channel is not in this array
+ *
+ * 05-CONTEXT lists three channels and this constructs two. That is a deliberate deviation,
+ * not an omission: the run engine already posts every Linear comment this product makes,
+ * and it posts them with things `LinearCommentChannel` structurally cannot do — the
+ * acknowledgement is EDITED in place as the queue moves (D-10 / INTK-06), a question is a
+ * threaded reply whose comment id is stored for tier-1 answer correlation, and a
+ * multi-repo ticket gets one rollup instead of one comment per child (D-12 / DELV-07).
+ * `LinearCommentChannel.enabled()` gates on the mapping toggle alone and fires on every
+ * kind, so adding it here would post a SECOND, poorer comment for every milestone on every
+ * ticket — the wall of bot noise D-10 exists to prevent.
+ *
+ * The right resolution is to move the engine's four comment sites onto the channel, which
+ * is a Phase 5/6 redesign and not a wiring change. Recorded in WINDOWS.md.
+ *
+ * ## What is NOT deviated from
+ *
+ * The log channel. `Notifier` constructs its own and emits to it first, unretried and
+ * ungated; there is no argument that removes it (05-CONTEXT D-04 / NOTF-01). That is the
+ * half of the fan-out that matters most here, because it is the half the engine does not
+ * already do.
+ */
+function createDaemonNotifier(o: {
+  config: Config;
+  index: ReadonlyMap<string, string>;
+  log: Logger;
+}): Notifier {
+  const logFn = (fields: Record<string, unknown>, msg: string): void => o.log.info(fields, msg);
+  return new Notifier({
+    log: logFn,
+    channels: [
+      new SlackChannel({
+        // Per-mapping (Phase 1 D-09): a mapping with `notifySlack` off, or with no webhook
+        // configured, returns undefined and the channel gates itself out.
+        webhookUrl: (mappingId: string) => {
+          const mapping = o.config.mappings[mappingId];
+          if (!mapping) return undefined;
+          return resolveToggles(o.config.defaults, mapping).notifySlack
+            ? mapping.slackWebhookUrl
+            : undefined;
+        },
+        log: logFn,
+      }),
+    ],
+  });
+}
+
+/**
+ * `(RepoRun, RunState)` → the notifier's own vocabulary.
+ *
+ * The two sets do not line up and this is where that is admitted. Four of the nine states
+ * are terminal and collapse to one kind; `delivering` reports nothing, because a run that
+ * has begun pushing has not yet done anything a human needs told; and `worktree_ready` has
+ * no state of its own, since the engine transitions straight to `running` once the worktree
+ * exists — one event per transition beats two events for one write.
+ */
+const NOTIFY_KIND: Partial<Record<RunState, 'picked_up' | 'agent_started' | 'question_asked'>> = {
+  preparing: 'picked_up',
+  running: 'agent_started',
+  awaiting_answer: 'question_asked',
+};
+
+function toNotifyEvent(
+  run: RepoRun,
+  detail: string | undefined,
+  index: ReadonlyMap<string, string>,
+): NotifyEvent | null {
+  const base = {
+    runId: run.id,
+    issueId: run.issueId,
+    issueIdentifier: run.issueKey,
+    issueUrl: run.issueUrl,
+    mappingId: index.get(run.repoSlug) ?? '',
+    at: run.updatedAt,
+  };
+
+  if (isTerminal(run.state)) {
+    return {
+      ...base,
+      kind: 'terminal',
+      // The four terminal RunStates ARE the four TerminalRunStates, in the same spelling.
+      state: run.state as 'delivered' | 'partial' | 'failed' | 'cancelled',
+      // ponytail: zero, and honestly so — there is no cost or token column on `runs`, and
+      // inventing one here would be a schema change wearing a wiring change's clothes.
+      // Ceiling: Slack and the log report `$0.0000` on every run until the run row carries
+      // what `classifyOutcome` already computes. Recorded in WINDOWS.md.
+      costUsd: 0,
+      tokensUsed: 0,
+      ...(run.prUrl ? { prUrl: run.prUrl } : {}),
+      ...(run.failureReason ?? detail ? { reason: run.failureReason ?? detail } : {}),
+    };
+  }
+
+  const kind = NOTIFY_KIND[run.state];
+  if (!kind) return null;
+  if (kind === 'question_asked') {
+    return { ...base, kind, question: detail ?? 'a question is waiting on the ticket' };
+  }
+  return { ...base, kind };
+}
+
 export async function bootDaemon(opts: BootOptions = {}): Promise<DaemonHandle> {
   const root = opts.configDir ?? defaultRoot();
 
@@ -309,6 +424,8 @@ export async function bootDaemon(opts: BootOptions = {}): Promise<DaemonHandle> 
   // event the four ingress loop guards then have to drop.
   agent.onProgress((runId, line) => log.info({ runId, progress: line }, 'agent progress'));
 
+  const notifier = createDaemonNotifier({ config, index, log });
+
   const engine = createRunEngine({
     store,
     scheduler,
@@ -318,6 +435,15 @@ export async function bootDaemon(opts: BootOptions = {}): Promise<DaemonHandle> 
     agent,
     worktrees,
     deliverer,
+    // The ONE notification site. `transition()` is the only writer of `runs.state`, so
+    // hanging the fan-out off it makes "every transition is reported" structural rather
+    // than a convention every future edit has to remember.
+    notify: (run, detail) => {
+      const event = toNotifyEvent(run, detail, index);
+      // `emit` never rejects by contract, which is what makes a bare `void` safe here and
+      // is why a transition cannot fail because Slack is down.
+      if (event) void notifier.emit(event);
+    },
     questions: () => questions,
   });
   questions = createQuestions({ store, engine, config, linear, log });
@@ -410,6 +536,7 @@ export async function bootDaemon(opts: BootOptions = {}): Promise<DaemonHandle> 
     config,
     store,
     engine,
+    scheduler,
     log,
     async shutdown(): Promise<void> {
       // Reverse boot order (D-03). Plan 05 adds child-process kill and the in-flight

@@ -76,6 +76,17 @@ export interface RunEngineDeps {
   log: Logger;
   /** Late-bound: questions calls back into the engine, so this breaks the cycle. */
   questions: () => Questions;
+  /**
+   * Called from `transition()` — the single writer of `runs.state` — with the run as it
+   * now is. One call site, deliberately: a notification emitted from a peer site beside
+   * the write is how a path that forgets to log gets added later, and with no dashboard
+   * the log IS the UI (05-CONTEXT D-04). The composition root owns the fan-out and the
+   * vocabulary translation; the engine knows nothing about channels.
+   *
+   * Synchronous and return-less on purpose. The notifier's own contract is that `emit`
+   * never rejects, and a transition must not be able to fail because Slack is down.
+   */
+  notify?: (run: RepoRun, detail?: string) => void;
   now?: () => number;
 }
 
@@ -121,7 +132,9 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
       store.appendRunEvent({ runId, from: run.state, to, at, detail: detail ?? null });
     });
     log.info({ runId, from: run.state, to }, 'run transitioned');
-    return { ...run, state: to, updatedAt: at };
+    const moved: RepoRun = { ...run, state: to, updatedAt: at };
+    deps.notify?.(moved, detail);
+    return moved;
   }
 
   /**
