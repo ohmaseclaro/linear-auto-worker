@@ -85,3 +85,16 @@ post-boot registration.
 
 **Nothing here indicates a broken subsystem.** Every diagnosed cluster is a stale test or a stale
 fixture, against implementations that twelve executed probes found correct (`07-RUNTIME-EVIDENCE.md`).
+
+## Already fixed by the orchestrator (2 of the 4 sqlite-store failures)
+
+- `deliveries WHERE id` -> `delivery_id` — residue of the orchestrator's own T53 fix.
+- `idx_questions_deadline_at` -> `idx_questions_status_deadline` — the test was written against
+  Phase 2's superseded migration; Phase 1's authoritative one uses a composite `(status,
+  deadline_at)` index, which is the better one for the deadline sweep.
+
+Two remain in that suite and need judgment, not a rename:
+- **The WAL assertion cannot pass** (TRAPS T75) — it runs against `:memory:`, where SQLite reports
+  `journal_mode = 'memory'` by definition. Needs a temp-file fixture. **OPS-02's WAL requirement
+  has therefore never actually been verified.**
+- `insertRun -> updateRun -> getRun` round-trip — inspect before assuming a rename.
