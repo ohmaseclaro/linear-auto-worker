@@ -28,8 +28,11 @@ import type {
   ConfigLoader,
   Deliverer,
   DomainEvent,
+  EngineEvent,
+  IngressEvent,
   EventRouter,
   LinearClient,
+  LinearComment,
   LinearIssue,
   Logger,
   Notifier,
@@ -152,19 +155,15 @@ export class InMemoryStore implements Store {
   }
 
   // deliveries — insert-if-absent, atomically (no read-then-write gap), returns true iff new.
-  tryInsertDelivery(deliveryId: string, receivedAt: number): boolean {
+  //
+  // ONE name (T46), matching `sqlite-store.ts`. There used to be a `tryInsertDelivery`
+  // alias here; it made this fake MORE permissive than the real store, which is how a
+  // `receiver.ts` call to a method the real store does not have stayed green through six
+  // phases. A fake that accepts what production rejects hides the bug it exists to catch.
+  recordDelivery(deliveryId: string, receivedAt: number): boolean {
     if (this.deliveries.has(deliveryId)) return false;
     this.deliveries.set(deliveryId, receivedAt);
     return true;
-  }
-  /**
-   * `recordDelivery` — TRAPS T46 settles on this name for the real store; `ports.ts` still
-   * names the interface method `tryInsertDelivery`. Kept as an alias here rather than
-   * renamed, since renaming the interface is Phase 1's own contract-reconciliation call,
-   * not this file's. Flagged under `Contract additions requested`.
-   */
-  recordDelivery(deliveryId: string, receivedAt: number): boolean {
-    return this.tryInsertDelivery(deliveryId, receivedAt);
   }
   pruneDeliveries(olderThan: number): void {
     for (const [id, at] of this.deliveries) {
@@ -403,22 +402,22 @@ export class FakeReceiver implements Receiver {
 }
 
 /**
- * `EventRouter` fake. Scripted: returns queued `DomainEvent` values in order, falling back
- * to `ignored` once drained. Records every delivery it was handed.
+ * `EventRouter` fake. Scripted: returns queued `IngressEvent` values in order, then `null`
+ * once drained — the same "this delivery produced nothing" the real router reports for a
+ * dropped event. Records every delivery it was handed.
  */
 export class FakeEventRouter implements EventRouter {
   readonly delivered: WebhookDelivery[];
-  private readonly queue: DomainEvent[];
+  private readonly queue: IngressEvent[];
 
-  constructor(scripted: DomainEvent[] = []) {
+  constructor(scripted: IngressEvent[] = []) {
     this.delivered = [];
     this.queue = [...scripted];
   }
 
-  route(d: WebhookDelivery): Promise<DomainEvent> {
+  route(d: WebhookDelivery): Promise<IngressEvent | null> {
     this.delivered.push(d);
-    const next = this.queue.shift();
-    return Promise.resolve(next ?? { kind: 'ignored', reason: 'fake event router queue drained' });
+    return Promise.resolve(this.queue.shift() ?? null);
   }
 }
 
@@ -492,7 +491,7 @@ export class FakeScheduler implements Scheduler {
  * `recover`/`drain` were called, so Phase 3 can test its router without the real engine.
  */
 export class FakeRunEngine implements RunEngine {
-  readonly handled: DomainEvent[];
+  readonly handled: EngineEvent[];
   readonly ticks: number[];
   recovered: boolean;
   drainedGraceMs: number | null;
@@ -504,7 +503,7 @@ export class FakeRunEngine implements RunEngine {
     this.drainedGraceMs = null;
   }
 
-  handle(e: DomainEvent): Promise<void> {
+  handle(e: EngineEvent): Promise<void> {
     this.handled.push(e);
     return Promise.resolve();
   }
@@ -581,7 +580,8 @@ export class FakeWorktreeManager implements WorktreeManager {
  * a real clock.
  */
 export class FakeAgentRunner implements AgentRunner {
-  readonly requests: AgentSpawnRequest[];
+  /** Every spawn this fake was asked for, in order. */
+  readonly calls: AgentSpawnRequest[];
   private readonly script: AgentResult[];
   private cursor: number;
   private progressCb: ((runId: RunId, line: string) => void) | null;
@@ -589,14 +589,14 @@ export class FakeAgentRunner implements AgentRunner {
   constructor(
     script: AgentResult[] = [{ status: 'complete', summary: 'fake run', prTitle: 'fake', prBody: 'fake' }],
   ) {
-    this.requests = [];
+    this.calls = [];
     this.script = script;
     this.cursor = 0;
     this.progressCb = null;
   }
 
   run(req: AgentSpawnRequest, signal: AbortSignal): Promise<AgentResult> {
-    this.requests.push(req);
+    this.calls.push(req);
     const idx = Math.min(this.cursor, this.script.length - 1);
     const result = this.script[idx]!;
     this.cursor += 1;
@@ -668,8 +668,15 @@ export class FakeDeliverer implements Deliverer {
  * on the stored comment id and never on recency.
  */
 export class FakeLinearClient implements LinearClient {
-  readonly comments: Array<{ issueId: IssueId; body: string; parentId?: string; id: string }>;
+  readonly comments: Array<{
+    issueId: IssueId;
+    body: string;
+    parentId?: string;
+    id: string;
+    createdAt: string;
+  }>;
   readonly stateChanges: Array<{ id: IssueId; stateType: 'started' | 'review' }>;
+  readonly subscribers: Array<{ issueId: IssueId; userId: string }>;
   private readonly issues: Map<IssueId, LinearIssue>;
   private readonly webhooks: Array<{
     id: string;
@@ -685,6 +692,7 @@ export class FakeLinearClient implements LinearClient {
   constructor(seed?: { issues?: LinearIssue[]; botUser?: { id: string; name: string } }) {
     this.comments = [];
     this.stateChanges = [];
+    this.subscribers = [];
     this.issues = new Map((seed?.issues ?? []).map((i) => [i.id, i]));
     this.webhooks = [];
     this.bot = seed?.botUser ?? { id: 'fake-bot-user', name: 'Fake Bot' };
@@ -710,8 +718,32 @@ export class FakeLinearClient implements LinearClient {
   createComment(issueId: IssueId, body: string, parentId?: string): Promise<{ id: string }> {
     this.commentCounter += 1;
     const id = `fake-comment-${this.commentCounter}`;
-    this.comments.push({ issueId, body, parentId, id });
+    this.comments.push({ issueId, body, parentId, id, createdAt: new Date().toISOString() });
     return Promise.resolve({ id });
+  }
+  updateComment(commentId: string, body: string): Promise<void> {
+    const c = this.comments.find((x) => x.id === commentId);
+    if (!c) return Promise.reject(new LinearApiError(`fake: no such comment ${commentId}`));
+    c.body = body;
+    return Promise.resolve();
+  }
+  addSubscriber(issueId: IssueId, userId: string): Promise<void> {
+    this.subscribers.push({ issueId, userId });
+    return Promise.resolve();
+  }
+  listComments(issueId: IssueId, since?: string): Promise<LinearComment[]> {
+    return Promise.resolve(
+      this.comments
+        .filter((c) => c.issueId === issueId && (since === undefined || c.createdAt > since))
+        .map((c) => ({
+          id: c.id,
+          parentId: c.parentId ?? null,
+          body: c.body,
+          authorId: this.bot.id,
+          authorName: this.bot.name,
+          createdAt: c.createdAt,
+        })),
+    );
   }
   listWebhooks(): Promise<
     Array<{ id: string; label: string | null; url: string; enabled: boolean; resourceTypes: string[] }>

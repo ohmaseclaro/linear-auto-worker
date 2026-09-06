@@ -15,14 +15,12 @@
 // copy is how the wire contract and the parser drift apart, and `parseAgentResult` in that
 // same module is what the orchestration layer narrows the reply with.
 //
-// CONTESTED — Phase 7 reconciles (TRAPS T58). `src/domain/agent-result.ts` enumerates
-// `complete | needs_input | failed` with `assumptionIfUnanswered`; Phase 4's live probe
-// against CLI 2.1.259 returned `delivered | needs_input` with `assumption`. The domain and
-// `src/orchestration/run-engine.ts` agree, so the domain wins here and this module stops
-// being a third opinion. One consumer still disagrees and is named in 04-03-SUMMARY.md
-// under `Contract additions requested`: `verdict.ts` reads `structured.assumption`, which
-// this schema calls `assumptionIfUnanswered`. Note `additionalProperties: false` — the
-// agent physically cannot return a field this schema does not list.
+// SETTLED (07-02, TRAPS T58/T64). One shape survives: the domain's
+// `complete | needs_input | failed`, whose question field is now `assumption` — the name
+// `verdict.ts` reads and the name CLI 2.1.259 was observed returning. This module defines
+// no schema of its own and never did; it re-exports the domain value under the name
+// `execute-run.ts` imports. `additionalProperties: false` still means the agent cannot
+// return a field the domain schema does not list, so add there, never here.
 import { AgentResultSchema } from '../domain/agent-result.js';
 
 /**

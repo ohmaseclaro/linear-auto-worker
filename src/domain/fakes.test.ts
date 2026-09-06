@@ -25,7 +25,8 @@ import {
   RecordingNotifier,
 } from './fakes.js';
 import { resolveToggles } from './types.js';
-import type { RepoRun, RepoMapping, LinearIssue } from './types.js';
+import type { RepoRun, RepoMapping } from './types.js';
+import type { LinearIssue } from './ports.js';
 
 function makeRepoRun(overrides: Partial<RepoRun> = {}): RepoRun {
   return {
@@ -145,13 +146,13 @@ test('FakeReceiver.deliver pushes a delivery through the stored callback with no
   assert.equal(received.length, 1);
 });
 
-test('FakeEventRouter replays the scripted queue in order, then falls back to ignored', async () => {
+test('FakeEventRouter replays the scripted queue in order, then reports nothing', async () => {
   const router = new FakeEventRouter([{ kind: 'issue.assigned', issueId: 'issue-1' }]);
   const delivery = { deliveryId: 'd1', eventType: 'Issue', action: 'update' as const, timestamp: 1, body: {} };
   const first = await router.route(delivery);
   const second = await router.route(delivery);
-  assert.equal(first.kind, 'issue.assigned');
-  assert.equal(second.kind, 'ignored');
+  assert.equal(first?.kind, 'issue.assigned');
+  assert.equal(second, null);
   assert.equal(router.delivered.length, 2);
 });
 
@@ -205,7 +206,7 @@ test('FakeWorktreeManager.gc drops worktrees whose run is no longer live', async
 
 test('FakeAgentRunner returns the scripted results in order, then repeats the last', async () => {
   const runner = new FakeAgentRunner([
-    { status: 'needs_input', summary: 'need input', question: 'q?', assumptionIfUnanswered: 'assume yes' },
+    { status: 'needs_input', summary: 'need input', question: 'q?', assumption: 'assume yes' },
     { status: 'complete', summary: 'done', prTitle: 't', prBody: 'b' },
   ]);
   const first = await runner.run(FAKE_AGENT_SPAWN_REQUEST, new AbortController().signal);
@@ -214,7 +215,7 @@ test('FakeAgentRunner returns the scripted results in order, then repeats the la
   assert.equal(first.status, 'needs_input');
   assert.equal(second.status, 'complete');
   assert.equal(third.status, 'complete'); // repeats last once exhausted
-  assert.equal(runner.requests.length, 3);
+  assert.equal(runner.calls.length, 3);
 });
 
 test('FakeAgentRunner resolves cancelled, never throws, when the signal is already aborted', async () => {
@@ -257,6 +258,7 @@ test('FakeLinearClient.createComment returns a distinct id per call, retained fo
     teamId: 'team-1',
     stateId: 'state-1',
     stateType: 'started',
+    updatedAt: '2026-01-01T00:00:00.000Z',
   };
   const client = new FakeLinearClient({ issues: [issue] });
   const first = await client.createComment('issue-1', 'hello');

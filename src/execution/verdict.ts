@@ -29,7 +29,7 @@ export interface WorktreeEvidence {
   uncommittedPaths?: string[];
 }
 
-/** The shape `AGENT_RESULT_JSON_SCHEMA` constrains the agent's final turn to. */
+/** The shape `AgentResultSchema` constrains the agent's final turn to. */
 export interface AgentStructuredOutput {
   status?: string;
   question?: string;
@@ -77,11 +77,10 @@ function asStructured(value: unknown): AgentStructuredOutput | undefined {
  * attacker-influenceable ticket text (T-04-29). Delegates to `parseAgentResult`, the
  * domain's single validator, rather than re-checking fields here.
  *
- * Two shapes are in play and Phase 7 settles which survives (T58): the wire schema this
- * phase verified live emits `status: "delivered"` with `assumption`, while the domain
- * type expects `complete` with `assumptionIfUnanswered`. Both are normalised to the
- * domain's names before validation, so neither branch is silently rejected in the
- * meantime and no second copy of the contract is invented here.
+ * T58/T64 are settled: there is ONE shape, in `src/domain/agent-result.ts`, and its
+ * question field is `assumption` — the name this module always read and the name the
+ * live CLI probe returned. The normalisation that used to bridge the two names is gone;
+ * only the summary default below survives, and for a different reason.
  */
 function validateNeedsInput(raw: AgentStructuredOutput): { question: string; assumption: string } {
   const parsed = parseAgentResult({
@@ -92,12 +91,12 @@ function validateNeedsInput(raw: AgentStructuredOutput): { question: string; ass
     // absence costs nothing.
     summary: raw.summary ?? '(the agent returned no summary)',
     question: raw.question ?? '',
-    assumptionIfUnanswered: raw.assumption ?? '',
+    assumption: raw.assumption ?? '',
   });
   if (parsed.status !== 'needs_input') {
     throw new Error(`expected needs_input, got ${parsed.status}`);
   }
-  return { question: parsed.question, assumption: parsed.assumptionIfUnanswered };
+  return { question: parsed.question, assumption: parsed.assumption };
 }
 
 export function classifyOutcome(o: {

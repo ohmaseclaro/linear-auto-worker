@@ -80,7 +80,7 @@ export interface Store {
    * whole point: a check-then-insert would let two concurrent deliveries of the same id
    * both pass.
    */
-  tryInsertDelivery(deliveryId: string, receivedAt: number): boolean;
+  recordDelivery(deliveryId: string, receivedAt: number): boolean;
   pruneDeliveries(olderThan: number): void;
 
   // kv
@@ -141,27 +141,53 @@ export interface Receiver {
  * facts, named after what Linear did. The last four are what Phase 6's run engine switches
  * on: intentions, named after what the daemon should do. They share no `kind`.
  *
- * That gap is deliberate but it is not free: an ingress event handed straight to the
- * engine falls through its `default:` arm, so the daemon boots clean, verifies clean and
- * processes nothing. Wiring the translation — including which `comment.created` is an
- * answer to which pending question (03-CONTEXT D-05's `parentId` correlation) — is Phase
- * 7's job at the composition root. It does not belong in the contract, because deciding
- * that a comment is an answer requires the store, and the contract has no dependencies.
+ * That gap used to be free to ignore: both vocabularies were one flat union, so an
+ * ingress event handed straight to the engine fell through its `default:` arm and the
+ * daemon booted clean, verified clean and processed nothing (T45). The two halves are
+ * therefore SPLIT — `EventRouter` produces an `IngressEvent`, `RunEngine.handle` consumes
+ * an `EngineEvent`, and the two are not assignable. Skipping the translation is now a
+ * compile error at the composition root instead of a silent no-op in production.
+ *
+ * The translation itself stays out of the contract, because deciding that a comment is an
+ * answer requires the store and the contract has no dependencies. Its five cases:
+ *
+ * | ingress                        | engine                                       |
+ * |--------------------------------|----------------------------------------------|
+ * | `issue.assigned`               | `run.requested`                              |
+ * | `issue.unassigned`             | `run.cancelled` (reason: bot unassigned)     |
+ * | `comment.created` + open q.    | `question.answered` (parentId correlation)   |
+ * | `comment.created`, no match    | `ignored`                                    |
+ * | anything else                  | `ignored`                                    |
  */
-export type DomainEvent =
-  // ── produced by ingress (Phase 3) ──
+export type IngressEvent =
   | { kind: 'issue.assigned'; issueId: IssueId; deliveryId?: string }
   | { kind: 'issue.unassigned'; issueId: IssueId; deliveryId?: string }
-  | { kind: 'comment.created'; issueId: IssueId; commentId: string; parentId?: string; deliveryId?: string }
-  // ── consumed by the run engine (Phase 6) ──
+  | { kind: 'comment.created'; issueId: IssueId; commentId: string; parentId?: string; deliveryId?: string };
+
+export type EngineEvent =
   | { kind: 'run.requested'; issueId: IssueId }
   | { kind: 'run.cancelled'; issueId: IssueId; reason: string }
-  | { kind: 'question.answered'; questionId: string; answer: string; authorName: string }
+  | { kind: 'question.answered'; questionId: string; answer: string; authorName: string | null }
+  /**
+   * Resume a run with an input that is NOT an answer to a stored question.
+   * QA-07's disabled-question-flow branch has no question row by construction
+   * (06-03), so it cannot key off `question.answered`, whose handler looks the
+   * row up and requires status `open`.
+   */
+  | { kind: 'run.resumed'; runId: RunId; input: string; reason: 'question_flow_disabled' }
   | { kind: 'ignored'; reason: string };
 
+export type DomainEvent = IngressEvent | EngineEvent;
+
 export interface EventRouter {
-  /** Re-fetches canonical issue state; never decides from `delivery.body`. */
-  route(d: WebhookDelivery): Promise<DomainEvent>;
+  /**
+   * Re-fetches canonical issue state; never decides from `delivery.body`.
+   * `null` is "this delivery produced nothing" — a dropped self-event, a duplicate,
+   * an action nobody subscribes to. That is what the real router does with a drop, and
+   * it is deliberately not an `ignored` event: `ignored` is an ENGINE vocabulary word,
+   * and ingress does not get to speak it.
+   */
+  route(d: WebhookDelivery): Promise<IngressEvent | null>;
 }
 
 // ── L2 ORCHESTRATION ─────────────────────────────────────────────────────────
@@ -180,7 +206,7 @@ export interface Scheduler {
 }
 
 export interface RunEngine {
-  handle(e: DomainEvent): Promise<void>;
+  handle(e: EngineEvent): Promise<void>;
   /** Boot sweep: reconcile every non-terminal row against reality. */
   recover(): Promise<void>;
   /** 60s tick: expire questions past deadline and resume with the assumption. */
@@ -258,6 +284,24 @@ export interface LinearIssue {
   teamId: string | null;
   stateId: string;
   stateType: string; // "started" | ...
+  /**
+   * ISO 8601 UTC, compared lexicographically against the poll watermark. Without
+   * it the reconciliation poll either re-enqueues every assigned issue every five
+   * minutes or needs a second query (06-04).
+   */
+  updatedAt: string;
+}
+
+/** A Linear comment, projected to what answer correlation reads. */
+export interface LinearComment {
+  id: string;
+  /** Threaded replies carry the parent comment id. */
+  parentId: string | null;
+  body: string;
+  authorId: string | null;
+  authorName: string | null;
+  /** ISO 8601 UTC, compared lexicographically against the poll watermark. */
+  createdAt: string;
 }
 
 export interface LinearClient {
@@ -269,6 +313,21 @@ export interface LinearClient {
   listAssignedOpenIssues(botUserId: string): Promise<LinearIssue[]>;
   setIssueState(id: IssueId, stateType: 'started' | 'review'): Promise<void>;
   createComment(issueId: IssueId, body: string, parentId?: string): Promise<{ id: string }>;
+  /**
+   * D-10 / INTK-06: the queue-position comment is EDITED, never re-posted. A queue
+   * that moves three times must leave one comment on the ticket, not four.
+   */
+  updateComment(commentId: string, body: string): Promise<void>;
+  /**
+   * INTK-03. Assignee-based pickup takes the ticket out of the operator's
+   * "Assigned to me" view for the whole run.
+   */
+  addSubscriber(issueId: IssueId, userId: string): Promise<void>;
+  /**
+   * D-05's comment half, for the reconciliation poll. `since` is the watermark:
+   * comments at or before it were covered by a previous clean pass.
+   */
+  listComments(issueId: IssueId, since?: string): Promise<LinearComment[]>;
   // webhook CRUD, used only by WebhookRegistrar. Never log one of these objects — the
   // fragment selects the signing secret (T23).
   listWebhooks(): Promise<

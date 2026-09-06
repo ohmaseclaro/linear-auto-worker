@@ -149,13 +149,19 @@ export interface PendingQuestion {
   id: string;
   runId: RunId;
   text: string;
-  /** The agent's own `assumptionIfUnanswered`, stated before it knew if anyone would answer. */
+  /** The agent's own `assumption`, stated before it knew if anyone would answer. */
   assumption: string;
   linearCommentId: string | null; // set after the comment is posted
   askedAt: number;
   deadlineAt: number;
   status: 'open' | 'answered' | 'timed_out' | 'cancelled';
   answer: string | null;
+  /**
+   * Display name of the human whose comment was correlated to this question, or
+   * `null` for a deadline expiry. It is the only record of WHO changed a run's
+   * course mid-flight, so it is a column rather than a log line (`answered_by`).
+   */
+  answeredBy: string | null;
 }
 
 // ── Configuration (CONF-01, CONF-02) ─────────────────────────────────────────
@@ -229,6 +235,18 @@ export interface Config {
   /** Global cap on simultaneous spawned Claude sessions. Default 3. Never per-mapping. */
   concurrency: number;
   maxQuestionRounds: number;
+  /**
+   * The single operator's Linear user id, subscribed to every picked-up ticket
+   * (INTK-03) so assignee-based pickup does not take the ticket out of their
+   * "Assigned to me" view.
+   *
+   * Optional, and the reason is worth reading before making it required: the
+   * daemon authenticates as the BOT, so `viewer()` — the wizard's only source of
+   * a user id — returns the bot, not the operator. Nothing writes this field
+   * today. The subscribe call is skipped and WARNED when it is absent rather
+   * than sent `undefined`; a wizard prompt is what closes it (07-CONTEXT P8).
+   */
+  operatorUserId?: string;
   maxTurns: number;
   maxBudgetUsd?: number;
   worktreeRoot: string;
@@ -301,6 +319,10 @@ export const CONFIG_ROOT = DEFAULT_PATHS.root;
 export const CONFIG_PATH = DEFAULT_PATHS.configFile;
 export const ENV_PATH = DEFAULT_PATHS.envFile;
 export const DB_PATH = DEFAULT_PATHS.dbFile;
+// ponytail: `logDir` lives on ConfigPaths, and the run engine needs only the
+// resolved default. Thread a whole ConfigPaths if the root ever stops being
+// `~/.linear-auto-worker` — this is the same DEFAULT_PATHS, not a second guess.
+export const LOG_DIR = DEFAULT_PATHS.logDir;
 
 // ── Bot comment markers ──────────────────────────────────────────────────────
 //
