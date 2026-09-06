@@ -173,6 +173,26 @@ The bot-author drop lives inside `correlate()` rather than at the ingress bounda
 recovery — which lists comments straight from the API and never passes the four ingress guards —
 inherits it for free.
 
+## PASS — the boot smoke actually catches a T53 regression (falsified, per T71)
+
+The T53 fix is only worth something if a future regression is caught. Verified by deliberately
+reintroducing the exact defect — `SELECT value FROM kv WHERE key = ?` — and running the smoke:
+
+```
+exit=1
+  at Object.kvGet (src/infra/store/sqlite-store.ts:290)
+  at Object.kvGet (src/infra/store/domain-store.ts:113)
+  at bootDaemon (src/cli/daemon.ts:211)
+  at async main (scripts/boot-smoke.ts:64)
+```
+
+Reverted; smoke green again. The fixture uses `createSqliteStore` against a real better-sqlite3
+database (its header cites T53 by name), so the class of defect that was invisible to `tsc` and to
+the unit suite now fails at boot with a precise stack trace.
+
+**This is T71 applied to the orchestrator's own work**, not just the agents': an instrument that
+has never been shown to fail is not known to work.
+
 ## RESOLVED — T53: fixed by the orchestrator after 07-02 reached tsc exit 0
 
 **The decisive result of this milestone.** After 07-02 drove the typecheck from 68 errors to
