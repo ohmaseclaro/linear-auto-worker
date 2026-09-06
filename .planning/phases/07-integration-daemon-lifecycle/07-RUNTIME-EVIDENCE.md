@@ -108,6 +108,26 @@ practical form of SC3, and the property whose violation turns "three open questi
 Double release is safe because the scheduler tracks an **admitted set, not a counter**, so a
 duplicate release cannot over-credit capacity and a resync cannot drift.
 
+## PASS — NOTF-01 / NOTF-06 / D-04: the log channel is structural
+
+Executed `createNotifier({ log, channels: [] })` — **zero** additional channels:
+
+```
+channels supplied: 0
+log lines emitted: 2
+sample: {"fields":{"runId","issueId","mappingId","kind"},"msg":"run.terminal"}
+```
+
+The log survives having every channel removed, because `Notifier` builds it internally and
+accepts only *additional* channels. There is no log call site to forget — which is the property
+D-04 asked for and stronger than "an array whose first entry is a LogChannel", a convention a
+caller can violate.
+
+A channel whose `send` throws does **not** fail the run and does not propagate — NOTF-06 holds.
+
+The five milestone kinds are `picked_up`, `worktree_ready`, `agent_started`, `question_asked`,
+`terminal`, prefixed `run.` by the channel — matching D-01's "milestones only, 4-6 per run".
+
 ## RESOLVED — T53: fixed by the orchestrator after 07-02 reached tsc exit 0
 
 **The decisive result of this milestone.** After 07-02 drove the typecheck from 68 errors to
