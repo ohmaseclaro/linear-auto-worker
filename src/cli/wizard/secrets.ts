@@ -8,6 +8,9 @@
  */
 import { password } from '@inquirer/prompts';
 import { LinearClient } from '@linear/sdk';
+import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
+import { dirname, join } from 'node:path';
 
 /** Uniform outcome for both secret acquisitions: either a value, or an operator-actionable fix. */
 export type SecretResult<T> = { ok: true; value: T } | { ok: false; fix: string };
@@ -107,4 +110,134 @@ export async function acquireLinearKey(
   }
 
   return { ok: true, value: { key, source, linearClient } };
+}
+
+// ---------------------------------------------------------------------------
+// ngrok authtoken
+// ---------------------------------------------------------------------------
+
+const NGROK_TOKEN_FIX =
+  'An ngrok authtoken is required. Copy it from https://dashboard.ngrok.com/get-started/your-authtoken ' +
+  '(or run `ngrok config add-authtoken <token>` first) and re-run setup';
+
+/**
+ * Where the ngrok CLI keeps its config. The XDG path is the documented one; ngrok v3 on
+ * macOS actually writes to Application Support, so both are checked in order.
+ * The SDK reads NEITHER (T10) — whatever is found here must be copied into `.env`.
+ */
+export const NGROK_YAML_PATHS: readonly string[] = [
+  join(homedir(), '.config', 'ngrok', 'ngrok.yml'),
+  join(homedir(), 'Library', 'Application Support', 'ngrok', 'ngrok.yml'),
+];
+
+export interface NgrokTokenDeps {
+  prompt?: () => Promise<string>;
+  yamlPaths?: readonly string[];
+}
+
+const promptNgrokToken = (): Promise<string> =>
+  password({ message: 'ngrok authtoken (dashboard.ngrok.com → Your Authtoken):', mask: true });
+
+/**
+ * Pull `authtoken:` out of an ngrok config file.
+ *
+ * ponytail: a regex, not a YAML parser — the key sits on its own line whether it is at the
+ * top level or nested under `agent:`, and one scalar does not justify a new dependency.
+ */
+async function readAuthtokenFromYaml(path: string): Promise<string | null> {
+  let raw: string;
+  try {
+    raw = await readFile(path, 'utf8');
+  } catch {
+    // Best effort: a missing OR malformed config is simply "not found". The error is
+    // swallowed rather than logged — this file's contents are themselves a secret.
+    return null;
+  }
+  const match = /^[ \t]*authtoken:[ \t]*(\S+)/m.exec(raw);
+  if (!match) return null;
+  const [, captured = ''] = match;
+  const token = captured.replace(/^["']|["']$/g, '').trim();
+  return token || null;
+}
+
+/**
+ * Obtain the ngrok authtoken, bothering the operator only as a last resort.
+ *
+ * As with the Linear key, `source === 'existing'` means the value is already in `.env`
+ * and must not be handed to `writeSecretsEnv`; `'yaml'` and `'prompted'` must be.
+ */
+export async function acquireNgrokToken(
+  existingEnv: Record<string, string>,
+  deps: NgrokTokenDeps = {},
+): Promise<SecretResult<{ token: string; source: 'existing' | 'yaml' | 'prompted' }>> {
+  const existing = existingEnv.NGROK_AUTHTOKEN?.trim();
+  if (existing) return { ok: true, value: { token: existing, source: 'existing' } };
+
+  for (const path of deps.yamlPaths ?? NGROK_YAML_PATHS) {
+    const token = await readAuthtokenFromYaml(path);
+    if (token) return { ok: true, value: { token, source: 'yaml' } };
+  }
+
+  const typed = (await (deps.prompt ?? promptNgrokToken)()).trim();
+  // Fail here, where the fix can be named. An empty or whitespace token reaches the tunnel
+  // as `code: "GenericFailure"` — indistinguishable from having no credential at all (T25).
+  if (!typed) return { ok: false, fix: NGROK_TOKEN_FIX };
+  return { ok: true, value: { token: typed, source: 'prompted' } };
+}
+
+// ---------------------------------------------------------------------------
+// .env persistence
+// ---------------------------------------------------------------------------
+
+const ENV_LINE = /^[ \t]*(?:export[ \t]+)?([A-Za-z_][A-Za-z0-9_]*)[ \t]*=[ \t]*(.*)$/;
+
+/** Parse an existing `.env` into the `existingEnv` both acquire functions take. Missing file → `{}`. */
+export async function readSecretsEnv(envPath: string): Promise<Record<string, string>> {
+  let raw: string;
+  try {
+    raw = await readFile(envPath, 'utf8');
+  } catch {
+    return {};
+  }
+  const out: Record<string, string> = {};
+  for (const line of raw.split('\n')) {
+    const [, name, value = ''] = ENV_LINE.exec(line) ?? [];
+    if (name) out[name] = value.trim().replace(/^["']|["']$/g, '');
+  }
+  return out;
+}
+
+/**
+ * Merge the newly-obtained secrets into `.env` and leave it at mode 0600.
+ *
+ * Pass only secrets whose `source` was NOT `'existing'`. Unrelated lines a later phase may
+ * have added are preserved; keys omitted from `secrets` are left exactly as they are.
+ */
+export async function writeSecretsEnv(
+  envPath: string,
+  secrets: { LINEAR_API_KEY?: string; NGROK_AUTHTOKEN?: string },
+): Promise<void> {
+  let existing = '';
+  try {
+    existing = await readFile(envPath, 'utf8');
+  } catch {
+    // New file.
+  }
+  const lines = existing ? existing.split('\n') : [];
+
+  for (const [key, value] of Object.entries(secrets)) {
+    if (value === undefined) continue;
+    // ponytail: no quoting — Linear keys and ngrok tokens are `[A-Za-z0-9_]` only.
+    const line = `${key}=${value}`;
+    const at = lines.findIndex((l) => ENV_LINE.exec(l)?.[1] === key);
+    if (at >= 0) lines[at] = line;
+    else lines.push(line);
+  }
+  while (lines.at(-1)?.trim() === '') lines.pop();
+
+  await mkdir(dirname(envPath), { recursive: true });
+  await writeFile(envPath, `${lines.join('\n')}\n`, { mode: 0o600 });
+  // Unconditional: `mode` above applies only when the file is CREATED, so a `.env` that
+  // already existed at 0644 would otherwise stay world-readable after a merge.
+  await chmod(envPath, 0o600);
 }

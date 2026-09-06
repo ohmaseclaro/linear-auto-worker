@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -254,7 +254,6 @@ test('writeSecretsEnv: creates the .env at mode 0600', async () => {
 
 test('writeSecretsEnv: merges in place, preserving unrelated lines, and re-chmods an existing file', async () => {
   const envPath = await tmpFile('.env', 'SOME_OTHER=keep-me\nLINEAR_API_KEY=old\n');
-  const { chmod } = await import('node:fs/promises');
   await chmod(envPath, 0o644);
 
   await writeSecretsEnv(envPath, { LINEAR_API_KEY: 'new', NGROK_AUTHTOKEN: 't2' });
