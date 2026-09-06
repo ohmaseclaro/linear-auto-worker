@@ -521,3 +521,241 @@ export class FakeRunEngine implements RunEngine {
     return Promise.resolve();
   }
 }
+
+// ── L3 EXECUTION ─────────────────────────────────────────────────────────────
+
+/**
+ * `WorktreeManager` fake. Synthesises a path string under a fixed root — no filesystem
+ * touched, ever.
+ */
+export class FakeWorktreeManager implements WorktreeManager {
+  private readonly worktrees: Map<RunId, Worktree>;
+  private readonly root: string;
+
+  constructor(root = '/fake/worktrees') {
+    this.worktrees = new Map();
+    this.root = root;
+  }
+
+  create(runId: RunId, repo: RepoMapping, branch: string): Promise<Worktree> {
+    const wt: Worktree = {
+      runId,
+      repoDir: repo.repoDir,
+      path: `${this.root}/${runId}`,
+      branch,
+      baseBranch: repo.baseBranch,
+    };
+    this.worktrees.set(runId, wt);
+    return Promise.resolve(wt);
+  }
+  remove(runId: RunId): Promise<void> {
+    this.worktrees.delete(runId);
+    return Promise.resolve();
+  }
+  exists(runId: RunId): Promise<boolean> {
+    return Promise.resolve(this.worktrees.has(runId));
+  }
+  /** Boot GC: drop worktrees with no non-terminal run, returning the paths dropped. */
+  gc(liveRunIds: Set<RunId>): Promise<string[]> {
+    const removed: string[] = [];
+    for (const [runId, wt] of this.worktrees) {
+      if (!liveRunIds.has(runId)) {
+        removed.push(wt.path);
+        this.worktrees.delete(runId);
+      }
+    }
+    return Promise.resolve(removed);
+  }
+}
+
+/**
+ * `AgentRunner` fake — the highest-bug-density path in the project made testable with no
+ * Claude process and no network. Scripted with an array of `AgentResult`s returned in
+ * order, repeating the last once exhausted; scripting `needs_input` then `complete` drives
+ * a run from running through the parked state and back.
+ *
+ * Honours the `AbortSignal` as an OUTCOME, not an error: aborted-before-call or
+ * aborted-while-pending both resolve to `{ status: 'cancelled' }`, never a throw. The
+ * pending window is a `queueMicrotask` tick, not a timer — long enough for a synchronous
+ * `controller.abort()` right after `run()` to race the listener, never long enough to touch
+ * a real clock.
+ */
+export class FakeAgentRunner implements AgentRunner {
+  readonly requests: AgentSpawnRequest[];
+  private readonly script: AgentResult[];
+  private cursor: number;
+  private progressCb: ((runId: RunId, line: string) => void) | null;
+
+  constructor(
+    script: AgentResult[] = [{ status: 'complete', summary: 'fake run', prTitle: 'fake', prBody: 'fake' }],
+  ) {
+    this.requests = [];
+    this.script = script;
+    this.cursor = 0;
+    this.progressCb = null;
+  }
+
+  run(req: AgentSpawnRequest, signal: AbortSignal): Promise<AgentResult> {
+    this.requests.push(req);
+    const idx = Math.min(this.cursor, this.script.length - 1);
+    const result = this.script[idx]!;
+    this.cursor += 1;
+
+    if (signal.aborted) {
+      return Promise.resolve({ status: 'cancelled' });
+    }
+    return new Promise((resolve) => {
+      let settled = false;
+      const onAbort = () => {
+        if (settled) return;
+        settled = true;
+        resolve({ status: 'cancelled' });
+      };
+      signal.addEventListener('abort', onAbort, { once: true });
+      queueMicrotask(() => {
+        if (settled) return;
+        settled = true;
+        signal.removeEventListener('abort', onAbort);
+        resolve(result);
+      });
+    });
+  }
+
+  onProgress(cb: (runId: RunId, line: string) => void): void {
+    this.progressCb = cb;
+  }
+  /** Test helper: emit a progress line as if the child process wrote one. */
+  emitProgress(runId: RunId, line: string): void {
+    this.progressCb?.(runId, line);
+  }
+}
+
+/**
+ * `Deliverer` fake. A repeated call for the SAME worktree returns the same `PullRequest`
+ * rather than minting a second one — the interface documents delivery as idempotent, and a
+ * fake that double-delivered would hide the bug it exists to surface.
+ */
+export class FakeDeliverer implements Deliverer {
+  readonly calls: Array<{ wt: Worktree; repo: RepoMapping; pr: { title: string; body: string } }>;
+  private readonly byWorktreePath: Map<string, PullRequest>;
+  private counter: number;
+
+  constructor() {
+    this.calls = [];
+    this.byWorktreePath = new Map();
+    this.counter = 0;
+  }
+
+  deliver(wt: Worktree, repo: RepoMapping, pr: { title: string; body: string }): Promise<PullRequest> {
+    this.calls.push({ wt, repo, pr });
+    const existing = this.byWorktreePath.get(wt.path);
+    if (existing) return Promise.resolve(existing);
+    this.counter += 1;
+    const created: PullRequest = {
+      url: `https://github.com/${repo.repoSlug}/pull/${this.counter}`,
+      number: this.counter,
+    };
+    this.byWorktreePath.set(wt.path, created);
+    return Promise.resolve(created);
+  }
+}
+
+// ── L4 OUTBOUND ──────────────────────────────────────────────────────────────
+
+/**
+ * `LinearClient` fake. An in-memory issue map seeded through the constructor.
+ * `createComment` returns and retains a DISTINCT id per call — question correlation depends
+ * on the stored comment id and never on recency.
+ */
+export class FakeLinearClient implements LinearClient {
+  readonly comments: Array<{ issueId: IssueId; body: string; parentId?: string; id: string }>;
+  readonly stateChanges: Array<{ id: IssueId; stateType: 'started' | 'review' }>;
+  private readonly issues: Map<IssueId, LinearIssue>;
+  private readonly webhooks: Array<{
+    id: string;
+    label: string | null;
+    url: string;
+    enabled: boolean;
+    resourceTypes: string[];
+  }>;
+  private readonly bot: { id: string; name: string };
+  private commentCounter: number;
+  private webhookCounter: number;
+
+  constructor(seed?: { issues?: LinearIssue[]; botUser?: { id: string; name: string } }) {
+    this.comments = [];
+    this.stateChanges = [];
+    this.issues = new Map((seed?.issues ?? []).map((i) => [i.id, i]));
+    this.webhooks = [];
+    this.bot = seed?.botUser ?? { id: 'fake-bot-user', name: 'Fake Bot' };
+    this.commentCounter = 0;
+    this.webhookCounter = 0;
+  }
+
+  viewer(): Promise<{ id: string; name: string }> {
+    return Promise.resolve(this.bot);
+  }
+  getIssue(id: IssueId): Promise<LinearIssue> {
+    const issue = this.issues.get(id);
+    if (!issue) return Promise.reject(new LinearApiError(`fake: no such issue ${id}`));
+    return Promise.resolve(issue);
+  }
+  listAssignedOpenIssues(botUserId: string): Promise<LinearIssue[]> {
+    return Promise.resolve([...this.issues.values()].filter((i) => i.assigneeId === botUserId));
+  }
+  setIssueState(id: IssueId, stateType: 'started' | 'review'): Promise<void> {
+    this.stateChanges.push({ id, stateType });
+    return Promise.resolve();
+  }
+  createComment(issueId: IssueId, body: string, parentId?: string): Promise<{ id: string }> {
+    this.commentCounter += 1;
+    const id = `fake-comment-${this.commentCounter}`;
+    this.comments.push({ issueId, body, parentId, id });
+    return Promise.resolve({ id });
+  }
+  listWebhooks(): Promise<
+    Array<{ id: string; label: string | null; url: string; enabled: boolean; resourceTypes: string[] }>
+  > {
+    return Promise.resolve([...this.webhooks]);
+  }
+  createWebhook(i: {
+    label: string;
+    url: string;
+    teamId: string;
+    resourceTypes: string[];
+  }): Promise<{ id: string; secret: string }> {
+    this.webhookCounter += 1;
+    const id = `fake-webhook-${this.webhookCounter}`;
+    const secret = `fake-secret-${this.webhookCounter}`;
+    this.webhooks.push({ id, label: i.label, url: i.url, enabled: true, resourceTypes: i.resourceTypes });
+    return Promise.resolve({ id, secret });
+  }
+  updateWebhook(id: string, i: { url?: string; enabled?: boolean; resourceTypes?: string[] }): Promise<void> {
+    const wh = this.webhooks.find((w) => w.id === id);
+    if (wh) Object.assign(wh, i);
+    return Promise.resolve();
+  }
+  deleteWebhook(id: string): Promise<void> {
+    const idx = this.webhooks.findIndex((w) => w.id === id);
+    if (idx >= 0) this.webhooks.splice(idx, 1);
+    return Promise.resolve();
+  }
+}
+
+/**
+ * `Notifier` fake. Never throws, under any circumstance — the real notifier's contract is
+ * that a channel failing never fails the run, and a fake that CAN throw teaches the
+ * opposite lesson to every layer built against it.
+ */
+export class RecordingNotifier implements Notifier {
+  readonly events: RunEvent[];
+
+  constructor() {
+    this.events = [];
+  }
+
+  emit(e: RunEvent): Promise<void> {
+    this.events.push(e);
+    return Promise.resolve();
+  }
+}
