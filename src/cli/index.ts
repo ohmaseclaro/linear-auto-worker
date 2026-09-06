@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { parseArgs } from 'node:util';
 import { runDoctor, runSetupWizard } from './wizard/index.js';
-import { bootDaemon } from './daemon.js';
+import { bootDaemon, installSignalHandlers } from './daemon.js';
 
 async function main(): Promise<number> {
   const { positionals, values } = parseArgs({
@@ -21,11 +21,19 @@ async function main(): Promise<number> {
     case 'setup':
       return values.doctor ? runDoctor() : runSetupWizard();
     case 'start': {
-      // Signal handling, drain and the reverse-order shutdown land in plan 05; the
-      // listening socket is what keeps the process alive until then.
       const daemon = await bootDaemon();
+      // Installed HERE and not inside `bootDaemon`: signal handlers are process-wide
+      // state, and a boot that installs them means every integration test that boots a
+      // daemon leaves another handler behind on a process they all share.
+      //
+      // A second SIGINT during shutdown exits immediately (the child escalation ladder
+      // can legitimately run 25 seconds), and the next boot's recovery sweep cleans up
+      // whatever the interrupted shutdown did not reach.
+      installSignalHandlers(daemon);
       console.log(`listening on 127.0.0.1:${daemon.port} -> ${daemon.publicUrl}`);
-      return 0;
+      // The listening socket keeps the loop alive; this never resolves. `main` returning
+      // would set an exit code and let the process fall out from under a live daemon.
+      return new Promise<number>(() => undefined);
     }
     case 'status':
       console.log('not yet implemented — run `law setup` first');

@@ -191,12 +191,21 @@ export async function recoverAtBoot(deps: RecoveryDeps): Promise<BootReport> {
  * this reason, so there is one diagnosis format in the daemon rather than two
  * (T-06-21 -- a classified reason and a log path, never a serialized error).
  *
- * ponytail: the terminal Linear comment is NOT posted from here. `run-engine`
- * emits it from its driver's `finally`, and a recovered run has no driver. The
- * upgrade is one line once the engine exposes the kv-guarded announcement --
- * `RunEngine.fail(runId, reason)` / `announceTerminal(runId)`, both requested in
- * 06-04-SUMMARY.md. Until then the run is correctly `failed` in the database and
- * in `run_events`; only the ticket comment is missing.
+ * T50 / R24, closed in 07-05. This used to write the failure to the database and
+ * stop there, because `announceTerminal` was private to the engine and only its
+ * driver's `finally` reached it -- and a recovered run has no driver, its driver
+ * having died with the previous process. The operator was therefore left with a
+ * ticket stuck In Progress and NOTHING said on it, which is precisely the silence
+ * 06-CONTEXT D-08 exists to forbid. `announceTerminal` is now on the interface and
+ * is called here.
+ *
+ * It is called AFTER the transition, not before: the announcement reads the run's
+ * state to compose the diagnosis and to decide the run is terminal at all, so
+ * announcing first announces the state the run is leaving.
+ *
+ * Best effort, deliberately. Linear being down at boot must not abort the sweep and
+ * strand every run behind this one -- the database is the source of truth and the
+ * comment is the courtesy.
  */
 async function failRecovered(deps: RecoveryDeps, run: Run, at: number): Promise<void> {
   const reason = `daemon restarted while the run was ${run.state}; branch and worktree left in place`;
@@ -204,6 +213,11 @@ async function failRecovered(deps: RecoveryDeps, run: Run, at: number): Promise<
   // Exactly one diagnosis per run: one `updateRun`, one `transition`, and the
   // worktree cleanup port is not reachable from this module at all.
   await deps.engine.transition(run.id, 'failed', `recovered from ${run.state}`);
+  try {
+    await deps.engine.announceTerminal(run.id);
+  } catch (err) {
+    deps.log.error({ runId: run.id, err: String(err) }, 'recovered run failed to announce');
+  }
 }
 
 /**

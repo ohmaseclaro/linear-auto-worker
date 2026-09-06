@@ -3,12 +3,32 @@
  *
  * D-01 keeps the ngrok domain ephemeral, so the registered URL is stale on every
  * boot by construction. Reconciliation is therefore the normal path here, not a
- * repair path, and ownership is matched on a locally generated id that outlives
- * a URL which is different every time the daemon starts.
+ * repair path, and so is finding our own webhook DISABLED: an ephemeral URL
+ * guarantees failed deliveries on every restart, Linear auto-disables after three,
+ * and that is the steady state rather than an edge case (03-CONTEXT D-02).
+ *
+ * ## Why this speaks the domain port and not the raw SDK
+ *
+ * It used to take an `@linear/sdk` `LinearClient` directly, which made two things
+ * this module's problem that are not: paging a connection whose `fetchNext()`
+ * mutates and returns `this` (T22), and holding raw `Webhook` objects that carry a
+ * live signing secret (T23). Both now live once, inside `outbound/linear-client.ts`
+ * -- `listWebhooks()` pages to completion and projects `secret` away at the only
+ * place raw webhooks exist. What is left here is reconciliation logic, which is
+ * what lets the boot smoke exercise it offline against `FakeLinearClient` instead
+ * of leaving the one step that mutates workspace configuration unexercised.
+ *
+ * ## Why ownership is matched by LABEL and not by a client-supplied id
+ *
+ * The previous version generated the webhook id itself and passed it to the create
+ * mutation. `WebhookCreateInput` does accept an `id`, but the domain port
+ * deliberately does not expose it, and matching on a self-assigned id is a weaker
+ * scheme than it looks: an operator who deletes the webhook in the Linear UI leaves
+ * a persisted id matching nothing, and the reconciler then creates a second
+ * registration while the prune below refuses to touch the first (it is matched by
+ * id, and the id is now the live one). The label is the field that survives both.
  */
-import crypto from 'node:crypto';
-import type { LinearClient, Webhook } from '@linear/sdk';
-import type { Logger, Store } from '../domain/ports.js';
+import type { LinearClient, Logger, Store } from '../domain/ports.js';
 
 /**
  * Only a registration carrying this label is ours. HOOK-09's prune is gated on it
@@ -19,92 +39,140 @@ export const WEBHOOK_LABEL = 'linear-auto-worker';
 
 const NGROK_URL = /\.ngrok(-free)?\.(app|dev|io)(\/|$)/;
 
-/** kv keys. Exported so the composition root reads the SAME key this module writes —
+/** kv keys. Exported so the composition root reads the SAME key this module writes --
  *  a second spelling of 'webhook_secret' is a receiver that verifies against a secret
  *  nobody registered, which fails as a 400 on every real delivery. */
 export const KEY_ID = 'webhook_id';
 export const KEY_SECRET = 'webhook_secret';
 
+/** The resource types this daemon subscribes to. A narrower subscription is fewer
+ *  loop surfaces for the four ingress guards. */
+export const RESOURCE_TYPES = ['Issue', 'Comment'];
+
 export interface WebhookRegistration {
   id: string;
   secret: string;
   url: string;
+  /** True when the reconcile had to create the registration rather than update one. */
+  created: boolean;
+  /** True when the registration we found was disabled and this call re-enabled it. */
+  reenabled: boolean;
+}
+
+export interface ReconcileOptions {
+  tunnelUrl: string;
+  /** Linear requires a team on `webhookCreate`. The composition root resolves it. */
+  teamId: string;
+  /** Generated locally and ALREADY persisted by the caller. See below. */
+  secret: string;
 }
 
 /**
  * Converge the workspace on exactly one webhook owned by this daemon.
- * Returns the id, the signing secret the receiver verifies against, and the URL
- * now registered with Linear.
+ *
+ * ## The secret ordering, which is T-07-22
+ *
+ * The signing secret is OURS (HOOK-03 / 03-02 D-03 / research landmine #3): generated
+ * locally, never read back from Linear -- whose own documentation and whose shipped
+ * GraphQL schema disagree about whether it is returned at all. The caller generates and
+ * PERSISTS it before calling here, and the id is persisted in the same transaction as
+ * the secret immediately after the create. So the only crash window is one in which the
+ * secret is on disk and the webhook is not, which self-heals on the next boot -- the
+ * reverse window, a live webhook whose secret is nowhere, would make every delivery fail
+ * signature verification with no way back except deleting the webhook by hand.
  */
 export async function reconcile(
   client: LinearClient,
   store: Store,
   log: Logger,
-  tunnelUrl: string,
+  o: ReconcileOptions,
 ): Promise<WebhookRegistration> {
-  const desiredUrl = `${tunnelUrl}/linear/webhook`;
+  const desiredUrl = `${o.tunnelUrl}/linear/webhook`;
 
-  // HOOK-03 / D-03: the signing secret is ours. Generated locally and written to
-  // kv BEFORE the first remote call, never read back -- Unknown 3 found the field
-  // the API returns is typed nullable, so reading it back is code that works
-  // until it doesn't. The client-supplied id is what makes registration
-  // idempotent across a URL that changes on every boot (D-01).
-  const id = store.kvGet(KEY_ID) ?? crypto.randomUUID();
-  const secret = store.kvGet(KEY_SECRET) ?? crypto.randomBytes(32).toString('hex');
-  store.kvSet(KEY_ID, id);
-  store.kvSet(KEY_SECRET, secret);
+  // Paged to completion by the facade. A reconciler that sees only the first page
+  // reconciles against a partial view and registers a duplicate of a webhook it
+  // could not see.
+  const all = await client.listWebhooks();
+  const ours = all.filter((w) => w.label === WEBHOOK_LABEL);
+  // Deterministic when the workspace somehow holds more than one of ours: keep the
+  // one whose id we already persisted, else the first. The rest are pruned below.
+  const persistedId = store.kvGet(KEY_ID);
+  const keep = ours.find((w) => w.id === persistedId) ?? ours[0];
 
-  // T22: fetchNext() mutates and returns `this`, appending into page.nodes.
-  // Collecting nodes per iteration therefore duplicates every earlier page, and
-  // the prune below would then act on registrations it has already seen.
-  const page = await client.webhooks({ first: 250 });
-  while (page.pageInfo.hasNextPage) await page.fetchNext();
-  const all: Webhook[] = page.nodes;
-  // T23: every element above carries a live signing secret. Project before logging.
+  let id: string;
+  let created = false;
+  let reenabled = false;
 
-  // Match on the persisted id, never on URL equality -- the URL is different on
-  // every boot by design.
-  const ours = all.find((w) => w.id === id);
-
-  if (!ours) {
-    // T21: the SDK method is createWebhook. The GraphQL mutation spelling used in
-    // PROJECT.md and PITFALLS.md is not a method on LinearClient and tsc rejects it.
+  if (!keep) {
+    // T21: the SDK method is `createWebhook`. The `webhookCreate` GraphQL mutation
+    // spelling used in PROJECT.md and PITFALLS.md is not a method on the client.
     const res = await client.createWebhook({
-      id,
-      secret,
-      url: desiredUrl,
-      enabled: true,
       label: WEBHOOK_LABEL,
-      allPublicTeams: true,
-      // A narrower subscription is fewer loop surfaces for plan 03-03's guards.
-      resourceTypes: ['Issue', 'Comment'],
+      url: desiredUrl,
+      teamId: o.teamId,
+      secret: o.secret,
+      resourceTypes: RESOURCE_TYPES,
     });
-    if (!res.success) throw new Error('webhook registration failed');
+    id = res.id;
+    created = true;
     log.info({ webhookId: id, url: desiredUrl }, 'webhook registered');
   } else {
-    // D-02: URL update and re-enable in one call. `enabled: true` is unconditional
-    // and is not a repair -- with an ephemeral URL every restart guarantees failed
-    // deliveries, so Linear auto-disabling the webhook is the steady state.
-    await client.updateWebhook(id, { url: desiredUrl, enabled: true });
-    log.info(
-      { webhookId: id, url: desiredUrl, wasEnabled: ours.enabled },
-      'webhook reconciled',
-    );
+    id = keep.id;
+    reenabled = !keep.enabled;
+    // D-02: URL update and re-enable in ONE call, and `enabled: true` is
+    // unconditional. This is not a repair path -- with an ephemeral URL every
+    // restart guarantees failed deliveries, so arriving here to find the webhook
+    // disabled is the normal case.
+    await client.updateWebhook(id, {
+      url: desiredUrl,
+      enabled: true,
+      resourceTypes: RESOURCE_TYPES,
+    });
+    log.info({ webhookId: id, url: desiredUrl, reenabled }, 'webhook reconciled');
   }
 
-  // HOOK-09: prune our own abandoned ngrok registrations only. All three
-  // conditions are load-bearing -- id mismatch keeps us from deleting the live
-  // one, the label keeps us off a foreign tool's webhook, and the URL shape keeps
-  // us off our own non-tunnel registrations.
+  // One transaction, so a crash between the two writes is impossible (T-07-22).
+  store.transaction(() => {
+    store.kvSet(KEY_ID, id);
+    store.kvSet(KEY_SECRET, o.secret);
+  });
+
+  // HOOK-09: prune our own abandoned ngrok registrations only. All three conditions
+  // are load-bearing -- the id check keeps us off the live one, the label keeps us
+  // off a foreign tool's webhook, and the URL shape keeps us off our own non-tunnel
+  // registrations.
   for (const w of all) {
     if (w.id === id) continue;
     if (w.label !== WEBHOOK_LABEL) continue;
-    // The SDK types `url` as nullable; a registration with no URL cannot be one of
-    // our tunnel registrations, so it is skipped rather than coerced.
     if (!w.url || !NGROK_URL.test(w.url)) continue;
     log.warn({ webhookId: w.id, url: w.url }, 'pruning stale ngrok webhook');
     await client.deleteWebhook(w.id);
   }
 
-  return { id, secret, url: desiredUrl };
+  return { id, secret: o.secret, url: desiredUrl, created, reenabled };
+}
+
+/**
+ * Shutdown's politeness step (OPS-05 step 3, T-07-23).
+ *
+ * The tunnel URL is about to stop answering. Linear retries a failed delivery three
+ * times and then disables the webhook, so leaving it enabled spends that budget on
+ * deliveries that cannot land -- and the next boot's reconcile has to re-enable it
+ * anyway. Disabling costs one call and leaves the registration intact.
+ *
+ * Best effort by contract: it returns false rather than throwing. A shutdown that
+ * can be blocked by Linear being slow is a shutdown that does not release the port,
+ * does not reap the children and does not mark the in-flight runs.
+ */
+export async function disable(client: LinearClient, store: Store, log: Logger): Promise<boolean> {
+  const id = store.kvGet(KEY_ID);
+  if (!id) return false;
+  try {
+    await client.updateWebhook(id, { enabled: false });
+    log.info({ webhookId: id }, 'webhook disabled for shutdown');
+    return true;
+  } catch (err) {
+    log.warn({ webhookId: id, err: String(err) }, 'could not disable the webhook; continuing');
+    return false;
+  }
 }

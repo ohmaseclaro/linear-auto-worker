@@ -155,33 +155,66 @@ export class RecordingLinear extends FakeLinearClient {
  * ordering as an intention in a comment and a later refactor violates it silently, opening
  * a window where Linear delivers to a live public URL backed by nothing.
  */
-export function probingTunnel(): TunnelManager & { probes: number[] } {
+export function probingTunnel(): TunnelManager & { probes: number[]; closeProbes: number[] } {
   const probes: number[] = [];
+  const closeProbes: number[] = [];
   let url: string | null = null;
+  let opened: number | null = null;
+
+  const connect = (port: number): Promise<void> =>
+    new Promise((resolve, reject) => {
+      const socket = net.connect({ port, host: '127.0.0.1' });
+      socket.once('connect', () => {
+        socket.destroy();
+        resolve();
+      });
+      socket.once('error', (err) => {
+        socket.destroy();
+        reject(err);
+      });
+    });
+
   return {
     probes,
-    open(port: number): Promise<string> {
-      return new Promise((resolve, reject) => {
-        const socket = net.connect({ port, host: '127.0.0.1' });
-        socket.once('connect', () => {
-          probes.push(port);
-          socket.destroy();
-          url = `https://smoke-${port}.invalid`;
-          resolve(url);
-        });
-        socket.once('error', (err) => {
-          socket.destroy();
-          reject(
-            new Error(
-              `HOOK-01 violated: nothing is listening on 127.0.0.1:${port} when the tunnel ` +
-                `was asked to open (${err.message}). The bind must happen before the tunnel.`,
-            ),
-          );
-        });
-      });
+    closeProbes,
+    async open(port: number): Promise<string> {
+      try {
+        await connect(port);
+      } catch (err) {
+        throw new Error(
+          `HOOK-01 violated: nothing is listening on 127.0.0.1:${port} when the tunnel was ` +
+            `asked to open (${String(err)}). The bind must happen before the tunnel.`,
+        );
+      }
+      probes.push(port);
+      opened = port;
+      url = `https://smoke-${port}.invalid`;
+      return url;
     },
     url: () => url,
-    close: () => Promise.resolve(),
+    /**
+     * The mirror image of the open probe, and it is what makes the SHUTDOWN order a
+     * runtime fact instead of a comment (07-CONTEXT D-03 / OPS-05).
+     *
+     * At the moment the tunnel is asked to close, the server it fronts must still be
+     * accepting: closing the server first would mean the last deliveries in flight hit a
+     * live public URL backed by nothing and take a 502 — the same failed delivery, and the
+     * same march toward Linear's auto-disable, that the bind-before-tunnel rule exists to
+     * prevent, just at the other end of the process's life.
+     */
+    async close(): Promise<void> {
+      if (opened === null) return;
+      try {
+        await connect(opened);
+      } catch (err) {
+        throw new Error(
+          `shutdown order violated: 127.0.0.1:${opened} already refuses connections when ` +
+            `the tunnel was asked to close (${String(err)}). The tunnel must close BEFORE ` +
+            `the HTTP server, not after.`,
+        );
+      }
+      closeProbes.push(opened);
+    },
   };
 }
 

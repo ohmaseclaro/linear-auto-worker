@@ -52,12 +52,13 @@ import { createSqliteStore } from '../infra/store/sqlite-store.js';
 import { asDomainStore } from '../infra/store/domain-store.js';
 import { createReceiver } from '../ingress/receiver.js';
 import { createRouter, type Router } from '../ingress/router.js';
-import { KEY_SECRET } from '../ingress/registrar.js';
+import { disable as disableWebhook, KEY_SECRET, reconcile } from '../ingress/registrar.js';
 import { closeTunnel, openTunnel } from '../ingress/tunnel.js';
 import { createScheduler, type Scheduler } from '../orchestration/scheduler.js';
 import { createQuestions, type Questions } from '../orchestration/questions.js';
 import { createRunEngine, type RunEngine } from '../orchestration/run-engine.js';
-import { recoverAtBoot } from '../orchestration/recovery.js';
+import { recoverAtBoot, reconcile as sweepMissedWork } from '../orchestration/recovery.js';
+import { defaultRunCommand, type RunCommand } from '../execution/execute-run.js';
 import {
   createAgentRunner,
   createDeliverer,
@@ -66,7 +67,7 @@ import {
 } from './adapters.js';
 import type { AgentSpawn } from '../execution/supervisor.js';
 import { nonTerminalStates } from '../orchestration/recovery.js';
-import { isTerminal } from '../domain/state-machine.js';
+import { canTransition, holdsSlot, isTerminal } from '../domain/state-machine.js';
 import type { RepoRun, RunState } from '../domain/types.js';
 import type {
   AgentRunner,
@@ -98,6 +99,16 @@ export interface BootOptions {
    * the real argv construction, env allowlist and stream routing.
    */
   spawn?: AgentSpawn;
+  /**
+   * Every `gh` / `git` / `claude` invocation, including PREFLIGHT. The fifth slot, and it
+   * meets the rule: `gh auth status` crosses the network and the other two cross a process
+   * boundary. It exists so preflight is code the boot smoke RUNS rather than code the boot
+   * smoke skips — an unexercised preflight is a boot step whose failure messages have
+   * never been seen, which is the whole reason it exists.
+   *
+   * The same runner reaches the worktree manager and the deliverer, which already took it.
+   */
+  runCommand?: RunCommand;
 }
 
 export interface DaemonHandle {
@@ -123,17 +134,90 @@ export interface DaemonHandle {
    */
   scheduler: Scheduler;
   log: Logger;
-  /** Plan 05 fills this in with drain + reverse-order shutdown (D-03/D-06). */
-  shutdown(): Promise<void>;
+  /**
+   * Reverse-order shutdown (07-CONTEXT D-03 / OPS-05). Idempotent: a second call resolves
+   * without re-signalling a process group whose pid may since have been reused.
+   */
+  shutdown(reason?: string): Promise<void>;
 }
 
-/** The real ngrok tunnel, expressed as the `TunnelManager` port. */
-function ngrokTunnel(): TunnelManager {
+/**
+ * The note written onto every in-flight run at a clean stop.
+ *
+ * Exported because it is the marker the boot smoke and the lifecycle test assert on, and
+ * because "some string containing 'shutdown'" is not a contract.
+ */
+export const SHUTDOWN_NOTE = 'daemon shut down cleanly while this run was in flight';
+
+/**
+ * How long the whole child-reap step may take before shutdown proceeds without it.
+ *
+ * The supervisor's ladder is SIGINT + 15s, SIGTERM + 10s, then SIGKILL, so a group that
+ * ignores everything short of SIGKILL takes 25 seconds. This bounds the wait rather than
+ * shortening the ladder: shortening it would cost the resumable-session property SIGINT
+ * buys (04-CONTEXT D-10), and an operator who does not want to wait has the second signal.
+ */
+const CHILD_REAP_BUDGET_MS = 30_000;
+
+/** Linear is a courtesy during shutdown, never a blocker. */
+const WEBHOOK_DISABLE_BUDGET_MS = 3_000;
+
+/** Resolve `p`, or resolve anyway after `ms`. Never rejects — this is a shutdown path. */
+async function within(p: Promise<unknown>, ms: number, what: string, log: Logger): Promise<void> {
+  let timer: NodeJS.Timeout | undefined;
+  const bell = new Promise<'timeout'>((resolve) => {
+    timer = setTimeout(() => resolve('timeout'), ms);
+    // Do not hold the event loop open on the way out.
+    timer.unref?.();
+  });
+  const outcome = await Promise.race([p.then(() => 'done' as const).catch((err: unknown) => {
+    log.warn({ step: what, err: String(err) }, 'shutdown step failed; continuing');
+    return 'done' as const;
+  }), bell]);
+  if (timer) clearTimeout(timer);
+  if (outcome === 'timeout') log.warn({ step: what, ms }, 'shutdown step timed out; continuing');
+}
+
+/**
+ * The real ngrok tunnel, expressed as the `TunnelManager` port.
+ *
+ * ## The authtoken (T10)
+ *
+ * `@ngrok/ngrok` reads NEITHER the bare `NGROK_AUTHTOKEN` environment variable NOR the
+ * macOS agent's YAML on its own — `authtoken_from_env: true` is what makes it look, and
+ * `openTunnel` passes it. But this daemon's authtoken lives in the config root's `.env`,
+ * which `loadSecrets` reads into memory and does NOT export, so with the operator's shell
+ * clean the SDK finds nothing and fails `ERR_NGROK_4018` — which is byte-identical to a
+ * revoked account. Publishing the loaded secret into the environment here is the explicit
+ * pass the SDK's only supported channel accepts.
+ *
+ * It does not overwrite an authtoken the operator already exported: theirs is the more
+ * specific intent, and silently substituting a stale one from `.env` is a failure they
+ * cannot see.
+ *
+ * ## The retry
+ *
+ * One retry, then out. A tunnel is the daemon's only ingress, so failing to open one is
+ * fatal by definition; retrying forever would leave a process that looks alive, logs
+ * hopefully and can never receive anything.
+ */
+function ngrokTunnel(authtoken: string, log: Logger): TunnelManager {
   let open: Awaited<ReturnType<typeof openTunnel>> | null = null;
   return {
     async open(port: number): Promise<string> {
-      open = await openTunnel(port);
-      return open.url;
+      process.env.NGROK_AUTHTOKEN ??= authtoken;
+      for (let attempt = 1; ; attempt += 1) {
+        try {
+          open = await openTunnel(port);
+          return open.url;
+        } catch (err) {
+          // T24: the ngrok failure message can ECHO the operator's authtoken. `openTunnel`
+          // already extracts the code and drops the rest; nothing here may re-widen that.
+          if (attempt >= 2) throw err;
+          log.warn({ attempt }, 'tunnel failed to open; retrying once');
+          await new Promise((r) => setTimeout(r, 2_000));
+        }
+      }
     },
     url: () => open?.url ?? null,
     async close(): Promise<void> {
@@ -141,6 +225,83 @@ function ngrokTunnel(): TunnelManager {
       open = null;
     },
   };
+}
+
+/**
+ * The tools this daemon shells out to, checked BEFORE the socket binds.
+ *
+ * Every message names the fix rather than the failure. This is `law start` on a machine
+ * the operator set up weeks ago, so "gh: command not found" three minutes into the first
+ * real ticket — after the ticket has already been moved to In Progress and a worktree
+ * created — is the outcome this exists to prevent.
+ *
+ * It never prompts and never writes: acquiring a credential is the wizard's job, and a
+ * daemon that can prompt is a daemon that hangs when run under a supervisor.
+ */
+const PREFLIGHT: ReadonlyArray<{
+  what: string;
+  file: string;
+  args: readonly string[];
+  fix: string;
+}> = [
+  {
+    what: 'git',
+    file: 'git',
+    args: ['--version'],
+    fix: 'install git (xcode-select --install on macOS) — every run creates a worktree',
+  },
+  {
+    what: 'claude',
+    file: 'claude',
+    args: ['--version'],
+    fix: 'install the Claude Code CLI and make sure `claude` is on PATH — it is what does the work',
+  },
+  {
+    what: 'gh',
+    file: 'gh',
+    args: ['auth', 'status'],
+    fix: 'run `gh auth login` — the daemon opens pull requests with your gh credentials',
+  },
+];
+
+async function preflight(run: RunCommand, log: Logger): Promise<void> {
+  for (const check of PREFLIGHT) {
+    let ok = false;
+    try {
+      // `reject: false` so a non-zero exit is a value rather than an exception: a missing
+      // binary and a failed check must produce the SAME actionable message.
+      const res = await run(check.file, check.args, { reject: false });
+      ok = res.exitCode === 0;
+    } catch {
+      ok = false;
+    }
+    if (!ok) {
+      throw new Error(`law start: ${check.what} is not usable. Fix: ${check.fix}`);
+    }
+    log.info({ tool: check.what }, 'preflight ok');
+  }
+}
+
+/**
+ * The team `webhookCreate` is registered against.
+ *
+ * Resolved here rather than inside the registrar so the failure is one actionable line at
+ * boot instead of a GraphQL validation error from inside reconciliation.
+ */
+function webhookTeamId(config: Config): string {
+  const teamId =
+    config.teamId ||
+    Object.values(config.mappings)
+      .map((m) => m.linearTeamId)
+      .find((t): t is string => Boolean(t));
+  if (!teamId) {
+    throw new Error(
+      'law start: no Linear team is configured. Linear requires a team on webhook ' +
+        'creation. Set `teamId`, or give at least one mapping a `linearTeamId`, in ' +
+        'config.json — or re-run `law setup`.',
+    );
+  }
+  return teamId;
 }
 
 /**
@@ -391,6 +552,12 @@ export async function bootDaemon(opts: BootOptions = {}): Promise<DaemonHandle> 
       log: (fields, msg) => log.info(fields, msg),
     });
 
+  // ── 2a. preflight, before anything binds or registers ─────────────────────
+  // `gh`, `claude` and `git` first because they are pure local checks, then the Linear
+  // viewer call below, which is the fourth preflight and the network one.
+  const runCommand = opts.runCommand ?? defaultRunCommand;
+  await preflight(runCommand, log);
+
   // ── 2b. the two identities the rest of boot assumes are already resolved ───
   // Both go through the substitutable client, so the smoke exercises this path offline
   // against its seeded fake. Both are wrong to do per-event: the viewer id never changes
@@ -400,8 +567,10 @@ export async function bootDaemon(opts: BootOptions = {}): Promise<DaemonHandle> 
   const startedStateIds = await resolveStartedStates(linear, config, log);
 
   const scheduler = createScheduler({ config, log });
-  // D-01: no run may leave `queued` in this plan, and nothing may spawn a child process.
-  // Plan 05 starts it as part of the boot lifecycle it owns.
+  // Paused for the whole of boot and started at the very LAST step (07-CONTEXT D-01).
+  // Nothing before that line may leave `queued`, which is what makes "no child process
+  // is spawned until the daemon is fully wired" a property of the code rather than of
+  // how long each preceding step happens to take.
   scheduler.pause();
 
   // Late binding: questions calls back into the engine and the engine calls into
@@ -410,7 +579,7 @@ export async function bootDaemon(opts: BootOptions = {}): Promise<DaemonHandle> 
   // The repoSlug -> mapping-key index the toggles, the deliverer and the notifier all
   // read. One pass over config, at boot, instead of a Linear round-trip per lookup.
   const index = mappingIndex(config);
-  const adapterDeps = { store, config, log, index };
+  const adapterDeps = { store, config, log, index, runCommand };
 
   const worktrees = createWorktreeManager(adapterDeps);
   const agent = opts.agent ?? createAgentRunner({ ...adapterDeps, spawn: opts.spawn });
@@ -475,6 +644,11 @@ export async function bootDaemon(opts: BootOptions = {}): Promise<DaemonHandle> 
     store.kvSet(KEY_SECRET, secret);
     log.info({}, 'generated a webhook signing secret; it will be registered on reconcile');
   }
+  // OPS-02 / 02-CONTEXT D-05. The logger was constructed with the two secrets that exist
+  // at boot; this third one is generated at RUNTIME, so redaction has to be told about it.
+  // Registering it at the sink rather than at each call site is what makes it impossible
+  // to forget in one place — and one place is all it takes.
+  logger.registerSecret(secret);
 
   // ── 6a. the router, wired to the engine THROUGH the mapper ─────────────────
   // Constructed before the bind because the receiver needs it, but it cannot fire before
@@ -524,9 +698,55 @@ export async function bootDaemon(opts: BootOptions = {}): Promise<DaemonHandle> 
   log.info({ port }, 'receiver listening on loopback');
 
   // ── 5. and only now, the tunnel ────────────────────────────────────────────
-  const tunnel = opts.tunnel ?? ngrokTunnel();
+  // The bind above is not a style choice (D-02, HOOK-01). Reversed, there is a window in
+  // which Linear can deliver to a live public URL backed by nothing; each 502 is a failed
+  // delivery, Linear allows three, and the fourth disables the webhook. The boot smoke's
+  // tunnel stub TCP-connects to the port it is handed and fails on ECONNREFUSED, so this
+  // ordering is asserted from both sides rather than described in a comment.
+  const tunnel = opts.tunnel ?? ngrokTunnel(secrets.ngrokAuthtoken, log);
+  // Asserted from THIS side too, not only from the stub's. The stub proves the socket
+  // answers; this proves the daemon believes it does, and it holds for the real ngrok
+  // tunnel as well — where nothing probes anything and a reorder would otherwise be
+  // caught by nobody until Linear's third failed delivery.
+  if (!server.listening) {
+    throw new Error(
+      'HOOK-01: refusing to open a tunnel — the receiver is not accepting connections. ' +
+        'The bind must complete before the tunnel opens (07-CONTEXT D-02).',
+    );
+  }
   const publicUrl = await tunnel.open(port);
   log.info({ port }, 'tunnel open');
+
+  // ── 6. reconcile the webhook against the URL the tunnel just handed back ───
+  // Never a blind create: the label is matched against the full listing first, and an
+  // existing registration is updated AND re-enabled in one call. With an ephemeral domain
+  // every restart guarantees failed deliveries, so finding our webhook auto-disabled is
+  // the normal case here (03-CONTEXT D-02).
+  const registration = await reconcile(linear, store, log, {
+    tunnelUrl: publicUrl,
+    teamId: webhookTeamId(config),
+    secret,
+  });
+
+  // ── 7. the missed-work sweep ───────────────────────────────────────────────
+  // This is what makes an ephemeral URL safe. While the daemon was down, Linear delivered
+  // to a URL that will never answer and spent its retries doing it; those deliveries are
+  // gone. Polling for ground truth is the only recovery, and `reconcile` covers BOTH
+  // halves — assignments whose webhook never arrived, and threaded ANSWERS whose webhook
+  // never arrived, which an issue-level `updatedAt` diff structurally cannot see.
+  //
+  // It already degrades rather than throws: a slow or failing Linear leaves the watermark
+  // where it was and logs, so the daemon comes up missing backlog instead of not coming up.
+  await sweepMissedWork(
+    { store, engine, scheduler, questions, linear, config, log },
+    Date.now(),
+  );
+
+  // ── 8. and only now may anything spawn a child process ─────────────────────
+  scheduler.start();
+  /** The idempotence memo. See `shutdown` below. */
+  let shuttingDown: Promise<void> | null = null;
+  log.info({ port, publicUrl, webhookId: registration.id }, 'daemon ready');
 
   return {
     port,
@@ -538,15 +758,162 @@ export async function bootDaemon(opts: BootOptions = {}): Promise<DaemonHandle> 
     engine,
     scheduler,
     log,
-    async shutdown(): Promise<void> {
-      // Reverse boot order (D-03). Plan 05 adds child-process kill and the in-flight
-      // requeue that makes Ctrl-C free (D-06); this is the minimum that releases the port
-      // and the database file.
+    shutdown: (reason = 'signal') => shutdown(reason),
+  };
+
+  /**
+   * Boot, backwards (07-CONTEXT D-03 / OPS-05).
+   *
+   * The order is not tidiness. Closing the tunnel while children are still writing, or
+   * closing the store before marking what was in flight, produces exactly the zombie run
+   * with a stuck In Progress ticket that OPS-01 forbids.
+   *
+   * Idempotent by construction: the promise is memoised, so a second call — a SIGTERM
+   * arriving behind a SIGINT, a test asserting it — awaits the first rather than
+   * re-signalling a process group whose pid may since have been reused by the OS.
+   */
+  async function shutdown(reason: string): Promise<void> {
+    if (shuttingDown) return shuttingDown;
+    shuttingDown = (async () => {
+      log.info({ reason }, 'shutting down');
+
+      // 1. Nothing new is claimed. Parked waiters stay parked and are marked below.
       scheduler.pause();
-      await tunnel.close();
+
+      // 2. The children, by PROCESS GROUP. `engine.stop()` aborts every live run, and the
+      //    supervisor's abort listener runs the escalation: SIGINT, then SIGTERM, then
+      //    SIGKILL, each to the NEGATED pid (`process.kill(-pid, sig)`), with a fresh
+      //    liveness check between steps. The negation is the whole point — signalling the
+      //    leader alone kills `claude` and ORPHANS the agent's own Bash subprocesses,
+      //    which then survive the daemon, keep writing into a worktree nothing owns, and
+      //    leave the supervisor's promise permanently pending because the survivor holds
+      //    the stdout pipe open (T29, measured).
+      //
+      //    `stop()` also tells every driver to stop writing run state, which is what makes
+      //    step 6 possible: without it, a reaped child comes back as `cancelled`, the
+      //    driver transitions the run to a terminal state and posts a comment saying so,
+      //    and the requeue below would find nothing left to requeue.
+      await within(engine.stop(), CHILD_REAP_BUDGET_MS, 'reap children', log);
+
+      // 3. Politeness, time-boxed (T-07-23). The URL is about to stop answering; leaving
+      //    the webhook enabled spends Linear's three retries on deliveries that cannot
+      //    land. Never fatal — `disable` returns false rather than throwing.
+      await within(
+        disableWebhook(linear, store, log),
+        WEBHOOK_DISABLE_BUDGET_MS,
+        'disable webhook',
+        log,
+      );
+
+      // 4. The tunnel, then 5. the server — in that order, so the public URL stops
+      //    resolving before the thing behind it stops answering. Reversed, the last
+      //    deliveries in flight get a 502 from a live URL, which is the same failed
+      //    delivery step 3 just spent a call avoiding.
+      await within(tunnel.close(), 5_000, 'close tunnel', log);
       await new Promise<void>((resolve) => server.close(() => resolve()));
       server.closeAllConnections();
+
+      // 6. Mark what was in flight — BEFORE the store closes, which is the whole reason
+      //    this step is here and not earlier.
+      await markInFlight();
+
+      // 7. The database, last. Everything above may still need to read or write it.
       store.close();
-    },
+      log.info({ reason }, 'shutdown complete');
+    })();
+    return shuttingDown;
+  }
+
+  /**
+   * 07-CONTEXT D-06, and the part that is easy to read as bookkeeping and is not.
+   *
+   * 06-CONTEXT D-07 fails a `running` row found at boot, because after an UNCLEAN exit the
+   * push status is unknowable and replaying the run would open a second pull request for
+   * work that already shipped. That rule is correct and stays. What makes it *narrow* is
+   * this function: a clean stop moves those runs back to `queued` before exiting, so a
+   * `running` row surviving to the next boot genuinely means a crash. Without this write,
+   * every Ctrl-C would cost a manual re-assignment of every live ticket (TRAPS T18, T26).
+   *
+   * Which runs move is asked of the domain state table, not decided here:
+   *
+   *   - `holdsSlot` IS "in flight" — `preparing`, `running`, `delivering`. `queued` and
+   *     `awaiting_answer` are already correct for the next boot and are left alone; an
+   *     `awaiting_answer` run's deadline is a column in SQLite, so there is no timer to
+   *     re-arm and nothing to mark.
+   *   - of those, whichever the transition table permits back to `queued` are requeued.
+   *     `preparing` and `running` are; `delivering` deliberately is NOT, and that refusal
+   *     is the same one D-07 makes — a run that reached `delivering` may already have
+   *     pushed, so the next boot fails it with a diagnosis and leaves the branch for the
+   *     operator (T-07-26, accepted). Reading the answer off `canTransition` rather than
+   *     writing a second list here is what keeps the two from drifting apart.
+   */
+  async function markInFlight(): Promise<void> {
+    const marked: string[] = [];
+    const requeued: string[] = [];
+    for (const run of store.listByState(...nonTerminalStates())) {
+      // A ticket parent has no state of its own; its children are marked individually.
+      if (run.kind !== 'repo' || !holdsSlot(run.state)) continue;
+      try {
+        store.updateRun(run.id, { failureReason: SHUTDOWN_NOTE, updatedAt: Date.now() });
+        marked.push(run.id);
+        if (canTransition(run.state, 'queued')) {
+          await engine.transition(run.id, 'queued', SHUTDOWN_NOTE);
+          requeued.push(run.id);
+        }
+      } catch (err) {
+        // One row must not abandon the rest: an unmarked run is a stuck ticket.
+        log.error({ runId: run.id, err: String(err) }, 'could not mark an in-flight run');
+      }
+    }
+    log.info({ marked: marked.length, requeued: requeued.length }, 'in-flight runs marked');
+  }
+}
+
+/**
+ * Install the signal handlers on this process, and hand back a remover.
+ *
+ * Deliberately NOT done inside `bootDaemon`. Signal handlers are process-wide state, and a
+ * boot that installs them means the smoke and every integration test accumulate a handler
+ * per booted daemon on a process they share — so the second test's Ctrl-C would shut down
+ * the first test's daemon. `law start` calls this; a test calls it and calls the remover.
+ *
+ * A SECOND signal while a shutdown is already running exits immediately rather than being
+ * swallowed. The graceful path can legitimately take half a minute (the child escalation
+ * ladder is SIGINT + 15s then SIGTERM + 10s), and an operator pressing Ctrl-C twice is
+ * asking for exactly that trade: they get the daemon dead now, and the next boot's
+ * recovery sweep cleans up what this shutdown did not reach.
+ */
+export function installSignalHandlers(
+  handle: Pick<DaemonHandle, 'shutdown' | 'log'>,
+  exit: (code: number) => void = (code) => process.exit(code),
+): () => void {
+  const signals: NodeJS.Signals[] = ['SIGINT', 'SIGTERM'];
+  let stopping = false;
+
+  const onSignal = (signal: NodeJS.Signals): void => {
+    if (stopping) {
+      handle.log.warn({ signal }, 'second signal during shutdown; exiting now');
+      exit(1);
+      return;
+    }
+    stopping = true;
+    handle.log.info({ signal }, 'signal received');
+    void handle.shutdown(signal).then(
+      () => exit(0),
+      (err: unknown) => {
+        handle.log.error({ signal, err: String(err) }, 'shutdown failed');
+        exit(1);
+      },
+    );
+  };
+
+  const listeners = signals.map((sig) => {
+    const fn = (): void => onSignal(sig);
+    process.on(sig, fn);
+    return [sig, fn] as const;
+  });
+
+  return () => {
+    for (const [sig, fn] of listeners) process.off(sig, fn);
   };
 }
