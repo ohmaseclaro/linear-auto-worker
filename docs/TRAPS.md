@@ -1,6 +1,6 @@
 # Traps
 
-Eighty-nine footguns found while building this daemon, kept as a running ledger so no two
+Ninety footguns found while building this daemon, kept as a running ledger so no two
 parallel work streams had to rediscover the same one.
 
 **Every entry here was measured, not recalled.** Versions come from the npm registry, API
@@ -15,7 +15,7 @@ spawn processes, several of them will cost you an afternoon each.
 Measured against: `@linear/sdk@93.0.1`, `@ngrok/ngrok@1.7.0`, `better-sqlite3@13.0.3`,
 `execa@10.0.1`, Claude Code CLI `2.1.259`, `gh` `2.98.0`, Node `22.23.1`, macOS.
 
-The complete internal ledger — all 89 rows with per-phase attribution and the evidence for
+The complete internal ledger — all 90 rows with per-phase attribution and the evidence for
 each — is in [`.planning/TRAPS.md`](../.planning/TRAPS.md). This page is the subset that
 generalises.
 
@@ -211,6 +211,35 @@ the group the escalation exists to kill.
 **An `async` function cannot return a memoised promise by identity** — `async` wraps every
 return in a fresh promise, so `if (this.p) return this.p` in an `async` shutdown() hands
 each caller a different object.
+
+## Publishing the repository
+
+**A realistic fake credential in a test fixture blocks your first push.** The secret-scanner
+tests here check a Slack bot token of the correct shape —
+`xoxb-<digits>-<digits>-<24 chars>` — and GitHub push protection rejected the initial push of
+this repository because of it. The token was `1111111111-2222222222-aaaa…`; the scanner
+cannot tell synthetic from real, and neither can a contributor's local scanner after they
+clone. Note what did *not* trip: `ghp_AAAA…` and `sk-ant-api03-AAAA…` failed the vendors'
+checksum/entropy checks, and `AKIAIOSFODNN7EXAMPLE` is AWS's own published example and is
+allowlisted. Only the purely structural detector matched.
+
+Clicking the "allow this secret" link works and is the wrong move — it puts a
+push-protection bypass on the public record of a project whose whole subject is not failing
+silently. Assemble the value at runtime instead, so no literal in the source matches while
+the string the test actually exercises is byte-identical:
+
+```ts
+line: `slackToken: "${'xox' + 'b'}-1111111111-2222222222-${'a'.repeat(24)}",`,
+```
+
+Then break it once and confirm the case goes red, or you have changed a passing test into a
+differently passing test. It does: 21 pass / 1 fail with the prefix broken, 22 / 0 restored.
+
+**Scan your own history before you create the repository, and scan it the way GitHub
+does.** A grep for high-entropy patterns over the working tree is not enough — a public repo
+exposes every commit, and the offending blob here was 262 commits back. Rewriting one blob
+out of history with `git filter-repo --replace-text` costs minutes before the first push and
+is unpleasant afterwards.
 
 ## The one that is really about process
 

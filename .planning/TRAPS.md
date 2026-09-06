@@ -120,3 +120,9 @@ verified against live tools/registries during project research, not recalled fro
 >>>>>>> gsd/07-06
 
 *(appended as waves hit them)*
+
+## Discovered at open-source release
+
+| # | Trap | Failure mode | Correct move | Phase |
+|---|------|--------------|--------------|-------|
+| T90 | **A structurally-valid fake credential in a test fixture is blocked by GitHub push protection.** `gates.test.ts:74` held `xoxb-1111111111-2222222222-<24 chars>` — the correct shape, which is the point of the fixture. | The **first push of the public repo is rejected** (`GH013`), and the offending blob is 262 commits back, so fixing HEAD does not help. Contributors' local scanners flag it too. Notably `ghp_AAAA…`/`sk-ant-…` did NOT trip (vendor checksum/entropy checks) and `AKIAIOSFODNN7EXAMPLE` is allowlisted — only the purely structural Slack detector matched. | Assemble the value at runtime — `` `${'xox' + 'b'}-…-${'a'.repeat(24)}` `` — so the source holds no matching literal while the tested string is byte-identical. **Do not** use the "allow this secret" unblock link: it records a push-protection bypass on a public repo. Then falsify (measured: 21/1 broken, 22/0 restored). Rewrite the historical blob with `git filter-repo --replace-text`. | release |

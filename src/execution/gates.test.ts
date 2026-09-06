@@ -71,6 +71,12 @@ const SECRET_CASES: readonly { name: string; pattern: string; line: string }[] =
   {
     name: 'slack bot token',
     pattern: 'slack-bot-token',
+    // Assembled at runtime rather than written as a literal. The value below is the real
+    // shape a Slack bot token has, which is the point — but a source file containing that
+    // shape verbatim is itself flagged by GitHub's push protection (it blocked the very
+    // first push of this repository) and by every contributor's local scanner. Splitting
+    // the `xoxb` prefix removes the literal without weakening the case: the string this
+    // test hands to `findSecrets` is byte-identical to the one it replaced.
     line: `slackToken: "${'xox' + 'b'}-1111111111-2222222222-${'a'.repeat(24)}",`,
   },
   {
