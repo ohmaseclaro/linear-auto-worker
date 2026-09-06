@@ -569,7 +569,12 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
       await transition(runId, 'preparing', ackCommentId ?? 'slot acquired');
       const queued = repoRun(runId);
       const wt = await worktrees.create(runId, repoOf(queued), queued.branch);
-      store.updateRun(runId, { worktreePath: wt.path, updatedAt: now() });
+      // The RESOLVED branch, not the requested one. D-11 suffixes a colliding branch name
+      // rather than resetting the existing one, so `wt.branch` and `queued.branch` differ
+      // on exactly the retries that matter. Recording only the path leaves the run row
+      // naming a ref that was never created, and `worktreeOf()` then hands the deliverer
+      // that dead name at push time.
+      store.updateRun(runId, { branch: wt.branch, worktreePath: wt.path, updatedAt: now() });
       checkpoint(runId);
       const prepared = await transition(runId, 'running', wt.path);
       // ponytail: the real brief (issue body, acceptance criteria, repo list)

@@ -1,16 +1,22 @@
 /**
  * The composition root. Every wire in the daemon is made here and nowhere else.
  *
- * ## The injection seam, and why it is exactly two ports wide
+ * ## The injection seam, and the one rule that decides what belongs in it
  *
- * `BootOptions` can override the tunnel and the Linear client. Nothing else. The rule is
- * not "make it testable" — it is: **a port is overridable only if it crosses a process or
- * network boundary this machine cannot cross offline.** ngrok needs an account and the
- * internet; Linear needs a workspace and an API key. Everything else — config loading, the
- * SQLite store, the migration, the receiver, the router, the scheduler, the run engine, the
- * question correlator, the recovery sweep — is constructed real, always, in every caller
- * including the boot smoke. A container with a slot per dependency would let the smoke boot
- * a graph of doubles and prove nothing about the graph that actually runs.
+ * **A port is overridable only if it crosses a process or network boundary this machine
+ * cannot cross in a test.** That is the whole rule, and it is not "make it testable":
+ * ngrok needs an account and the internet, Linear needs a workspace and an API key, the
+ * agent runner spawns `claude`, the deliverer pushes a ref to a remote the operator owns.
+ * Four ports meet it; `BootOptions` has four slots.
+ *
+ * Everything else — config loading, the SQLite store, the migration, the receiver, the
+ * router, the scheduler, the run engine, the question correlator, the recovery sweep, the
+ * WORKTREE MANAGER and the NOTIFIER — is constructed real, always, in every caller
+ * including the boot smoke. The worktree manager is the interesting one: `git` is local, so
+ * a test that wants a worktree creates a scratch repository rather than a double. A
+ * container with a slot per dependency would let the smoke boot a graph of doubles and
+ * prove nothing about the graph that actually runs, which is why every future plan must
+ * argue a fifth slot past the rule above rather than simply adding one.
  *
  * ## Boot order (07-CONTEXT D-01, D-02)
  *
@@ -32,8 +38,6 @@
  *
  * The scheduler is constructed and immediately **paused**, so no run can leave `queued` and
  * nothing can spawn a child process. Plan 05 owns starting it, signal handling and drain.
- * Plan 04 replaces the three execution fakes with the real worktree manager, agent runner
- * and deliverer.
  */
 import * as http from 'node:http';
 import { randomBytes } from 'node:crypto';
@@ -50,12 +54,18 @@ import { createScheduler } from '../orchestration/scheduler.js';
 import { createQuestions, type Questions } from '../orchestration/questions.js';
 import { createRunEngine, type RunEngine } from '../orchestration/run-engine.js';
 import { recoverAtBoot } from '../orchestration/recovery.js';
-// Plan 04 replaces these three imports with the real execution layer. Until then they are
-// what makes D-01's ordering possible: the ingress seam is provable without a `claude`
-// process, a git worktree or a `gh` call.
-import { FakeAgentRunner, FakeDeliverer, FakeWorktreeManager } from '../domain/fakes.js';
+import {
+  createAgentRunner,
+  createDeliverer,
+  createWorktreeManager,
+  mappingIndex,
+} from './adapters.js';
+import type { AgentSpawn } from '../execution/supervisor.js';
+import { nonTerminalStates } from '../orchestration/recovery.js';
 import type {
+  AgentRunner,
   Config,
+  Deliverer,
   DomainEvent,
   EngineEvent,
   IngressEvent,
@@ -72,6 +82,16 @@ export interface BootOptions {
   tunnel?: TunnelManager;
   /** Crosses the network. Overridable. */
   linear?: LinearClient;
+  /** Crosses a PROCESS boundary — spawns `claude`. Overridable. */
+  agent?: AgentRunner;
+  /** Crosses the network — pushes a ref and opens a pull request. Overridable. */
+  deliverer?: Deliverer;
+  /**
+   * The `claude` spawn itself, when the default agent runner is wanted but the binary is
+   * not. Narrower than `agent`: the run-path test scripts a session while still exercising
+   * the real argv construction, env allowlist and stream routing.
+   */
+  spawn?: AgentSpawn;
 }
 
 export interface DaemonHandle {
@@ -186,16 +206,32 @@ export async function bootDaemon(opts: BootOptions = {}): Promise<DaemonHandle> 
   // Late binding: questions calls back into the engine and the engine calls into
   // questions. The thunk is the port's own answer to that cycle.
   let questions: Questions;
+  // The repoSlug -> mapping-key index the toggles, the deliverer and the notifier all
+  // read. One pass over config, at boot, instead of a Linear round-trip per lookup.
+  const index = mappingIndex(config);
+  const adapterDeps = { store, config, log, index };
+
+  const worktrees = createWorktreeManager(adapterDeps);
+  const agent = opts.agent ?? createAgentRunner({ ...adapterDeps, spawn: opts.spawn });
+  const deliverer = opts.deliverer ?? createDeliverer(adapterDeps);
+
+  // P5, closed. `event-router.ts` has routed `task_summary` / `post_turn_summary` into a
+  // progress callback since Phase 4, but nothing threaded it out of the supervisor, so a
+  // 40-minute run said nothing between its acknowledgement and its terminal comment and
+  // read as hung. It goes to the log and not to a Linear comment on purpose: 05-CONTEXT
+  // D-01 caps the ticket at 4-6 milestone comments, and every comment the bot posts is an
+  // event the four ingress loop guards then have to drop.
+  agent.onProgress((runId, line) => log.info({ runId, progress: line }, 'agent progress'));
+
   const engine = createRunEngine({
     store,
     scheduler,
     linear,
     config,
     log,
-    // ponytail: fakes, on purpose (D-01). Plan 04 swaps in the real three.
-    agent: new FakeAgentRunner(),
-    worktrees: new FakeWorktreeManager(config.worktreeRoot),
-    deliverer: new FakeDeliverer(),
+    agent,
+    worktrees,
+    deliverer,
     questions: () => questions,
   });
   questions = createQuestions({ store, engine, config, linear, log });
@@ -203,6 +239,19 @@ export async function bootDaemon(opts: BootOptions = {}): Promise<DaemonHandle> 
   // ── 3. recovery sweep, BEFORE anything can deliver ─────────────────────────
   // `recoverAtBoot` logs its own report; a second line here would only duplicate it.
   await recoverAtBoot({ store, engine, scheduler, questions, linear, config, log });
+
+  // ── 3b. stale worktree collection, AFTER the sweep (04-CONTEXT D-11) ───────
+  // Order is the point: recovery is what decides which runs are still alive. Collecting
+  // first would prune the worktree of a run recovery was about to requeue, and the requeued
+  // run would then resume into a directory that no longer exists.
+  const live = new Set(store.listByState(...nonTerminalStates()).map((r) => r.id));
+  const pruned = await worktrees.gc(live).catch((err: unknown) => {
+    // Never fatal. A daemon that refuses to boot because a mapped clone moved is worse
+    // than one carrying a few orphaned directories it will report again next boot.
+    log.warn({ err: String(err) }, 'stale worktree collection failed; continuing');
+    return [] as string[];
+  });
+  if (pruned.length > 0) log.info({ pruned }, 'pruned worktrees with no non-terminal run');
 
   // The signing secret is OURS (HOOK-03 / 03-02 D-03): generated locally, persisted to kv
   // before any remote call, and never read back from Linear. Generating-and-persisting here
