@@ -30,14 +30,14 @@ lives in Phase 1 with the domain contract rather than inside whichever layer tou
 
 Decimal phases appear between their surrounding integers in numeric order.
 
-- [ ] **Phase 1: Domain Contract, State Machine & Schema** - The one serialization point: shared types, transition table, ports, fakes, SQL migration
-- [ ] **Phase 2: Foundation** - Validated config loading, the real SQLite store, and structured logging
-- [ ] **Phase 3: Ingress** - Tunnel, webhook reconciliation, signature verification, dedupe, four-layer loop prevention, event routing
-- [ ] **Phase 4: Execution** - Git worktree per run, supervised `claude -p` session, worker-owned push and PR
-- [ ] **Phase 5: Outbound** - Linear client facade and the fan-out notifier whose log channel cannot be disabled
-- [ ] **Phase 6: Orchestration** - Scheduler semaphore, run engine state machine, question correlation, restart recovery
-- [ ] **Phase 7: Integration & Daemon Lifecycle** - Wire the layers in dependency order and prove assignment→PR hands off
-- [ ] **Phase 8: Setup Wizard & Safety Pass** - One command takes a fresh machine to a working, webhook-registered daemon
+- [x] **Phase 1: Domain Contract, State Machine & Schema** - The one serialization point: shared types, transition table, ports, fakes, SQL migration
+- [x] **Phase 2: Foundation** - Validated config loading, the real SQLite store, and structured logging
+- [x] **Phase 3: Ingress** - Tunnel, webhook reconciliation, signature verification, dedupe, four-layer loop prevention, event routing
+- [x] **Phase 4: Execution** - Git worktree per run, supervised `claude -p` session, worker-owned push and PR
+- [x] **Phase 5: Outbound** - Linear client facade and the fan-out notifier whose log channel cannot be disabled
+- [x] **Phase 6: Orchestration** - Scheduler semaphore, run engine state machine, question correlation, restart recovery
+- [x] **Phase 7: Integration & Daemon Lifecycle** - Wire the layers in dependency order and prove assignment→PR hands off
+- [x] **Phase 8: Setup Wizard & Safety Pass** - One command takes a fresh machine to a working, webhook-registered daemon
 
 ## Phase Details
 
@@ -264,7 +264,7 @@ Phase 1 first. Phases 2-6 in parallel. Phase 7 after all of them. Phase 8 last.
 | 4. Execution | 6/6 | Complete | 2026-09-06 |
 | 5. Outbound | 2/2 | Complete | 2026-09-06 |
 | 6. Orchestration | 5/5 | Complete | 2026-09-06 |
-| 7. Integration & Daemon Lifecycle | 5/6 | In Progress | - |
+| 7. Integration & Daemon Lifecycle | 6/6 | Complete | 2026-09-06 |
 | 8. Setup Wizard & Safety Pass | 5/5 | Complete | 2026-09-06 |
 
 ---
