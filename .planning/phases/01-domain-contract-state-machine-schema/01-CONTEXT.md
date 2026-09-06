@@ -251,3 +251,35 @@ outside itself.
 executor needs a port method that does not yet exist, it declares the call site it wants
 in its `{NN}-SUMMARY.md` under a heading `Contract additions requested` rather than
 editing `src/domain/` itself — the integration gate reconciles those.
+
+
+---
+
+## CONTRACT ADDITIONS REQUESTED BY DOWNSTREAM PHASES
+
+Appended live as parallel phases discover gaps. **Plan 01-02's executor must fold these in** —
+they were found by executors already writing against the contract, so each one is a real
+call site, not speculation.
+
+### From plan 06-01 (Orchestration, completed)
+
+- **`LinearIssue.teamId: string | null` — REQUIRED, not optional.** Research's `LinearIssue`
+  carries `projectId` only. Without `teamId` the **team-level mapping fallback (Phase 1 D-07)
+  is unimplementable**, and that fallback is the whole reason an issue filed directly onto a
+  team is not silently dropped. This would have compiled everywhere and failed only as a
+  missing feature nobody could trace back to a type.
+- **`concurrency` belongs at `Config` top level, NOT in `Config.defaults`.** It is a global
+  cap bounding local RAM across all runs; `defaults` holds the six per-mapping-overridable
+  CONF-02 toggles, and concurrency is not one of them. Putting it in `defaults` implies a
+  per-mapping override that must not exist.
+- `Config.defaults.{questionTimeoutMs, baseBranch}` — these two *are* per-mapping toggles.
+- `config.mappings` as a `Record` keyed by project id, then team id (matching D-07's
+  project-with-team-fallback lookup order).
+- `state-machine.ts`: `RunStateInfo`, `RUN_STATE_TABLE` (**must be enumerable** — 06-01's
+  slot-accounting test iterates `Object.keys()` so that a tenth state cannot escape it),
+  and `canTransition(from, to)` as a **state-to-state** predicate.
+- `errors.ts`: `IllegalTransitionError(from, to)`
+- `types.ts`: `RunEventRow { runId, from: RunState | null, to, at, detail }`
+- `Store`: `appendRunEvent`, `listRunEvents`, `getQuestion(id)` — research sketches question
+  lookup by comment id and short code but not by primary key.
+- `Scheduler` port: `positionOf`, `syncFromStore`
