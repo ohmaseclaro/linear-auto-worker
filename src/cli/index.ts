@@ -3,19 +3,58 @@ import { parseArgs } from 'node:util';
 import { runDoctor, runSetupWizard } from './wizard/index.js';
 import { bootDaemon, installSignalHandlers } from './daemon.js';
 
+const USAGE = `law — turn Linear issues assigned to your bot into pull requests
+
+usage: law <command> [options]
+
+commands:
+  setup            Guided setup: preflight, secrets, project→repo mapping, webhook
+                   registration. Safe to re-run — it edits in place and skips whatever
+                   is already valid.
+  setup --doctor   Inspect and repair this workspace's webhook registrations instead of
+                   running the full flow. The only path that can delete anything, and it
+                   deletes only after a per-item confirmation.
+  start            Run the daemon: bind the local server, open the tunnel, reconcile the
+                   webhook, then process assigned issues until interrupted.
+  status           Show queued and in-flight runs.
+
+options:
+  -h, --help       Show this message.
+
+config lives in ~/.linear-auto-worker/ (config.json, .env at 0600, the SQLite database
+and logs). Only LINEAR_API_KEY and NGROK_AUTHTOKEN are ever prompted for.`;
+
 async function main(): Promise<number> {
-  const { positionals, values } = parseArgs({
-    args: process.argv.slice(2),
-    allowPositionals: true,
-    options: {
-      // `law setup --doctor` inspects the workspace's webhooks instead of running the
-      // full flow. It is the only flag that can delete anything, and it deletes only
-      // after a per-item confirmation.
-      doctor: { type: 'boolean', default: false },
-    },
-  });
+  // TRAPS T88: `parseArgs` THROWS on any unknown option, so `law --help` — the first
+  // thing anybody types — exited with a raw ERR_PARSE_ARGS_UNKNOWN_OPTION stack trace.
+  // 08-CONTEXT D-08 requires an actionable message and never a stack trace; that held
+  // for unknown commands and was missed for unknown options.
+  let positionals: string[];
+  let values: { doctor?: boolean; help?: boolean };
+  try {
+    ({ positionals, values } = parseArgs({
+      args: process.argv.slice(2),
+      allowPositionals: true,
+      options: {
+        // `law setup --doctor` inspects the workspace's webhooks instead of running the
+        // full flow. It is the only flag that can delete anything, and it deletes only
+        // after a per-item confirmation.
+        doctor: { type: 'boolean', default: false },
+        help: { type: 'boolean', short: 'h', default: false },
+      },
+    }));
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    console.error(`\n${USAGE}`);
+    return 1;
+  }
 
   const command = positionals[0];
+
+  if (values.help || command === 'help' || command === undefined) {
+    console.log(USAGE);
+    return command === undefined && !values.help ? 1 : 0;
+  }
 
   switch (command) {
     case 'setup':
@@ -39,7 +78,8 @@ async function main(): Promise<number> {
       console.log('not yet implemented — run `law setup` first');
       return 0;
     default:
-      console.log('usage: law <setup [--doctor]|start|status>');
+      console.error(`unknown command: ${command}\n`);
+      console.error(USAGE);
       return 1;
   }
 }
