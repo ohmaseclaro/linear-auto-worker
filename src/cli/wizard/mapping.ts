@@ -11,7 +11,7 @@
  * instruction to "use the closest reasonable name and record the exact addition wanted" —
  * see this plan's SUMMARY under "Contract additions requested".
  */
-import { checkbox, confirm, select } from '@inquirer/prompts';
+import { checkbox, confirm, input, select } from '@inquirer/prompts';
 import type { LinearClient } from '@linear/sdk';
 
 import type { DiscoveredRepo } from './repo-discovery.js';
@@ -207,19 +207,176 @@ async function promptRepoSelection(discovered: DiscoveredRepo[]): Promise<string
   return selected;
 }
 
+// ---------------------------------------------------------------------------
+// Slack + toggle capture
+// ---------------------------------------------------------------------------
+
+interface ToggleSpec {
+  message: string;
+  kind: 'boolean' | 'string' | 'number';
+}
+
+const TOGGLE_SPECS: Record<ToggleName, ToggleSpec> = {
+  linearComments: { message: 'Post progress comments to Linear for this mapping?', kind: 'boolean' },
+  slackNotifications: { message: 'Send Slack notifications for this mapping?', kind: 'boolean' },
+  baseBranch: { message: 'Base branch override:', kind: 'string' },
+  draftPr: { message: 'Open pull requests as draft for this mapping?', kind: 'boolean' },
+  questionTimeoutMs: { message: 'Question timeout override (ms):', kind: 'number' },
+  maxRunTimeMs: { message: 'Max run time override (ms):', kind: 'number' },
+};
+
+async function promptToggleOverrides(): Promise<ToggleOverrides | undefined> {
+  const wantsOverrides = await confirm({
+    message: 'Override any default behavior for this mapping?',
+    default: false,
+  });
+  if (!wantsOverrides) return undefined;
+
+  const chosen = await checkbox({
+    message: 'Which toggles should this mapping override?',
+    choices: TOGGLE_NAMES.map((name) => ({ name, value: name })),
+  });
+  if (chosen.length === 0) return undefined; // sparse: nothing selected, nothing overridden
+
+  const toggles: ToggleOverrides = {};
+  for (const name of chosen) {
+    const spec = TOGGLE_SPECS[name];
+    if (spec.kind === 'boolean') {
+      toggles[name] = await confirm({ message: spec.message });
+    } else if (spec.kind === 'number') {
+      const raw = await input({ message: spec.message });
+      toggles[name] = Number(raw);
+    } else {
+      toggles[name] = await input({ message: spec.message });
+    }
+  }
+  return toggles;
+}
+
 /**
- * The tracer's one real end-to-end path: list candidates, pick one project-or-team key, pick
- * repos to attach. Returns a single-element `Mapping[]` for now — the multi-mapping loop and
- * Slack/toggle capture are added in Task 2.
+ * Slack webhook URL (optional, empty input → `undefined`, never an empty string stored) plus
+ * the sparse toggle-override capture. Factored out so both the fresh-add path and the
+ * re-run "edit Slack/toggles" path call the same prompt sequence (D-04's edit-in-place has
+ * to share code with fresh-add, or the two paths silently drift apart).
+ */
+async function promptSlackAndToggles(): Promise<{
+  slackWebhookUrl?: string;
+  toggles?: ToggleOverrides;
+}> {
+  const rawSlack = (
+    await input({ message: 'Slack incoming-webhook URL (optional):' })
+  ).trim();
+  const slackWebhookUrl = rawSlack || undefined;
+  const toggles = await promptToggleOverrides();
+  return { slackWebhookUrl, toggles };
+}
+
+/** One full mapping's prompt sequence: key, repos, Slack + toggles. Shared by the fresh-add
+ *  loop and (per-field) by the re-run edit paths — see `reviewExistingMapping`. */
+async function promptOneMapping(
+  candidates: { teams: TeamCandidate[]; projects: ProjectCandidate[] },
+  discovered: DiscoveredRepo[],
+): Promise<Mapping> {
+  const key = await promptMappingKey(candidates);
+  const repos = await promptRepoSelection(discovered);
+  const { slackWebhookUrl, toggles } = await promptSlackAndToggles();
+  return { key, repos, slackWebhookUrl, toggles };
+}
+
+// ---------------------------------------------------------------------------
+// Re-run: edit in place (D-04)
+// ---------------------------------------------------------------------------
+
+/** A Slack webhook URL is bearer-secret-shaped (posting needs no other auth) even though it
+ *  is not one of the two prompted secrets — masked to host-only on redisplay. */
+function maskSlackUrl(url: string): string {
+  try {
+    return `${new URL(url).host}/…`;
+  } catch {
+    return '…';
+  }
+}
+
+function printExistingMapping(mapping: Mapping): void {
+  console.log(`- ${mapping.key.kind}: ${mapping.key.name}`);
+  console.log(`  repos: ${mapping.repos.join(', ') || '(none)'}`);
+  console.log(
+    `  slack: ${mapping.slackWebhookUrl ? maskSlackUrl(mapping.slackWebhookUrl) : '(none)'}`,
+  );
+  console.log(`  toggles: ${mapping.toggles ? JSON.stringify(mapping.toggles) : '(none)'}`);
+}
+
+type ExistingMappingAction = 'keep' | 'edit-repos' | 'edit-slack' | 'remove';
+
+/**
+ * Re-run edit-in-place (D-04): "keep as-is" returns the mapping byte-for-byte untouched — no
+ * code path may partially mutate a mapping the operator did not choose to edit (threat
+ * T-08-10). Only the field the operator picks goes through `promptOneMapping`'s prompt
+ * sequence again; everything else on the mapping is preserved via spread.
+ */
+async function reviewExistingMapping(
+  mapping: Mapping,
+  discovered: DiscoveredRepo[],
+): Promise<Mapping | null> {
+  printExistingMapping(mapping);
+  const action = await select<ExistingMappingAction>({
+    message: `What should happen to the "${mapping.key.name}" mapping?`,
+    choices: [
+      { name: 'keep as-is', value: 'keep' },
+      { name: 'edit repos', value: 'edit-repos' },
+      { name: 'edit Slack/toggles', value: 'edit-slack' },
+      { name: 'remove', value: 'remove' },
+    ],
+  });
+
+  if (action === 'keep') return mapping;
+  if (action === 'remove') return null;
+  if (action === 'edit-repos') {
+    const repos = await promptRepoSelection(discovered);
+    return { ...mapping, repos };
+  }
+  // 'edit-slack'
+  const { slackWebhookUrl, toggles } = await promptSlackAndToggles();
+  return { ...mapping, slackWebhookUrl, toggles };
+}
+
+// ---------------------------------------------------------------------------
+// Entry point
+// ---------------------------------------------------------------------------
+
+/**
+ * Build (or edit) the operator's project→repo mapping set.
+ *
+ * No `existing` (first run): build one mapping via `promptOneMapping`, then loop "Add
+ * another mapping?" until declined (D-04's fresh-build path).
+ *
+ * `existing` provided (re-run): every existing mapping is reviewed via
+ * `reviewExistingMapping` — untouched mappings come back byte-for-byte identical, only the
+ * ones the operator chooses to edit are re-prompted. After reviewing all of them, the
+ * operator can still add brand-new mappings through the same "Add another mapping?" prompt.
  */
 export async function buildMappings(
   linearClient: LinearClient,
   discovered: DiscoveredRepo[],
   existing?: Mapping[],
 ): Promise<Mapping[]> {
-  void existing; // wired up in Task 2 (re-run edit-in-place)
   const candidates = await listMappingCandidates(linearClient);
-  const key = await promptMappingKey(candidates);
-  const repos = await promptRepoSelection(discovered);
-  return [{ key, repos }];
+  const result: Mapping[] = [];
+
+  if (existing && existing.length > 0) {
+    for (const mapping of existing) {
+      const outcome = await reviewExistingMapping(mapping, discovered);
+      if (outcome) result.push(outcome);
+    }
+  } else {
+    result.push(await promptOneMapping(candidates, discovered));
+  }
+
+  let addMore = await confirm({ message: 'Add another mapping?', default: false });
+  while (addMore) {
+    result.push(await promptOneMapping(candidates, discovered));
+    addMore = await confirm({ message: 'Add another mapping?', default: false });
+  }
+
+  return result;
 }
