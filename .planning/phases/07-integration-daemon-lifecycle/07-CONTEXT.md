@@ -108,3 +108,33 @@ None.
 
 *Phase: 7-Integration & Daemon Lifecycle*
 *Context gathered: 2026-09-06*
+
+
+---
+
+## HARD DELIVERABLES DISCOVERED DURING THE PARALLEL BUILD
+
+These are not notes. Each is a break that **typechecks clean** and fails silently, so nothing
+in the gate will surface them. Phase 7 must do each one explicitly.
+
+1. **Wire the ingress→engine `DomainEvent` mapping** (TRAPS T45). Plan 01-02 unioned both
+   producers' kind sets into `ports.ts`, which is correct — and which means the mismatch now
+   compiles clean. Ingress emits `issue.assigned` / `issue.unassigned` / `comment.created`;
+   the engine switches on `run.requested` / `question.answered` / `run.cancelled` / `ignored`.
+   **Unwired, the daemon boots, verifies, and processes nothing.** The five-case mapping table
+   is in `01-02-SUMMARY.md`. This is the single highest-risk item in the milestone.
+2. **Add `noteSelfWrite('Issue', issueId)` at the `setIssueState` call site** (T49). The
+   notifier covers comment writes; nothing covers state transitions. No phase's plan owns
+   this seam.
+3. **Wire `QuestionsDeps.linear`** (T43). `openQuestion` posts the question comment and stores
+   its id — tier-1 answer correlation is dead without it, and the tier-2 fallback masks that
+   on every single-question ticket.
+4. **Wire `LinearClient`'s `log`** — it defaults to a no-op, so every `linear.ratelimited` and
+   budget line is silently dropped. Under D-04 ("the log is the UI") that is a regression.
+5. **Apply the 11 reconciliation items R1–R11** listed in `01-02-SUMMARY.md`, including
+   `config.defaults.concurrency` → `config.concurrency` and Phase 2's renamed toggles.
+6. **Rename the three `kvPut` call sites to `kvSet`** and `tryInsertDelivery` to
+   `recordDelivery`, matching the implementation (T46).
+7. **Decide `maxQuestionRounds`** (T44) — currently unbounded; an agent can ask forever.
+8. **Expect `logger.test.ts`'s cycle-guard test to FAIL** on the first gate run (T48). It is a
+   known gap, not a regression — fix `redact()` or delete the test deliberately.
