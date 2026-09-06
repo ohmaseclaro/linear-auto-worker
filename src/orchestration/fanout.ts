@@ -27,7 +27,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import { RUN_STATE_TABLE } from '../domain/state-machine.js';
-import type { Run, RunId, RunState } from '../domain/types.js';
+import type { RepoRun, RunId, RunState, TicketRun } from '../domain/types.js';
 
 /** The slice of a mapping's `repos[]` entry the fan-out actually reads. */
 export interface FanoutRepo {
@@ -50,22 +50,20 @@ export interface FanoutIssue {
 }
 
 /**
- * The parent row. Its `state` column is `null` and stays `null` for the row's
- * whole life (D-12, Phase 1 D-04) -- the parent is a row, not a runnable thing.
- * It never acquires a slot, never gets a worktree and never spawns a process.
+ * The parent row is a `TicketRun` — Phase 1's own type, which already says exactly
+ * this: `state: null` for the row's whole life (D-12, Phase 1 D-04), no repo, no
+ * branch, no worktree, no session, no pid. The parent is a row, not a runnable thing.
  *
- * Typing it as `null` rather than casting is deliberate. If Phase 1 lands
- * `Run.state` as non-nullable this stops compiling at the integration gate,
- * which surfaces the schema requirement instead of burying it under a cast.
- * See `Contract additions requested` in 06-05-SUMMARY.md.
+ * There used to be a local `ParentRun = Omit<Run,'state'> & { state: null }` here. It
+ * was not the same type: `Omit` over a UNION collapses to the keys common to both arms,
+ * so it silently dropped `prUrl`/`failureReason` and was assignable to neither arm of
+ * `Run`. `TicketRun` is the one definition; do not reintroduce a second.
  */
-export type ParentRun = Omit<Run, 'state'> & { readonly state: null };
-
 export interface FanoutPlan {
   /** `null` for a single-repo ticket: the common case is not wrapped. */
-  readonly parent: ParentRun | null;
-  /** The runnable rows. Exactly these get enqueued. */
-  readonly children: readonly Run[];
+  readonly parent: TicketRun | null;
+  /** The runnable rows. Exactly these get enqueued — and only a repo run is runnable. */
+  readonly children: readonly RepoRun[];
 }
 
 /**
@@ -124,7 +122,7 @@ export function planSubRuns(
 
   const single = repos.length === 1;
 
-  function row(repo: FanoutRepo, branch: string, parentRunId: RunId | null): Run {
+  function row(repo: FanoutRepo, branch: string, parentRunId: RunId | null): RepoRun {
     return {
       id: randomUUID(),
       parentRunId,
@@ -156,7 +154,7 @@ export function planSubRuns(
     return { parent: null, children: [row(repos[0], issue.branchName, null)] };
   }
 
-  const parent: ParentRun = {
+  const parent: TicketRun = {
     id: randomUUID(),
     parentRunId: null,
     kind: 'ticket',
@@ -175,8 +173,9 @@ export function planSubRuns(
     state: null,
     attempt: 0,
     questionRound: 0,
-    prUrl: null,
-    failureReason: null,
+    // No `prUrl` and no `failureReason`: `TicketRun` has neither, because a ticket
+    // does not ship or fail on its own — its children do, and `deriveParentStatus`
+    // reads them (D-12, DELV-07).
     createdAt: at,
     updatedAt: at,
   };
@@ -238,5 +237,5 @@ export function deriveParentStatus(
  * with a coordination-failure mode attached.
  */
 export function ticketBriefRepos(plan: FanoutPlan): readonly string[] {
-  return plan.children.map((c) => c.repoSlug!).filter(Boolean);
+  return plan.children.map((c) => c.repoSlug).filter(Boolean);
 }

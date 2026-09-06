@@ -48,7 +48,10 @@ export interface SchedulerDeps {
 }
 
 export function createScheduler(deps: SchedulerDeps): Scheduler {
-  const cap = deps.config.defaults.concurrency ?? DEFAULT_CONCURRENCY;
+  // `Config.concurrency`, top level — never `defaults.concurrency`. The cap bounds local
+  // RAM across every run on this machine, so a per-mapping override must not exist
+  // (types.ts: "Never per-mapping").
+  const cap = deps.config.concurrency ?? DEFAULT_CONCURRENCY;
 
   /**
    * Admitted run ids, not a counter. `inUse()` is a recount of this set, so a
@@ -101,7 +104,9 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
 
     syncFromStore(runs: readonly Run[]): void {
       admitted.clear();
-      for (const run of runs) if (holdsSlot(run.state)) admitted.add(run.id);
+      // A ticket-kind parent has no state and is not runnable: it holds no slot by
+      // construction, so it is skipped rather than given a state to look up (D-04).
+      for (const run of runs) if (run.kind === 'repo' && holdsSlot(run.state)) admitted.add(run.id);
       deps.log?.info({ inUse: admitted.size, capacity: cap }, 'scheduler resynced');
       pump();
     },

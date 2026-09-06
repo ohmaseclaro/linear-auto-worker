@@ -12,13 +12,14 @@ import { IllegalTransitionError } from '../domain/errors.js';
 // comment this daemon posts carries it, or the ingress loop-prevention filter
 // cannot tell the bot's own comments from a human's and the bot answers itself.
 import { BOT_COMMENT_MARKER_PREFIX } from '../domain/index.js';
-import type { Run, RunId, RunState } from '../domain/types.js';
+import type { RepoRun, Run, RunId, RunState } from '../domain/types.js';
+import { LOG_DIR } from '../domain/types.js';
 import type {
   AgentResult,
   AgentRunner,
   Config,
   Deliverer,
-  DomainEvent,
+  EngineEvent,
   LinearClient,
   LinearIssue,
   Logger,
@@ -37,8 +38,8 @@ export interface RunEngine {
    * was not recorded is a missing row rather than a missing log line. An
    * illegal move throws and writes nothing.
    */
-  transition(runId: RunId, to: RunState, detail?: string): Promise<Run>;
-  handle(event: DomainEvent): Promise<void>;
+  transition(runId: RunId, to: RunState, detail?: string): Promise<RepoRun>;
+  handle(event: EngineEvent): Promise<void>;
   /**
    * D-11 / INTK-08. Accepted from every non-terminal state; a no-op from a
    * terminal one. States with no live child move to `cancelled` now; states
@@ -92,9 +93,26 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
     void wrapped.finally(() => inFlight.delete(wrapped));
   }
 
-  async function transition(runId: RunId, to: RunState, detail?: string): Promise<Run> {
+  /**
+   * D-04, and the reason every reader below narrows on `kind` instead of reading
+   * `run.state` off a `Run`: only a REPO run has a state. A ticket-kind parent's status
+   * is derived from its children by `deriveParentStatus` and is never read from a column,
+   * because there deliberately is no column — that absence is what makes it impossible for
+   * a parent and a child to disagree, and that disagreement is exactly how one repo's
+   * failure would discard another repo's already-shipped pull request (DELV-07).
+   *
+   * So: no widening of `RunState`, no state column on `TicketRun`. Transitioning a parent
+   * is a caller bug and throws.
+   */
+  function repoRun(runId: RunId): RepoRun {
     const run = store.getRun(runId);
     if (!run) throw new Error(`no such run: ${runId}`);
+    if (run.kind !== 'repo') throw new Error(`run ${runId} is a ticket parent; it has no state`);
+    return run;
+  }
+
+  async function transition(runId: RunId, to: RunState, detail?: string): Promise<RepoRun> {
+    const run = repoRun(runId);
     if (!canTransition(run.state, to)) throw new IllegalTransitionError(run.state, to);
 
     const at = now();
@@ -227,9 +245,16 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
     // INTK-03: assignee-based pickup takes the ticket out of the operator's
     // "Assigned to me" view for the whole run. Without the subscription they
     // lose sight of their own ticket.
-    await attempt('subscriber', run.id, () =>
-      linear.addSubscriber(run.issueId, config.operatorUserId),
-    );
+    const operator = config.operatorUserId;
+    if (operator) {
+      await attempt('subscriber', run.id, () => linear.addSubscriber(run.issueId, operator));
+    } else {
+      // No wizard step writes `operatorUserId` yet: the daemon authenticates as the BOT,
+      // so `viewer()` returns the bot, not the operator (07-CONTEXT P8). Skipped and
+      // logged rather than called with `undefined` — the operator can see why their
+      // ticket left "Assigned to me".
+      log.warn({ runId: run.id }, 'config.operatorUserId unset; INTK-03 subscribe skipped');
+    }
 
     return created?.id ?? null;
   }
@@ -267,10 +292,10 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
   }
 
   function logPathFor(runId: RunId): string {
-    return `${config.logDir}/${runId}.log`;
+    return `${LOG_DIR}/${runId}.log`;
   }
 
-  function diagnosis(run: Run): string {
+  function diagnosis(run: RepoRun): string {
     return [
       `Run failed: ${run.failureReason ?? 'unknown failure'}`,
       `Log: \`${logPathFor(run.id)}\``,
@@ -279,7 +304,7 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
     ].join('\n');
   }
 
-  function terminalText(run: Run): string {
+  function terminalText(run: RepoRun): string {
     switch (run.state) {
       case 'delivered':
         return `Done — ${run.prUrl}`;
@@ -300,7 +325,9 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
    */
   async function announceTerminal(runId: RunId): Promise<void> {
     const run = store.getRun(runId);
-    if (!run || !RUN_STATE_TABLE[run.state].terminal) return;
+    // A ticket parent is announced by the rollup below, never on its own: it has no
+    // state of its own to be terminal (D-04).
+    if (!run || run.kind !== 'repo' || !RUN_STATE_TABLE[run.state].terminal) return;
     // The guard is written before the call, not after: a second attempt is
     // worse than a missing one here, and the call itself cannot throw.
     if (store.kvGet(terminalKey(runId))) return;
@@ -318,7 +345,7 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
     );
   }
 
-  function rollupLine(child: Run): string {
+  function rollupLine(child: RepoRun): string {
     const detail =
       child.prUrl ?? (child.state === 'failed' ? (child.failureReason ?? 'no diagnosis') : '');
     return `- \`${child.repoSlug}\` — **${child.state}**${detail ? ` — ${detail}` : ''}`;
@@ -338,7 +365,10 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
   async function announceTicketRollup(parentRunId: RunId): Promise<void> {
     const parent = store.getRun(parentRunId);
     if (!parent) return;
-    const children = store.listRunsByParent(parentRunId);
+    // `childRuns`, the name the port and `sqlite-store.ts` both carry — 06-05 asked for
+    // `listRunsByParent`, which is the same query under a second name. It returns terminal
+    // children too, which is the whole point of a rollup.
+    const children = store.childRuns(parentRunId).filter((c): c is RepoRun => c.kind === 'repo');
     const status = deriveParentStatus(children);
     // Still in flight: a repo that has not finished is not a ticket that has.
     if (!status.settled) return;
@@ -373,8 +403,9 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
   async function finishCancel(runId: RunId, reason: string): Promise<void> {
     const run = store.getRun(runId);
     // Idempotent: a run cancelled while parked reaches here a second time when
-    // its turn in the queue finally comes up.
-    if (!run || RUN_STATE_TABLE[run.state].terminal) return;
+    // its turn in the queue finally comes up. A parent has nothing to cancel — its
+    // children are cancelled individually.
+    if (!run || run.kind !== 'repo' || RUN_STATE_TABLE[run.state].terminal) return;
     for (const q of store.openQuestionsForIssue(run.issueId)) {
       if (q.runId === runId) store.updateQuestion(q.id, { status: 'cancelled' });
     }
@@ -393,7 +424,7 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
    */
   async function cancel(runId: RunId, reason = 'bot unassigned'): Promise<void> {
     const run = store.getRun(runId);
-    if (!run) return;
+    if (!run || run.kind !== 'repo') return;
     const info = RUN_STATE_TABLE[run.state];
 
     // Terminal is terminal (T-06-09). No transition, no throw: a replayed
@@ -448,12 +479,12 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
         // mechanism is exit-and-resume: the child is already gone, so there is
         // nothing resident to keep alive while the human thinks.
         release();
-        await deps.questions().openQuestion(runId, result.question, result.assumptionIfUnanswered);
+        await deps.questions().openQuestion(runId, result.question, result.assumption);
         return;
       }
       case 'complete': {
         await transition(runId, 'delivering', result.summary);
-        const run = store.getRun(runId)!;
+        const run = repoRun(runId);
         const pr = await deliverer.deliver(worktreeOf(run), repoOf(run), {
           title: result.prTitle,
           body: result.prBody,
@@ -482,33 +513,33 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
    * it never has to re-resolve config -- a mapping edited mid-run cannot move
    * a live run to a different repository.
    */
-  function repoOf(run: Run) {
+  function repoOf(run: RepoRun) {
     return {
-      repoDir: run.repoDir!,
-      repoSlug: run.repoSlug!,
+      repoDir: run.repoDir,
+      repoSlug: run.repoSlug,
       baseBranch: config.defaults.baseBranch,
       enabled: true,
     };
   }
 
-  function worktreeOf(run: Run) {
+  function worktreeOf(run: RepoRun) {
     return {
       runId: run.id,
-      repoDir: run.repoDir!,
+      repoDir: run.repoDir,
       path: run.worktreePath!,
-      branch: run.branch!,
+      branch: run.branch,
       baseBranch: config.defaults.baseBranch,
     };
   }
 
-  function spawnRequest(run: Run, prompt: string, resume: boolean) {
+  function spawnRequest(run: RepoRun, prompt: string, resume: boolean) {
     return {
       runId: run.id,
       sessionId: run.sessionId!,
       cwd: run.worktreePath!,
       prompt,
       resume,
-      env: { LAW_RUN_ID: run.id, LAW_ISSUE_KEY: run.issueKey, LAW_REPO: run.repoSlug ?? '' },
+      env: { LAW_RUN_ID: run.id, LAW_ISSUE_KEY: run.issueKey, LAW_REPO: run.repoSlug },
     };
   }
 
@@ -536,8 +567,8 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
       // find it had already stopped.
       checkpoint(runId);
       await transition(runId, 'preparing', ackCommentId ?? 'slot acquired');
-      const queued = store.getRun(runId)!;
-      const wt = await worktrees.create(runId, repoOf(queued), queued.branch!);
+      const queued = repoRun(runId);
+      const wt = await worktrees.create(runId, repoOf(queued), queued.branch);
       store.updateRun(runId, { worktreePath: wt.path, updatedAt: now() });
       checkpoint(runId);
       const prepared = await transition(runId, 'running', wt.path);
@@ -560,15 +591,24 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
     }
   }
 
-  async function resumeAfterAnswer(questionId: string, runId: RunId, answer: string): Promise<void> {
+  /**
+   * `questionId` is null for QA-07's `run.resumed`: the disabled-question-flow branch has
+   * no question row by construction, so there is nothing to mark answered. Everything
+   * after that is identical, which is why it is this function and not a second one.
+   */
+  async function resumeAfterAnswer(
+    questionId: string | null,
+    runId: RunId,
+    answer: string,
+  ): Promise<void> {
     // Slot re-acquired BEFORE the run is put back into a running state, so the
     // semaphore is never behind the state table.
     const release = await scheduler.acquire(runId);
     const ac = new AbortController();
     aborts.set(runId, ac);
     try {
-      await deps.questions().applyAnswer(questionId, answer);
-      const run = store.getRun(runId)!;
+      if (questionId !== null) await deps.questions().applyAnswer(questionId, answer);
+      const run = repoRun(runId);
       const result = await agent.run(spawnRequest(run, answer, true), ac.signal);
       checkpoint(runId);
       await dispatch(runId, result, release);
@@ -589,7 +629,7 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
     cancel,
     isCancelRequested,
 
-    async handle(event: DomainEvent): Promise<void> {
+    async handle(event: EngineEvent): Promise<void> {
       switch (event.kind) {
         case 'run.requested': {
           // Invariant 2: decide from the canonical issue, never from webhook body.
@@ -625,7 +665,7 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
           // subscriptions. The lead child owns the single ack comment, so it is
           // also the only one whose queue position edits it -- the others have
           // no ack entry and `refreshQueuePositions` already no-ops on that.
-          const repos = plan.children.map((c) => c.repoSlug!);
+          const repos = plan.children.map((c) => c.repoSlug);
           const ackCommentId = await acknowledge(plan.children[0], repos);
           plan.children.forEach((child, i) => {
             // No sequencing between children beyond the global semaphore.
@@ -662,7 +702,15 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
           track(resumeAfterAnswer(q.id, q.runId, event.answer));
           return;
         }
-        default:
+        case 'run.resumed': {
+          // QA-07. The run never parked, so it never entered `awaiting_answer` and there
+          // is no question row to close — but it DID release its slot in `dispatch`, so
+          // the resume re-acquires one exactly like an answered question does.
+          track(resumeAfterAnswer(null, event.runId, event.input));
+          return;
+        }
+        case 'ignored':
+          log.debug({ reason: event.reason }, 'event ignored');
           return;
       }
     },
