@@ -104,9 +104,9 @@ test('a top-level reply with zero open questions correlates to nothing', () => {
   assert.equal(r.outcome === 'none' && r.reason, 'no_open_questions');
 });
 
-test('answered and expired questions are not correlation candidates', () => {
+test('answered and timed-out questions are not correlation candidates', () => {
   const done = question({ id: 'q-done', status: 'answered' });
-  const gone = question({ id: 'q-gone', status: 'expired', linearCommentId: 'c-gone' });
+  const gone = question({ id: 'q-gone', status: 'timed_out', linearCommentId: 'c-gone' });
   assert.equal(correlate(comment({ parentId: null }), [done, gone], BOT).outcome, 'none');
   assert.equal(correlate(comment({ parentId: 'c-gone' }), [done, gone], BOT).outcome, 'none');
 });
@@ -277,7 +277,7 @@ test('applying an answer to a question already answered or expired is a no-op', 
   assert.equal(h.store.getQuestion(q.id)!.answer, 'first');
   assert.deepEqual(h.transitions, []);
 
-  h.store.updateQuestion(q.id, { status: 'expired' });
+  h.store.updateQuestion(q.id, { status: 'timed_out' });
   assert.equal(await h.questions.applyAnswer(q.id, 'third'), null);
   assert.deepEqual(h.transitions, []);
 });

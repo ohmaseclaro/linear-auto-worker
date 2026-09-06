@@ -84,7 +84,7 @@ const NEEDS_INPUT: AgentResult = {
   status: 'needs_input',
   summary: 'Blocked on a product judgement.',
   question: 'Which timezone?',
-  assumptionIfUnanswered: 'UTC.',
+  assumption: 'UTC.',
 };
 
 interface Created {
@@ -191,7 +191,7 @@ function harness(opts: {
     log: silent,
     questions: () => questions,
   });
-  questions = createQuestions({ store, engine, config, log: silent });
+  questions = createQuestions({ store, engine, config, linear: linear.client, log: silent });
 
   return { store, scheduler, agent, deliverer, linear, spy, engine, config };
 }

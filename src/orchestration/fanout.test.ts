@@ -466,7 +466,7 @@ function fanoutHarness(opts: {
     log: silent,
     questions: () => questions,
   });
-  questions = createQuestions({ store, engine, config, log: silent });
+  questions = createQuestions({ store, engine, config, linear, log: silent });
 
   const runsOf = (issueId: string) =>
     ALL_STATES.flatMap((s) => raw.listByState(s)).filter((r) => r.issueId === issueId);
@@ -602,8 +602,9 @@ test('a failing child leaves its delivered sibling untouched, and the ticket der
 
   // And the ticket-level answer is derived, on this read, from exactly those rows.
   assert.deepEqual(deriveParentStatus(children), { settled: true, state: 'partial' });
+  const apiAfter = h.store.getRun(api.id)!;
   assert.equal(
-    h.store.getRun(api.id)!.prUrl,
+    apiAfter.kind === 'repo' ? apiAfter.prUrl : null,
     'https://github.com/org/api/pull/7',
     'reading the parent status changed nothing about the delivered child',
   );
