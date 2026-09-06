@@ -18,7 +18,9 @@
  */
 
 import { LogChannel } from './log-channel.js';
-import type { LogFn } from '../linear-client.js';
+import { LinearCommentChannel } from './linear-channel.js';
+import { SlackChannel } from './slack-channel.js';
+import type { LinearClient, LogFn } from '../linear-client.js';
 
 export type { LogFn };
 
@@ -209,4 +211,45 @@ export class Notifier {
       'notify.channel_failed',
     );
   }
+}
+
+export interface CreateNotifierOptions {
+  log: LogFn;
+  linearClient: LinearClient;
+  /** Per-mapping toggle. Turning it off costs zero logging — that is the point of D-04. */
+  postLinearComments: (mappingId: string) => boolean;
+  /** Per-mapping Slack incoming-webhook URL, or undefined when Slack is off for it. */
+  webhookUrl: (mappingId: string) => string | undefined;
+  retry?: RetryOptions;
+  delay?: DelayFn;
+  fetch?: typeof globalThis.fetch;
+}
+
+/**
+ * The one wiring point: the built-in LogChannel, plus LinearCommentChannel and SlackChannel.
+ *
+ * Note what is *not* here — no `if (kind === 'terminal')`, no Slack special case. Which
+ * kinds reach which channel is each channel's own `enabled()`, so the fan-out loop above
+ * stays kind-agnostic and adding a fifth channel is a constructor argument rather than an
+ * edit to `emit()`. And because `LogChannel` is not in this array, no future edit to it —
+ * including deleting both entries — can remove logging.
+ */
+export function createNotifier(opts: CreateNotifierOptions): Notifier {
+  return new Notifier({
+    log: opts.log,
+    channels: [
+      new LinearCommentChannel({
+        client: opts.linearClient,
+        postLinearComments: opts.postLinearComments,
+        log: opts.log,
+      }),
+      new SlackChannel({
+        webhookUrl: opts.webhookUrl,
+        log: opts.log,
+        fetch: opts.fetch,
+      }),
+    ],
+    retry: opts.retry,
+    delay: opts.delay,
+  });
 }
