@@ -56,7 +56,7 @@ function harness(enqueue?: (p: WebhookPayload, d?: string) => Promise<void>): Ha
 
   const inserted: string[] = [];
   const store = {
-    tryInsertDelivery(deliveryId: string): boolean {
+    recordDelivery(deliveryId: string): boolean {
       if (inserted.includes(deliveryId)) return false;
       inserted.push(deliveryId);
       return true;

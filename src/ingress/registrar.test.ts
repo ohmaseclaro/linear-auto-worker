@@ -83,7 +83,7 @@ function makeStore(calls: string[], seed: Record<string, string> = {}) {
   const kv = new Map<string, string>(Object.entries(seed));
   const store = {
     kvGet: (k: string) => kv.get(k),
-    kvPut: (k: string, v: string) => {
+    kvSet: (k: string, v: string) => {
       calls.push(`kv:put:${k}`);
       kv.set(k, v);
     },

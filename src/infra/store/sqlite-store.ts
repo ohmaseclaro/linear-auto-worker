@@ -50,6 +50,8 @@ export interface QuestionRow {
   deadlineAt: number | string | null;
   status: string;
   answer: string | null;
+  /** `null` for a deadline expiry; the answering human's display name otherwise. */
+  answeredBy?: string | null;
 }
 
 export interface RunEventInsert {
