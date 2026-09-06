@@ -64,7 +64,22 @@ was produced".
 - **D-10:** Invalid signature returns **400**, not 401 (verified). Four signature tests
   are required: valid, tampered, stale timestamp, and **non-ASCII body** — the
   ASCII-only test passes while real tickets containing emoji fail.
-- **D-11:** No HTTP framework. `LinearWebhookClient.createHandler()` from
+- **D-11 (AMENDED 2026-09-06, post-research):** No HTTP framework — a plain `node:http`
+  listener calling **`client.parseData()`**, which verifies the HMAC *before* parsing.
+  The original wording named `LinearWebhookClient.createHandler()`; measurement showed it
+  `JSON.parse`s unverified bytes before HMAC-ing (the inverse of this decision's own
+  rationale), awaits handlers before sending 200 (1205 ms measured for a 1200 ms handler,
+  blowing the sub-5s ACK budget), discards the `Linear-Delivery` header so dedupe is
+  unreachable, and collapses stale/tampered/malformed into one identical 400 — defeating
+  HOOK-05, HOOK-06, HOOK-08, D-09 and D-10. `parseData()` on plain `node:http` upholds
+  both properties this lock exists to protect, verified at 200-in-3ms with work deferred.
+- **D-12 (NEW):** Ownership of the D-04 reconciliation poll, which three documents assign
+  to three different owners: **Phase 3 owns the query, Phase 6 owns the timer.** This
+  matters because D-08's null-actor drop is only safe *because* the poll exists — an
+  unowned poll makes a locked decision unsound.
+- **D-13 (NEW):** `src/shared/markers.ts` (the D-07 marker constant) is **owned by
+  Phase 3**. Phase 5 imports it and must not create its own copy.
+- **D-11 (original wording, superseded):** No HTTP framework. `LinearWebhookClient.createHandler()` from
   `@linear/sdk/webhooks` is itself a `node:http` request listener that consumes the raw
   body and HMACs it before any JSON parsing. Express/Fastify/Hono each reintroduce the
   raw-body problem that otherwise does not exist here.
