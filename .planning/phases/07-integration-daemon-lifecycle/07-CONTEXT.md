@@ -34,6 +34,12 @@ sequence.
   in the milestone that can catch a wiring break — unit tests instantiate against fakes
   and typecheck only checks types, so a module that never wires up what it depends on
   passes both.
+- **D-06 (NEW, resolves the planner's open question):** Clean shutdown **transitions**
+  in-flight `running`/`delivering` runs to `queued` before exit — it does not merely log
+  that they were in flight. With that write in place, 06-CONTEXT D-07's fail-on-`running`
+  applies only to an unclean exit, which is the case where push status is unknowable.
+  Without it, Ctrl-C costs a manual restart of every live run. See TRAPS T18 and T26.
+  Plan 07-05 owns this.
 - **D-05:** **Rush-mode integration debt lands here.** All eight phases were built in
   parallel with no typecheck and no tests run, against the binding contract text in
   `01-CONTEXT.md` rather than against compiled code. Expect signature mismatches at the
