@@ -7,9 +7,9 @@
     "node": ">=22"
   },
   "scripts": {
-    "verify": "tsc && node --test dist",
+    "verify": "tsc && node --test \"dist/**/*.test.js\"",
     "typecheck": "tsc --noEmit",
-    "test": "node --test dist",
+    "test": "node --test \"dist/**/*.test.js\"",
     "build": "tsc",
     "dev": "tsx watch src/index.ts"
   },
