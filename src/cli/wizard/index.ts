@@ -22,7 +22,7 @@ function printResult(result: PreflightResult): void {
  * expressed as a PreflightResult with a human `fix` string.
  */
 export async function runSetupWizard(): Promise<number> {
-  const results = runPreflight();
+  const results = await runPreflight();
 
   for (const result of results) {
     printResult(result);
