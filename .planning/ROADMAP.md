@@ -81,7 +81,14 @@ Decimal phases appear between their surrounding integers in numeric order.
   3. An event the bot itself caused is dropped by four independent guards — actor identity, invisible comment marker, a short self-write suppression window, and delivery-ID uniqueness — and an event with a null actor is treated as untrusted rather than as not-the-bot
   4. A counter of dropped self-events climbs while the bot is commenting, so a filter that is not wired in is visible rather than silent
   5. Assigning the bot to an issue produces exactly one pickup, decided from a fresh fetch of the issue rather than from the webhook payload, and a later unrelated edit to that same issue produces none
-**Plans**: TBD
+**Plans**: 5 plans across 2 waves
+
+Plans:
+- [ ] 03-01-PLAN.md — ngrok tunnel: checked URL, singleton assertion, sanitised auth failure (TUN-01/02/03)
+- [ ] 03-02-PLAN.md — Webhook reconciler: persist-then-register, correct pagination, re-enable, prune (HOOK-02/03/09)
+- [ ] 03-03-PLAN.md — Loop-prevention layers 1-3 as named pure predicates (HOOK-07)
+- [ ] 03-04-PLAN.md — Event router (edge-detect then re-fetch) and the reconciliation-poll query (INTK-01/05)
+- [ ] 03-05-PLAN.md — ACK-first `node:http` receiver, guard chain, dedupe, live-UAT item (HOOK-04/05/06/08)
 
 ### Phase 4: Execution
 **Goal**: A ticket's work happens in an isolated worktree, under a supervised agent process, and ships as a pull request the worker opened
