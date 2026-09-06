@@ -14,6 +14,30 @@ after run 2 : user_version=1 applied={"from":1,"to":1,"applied":[]}  tables=[del
 Empty database produces the full five-table schema; a second run applies nothing and changes
 nothing. `PRAGMA user_version` gating works. **Phase 1 SC4 is satisfied.**
 
+## PASS — Phase 1 SC1, SC2, SC3: the state machine
+
+Executed against `RUN_STATE_TABLE` and `canTransition`:
+
+| state | holdsSlot | hasLiveChild | terminal |
+|---|---|---|---|
+| queued | false | false | false |
+| preparing | true | false | false |
+| running | true | true | false |
+| **awaiting_answer** | **false** | **false** | false |
+| delivering | true | false | false |
+| delivered / partial / failed / cancelled | false | false | true |
+
+- **SC1** — exactly nine states, matching the ADDENDUM's literals. PASS
+- **SC2** — spot-checked four legal transitions accepted and four illegal ones rejected
+  (`delivered→running`, `failed→delivering`, `cancelled→queued`, `queued→delivered`). PASS
+- **SC3** — `awaiting_answer` holds **neither** a concurrency slot nor a live child. PASS.
+  This is the invariant the entire scheduler rests on: violating it turns "three open questions"
+  into "the daemon is dead", with the operator's natural diagnosis being wrong.
+
+Two cells are more carefully modelled than the criteria required: `delivering` and `preparing`
+each hold a slot but have **no live child** — correct, because the worker is doing git/`gh` work
+while the agent process is already gone. That distinction is what lets the cap bound real RAM.
+
 ## FAIL — T53: the store queries columns that do not exist
 
 Authoritative schema, read back from a real in-memory database after running the migration:
