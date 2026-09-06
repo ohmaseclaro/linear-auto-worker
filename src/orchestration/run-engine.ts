@@ -7,8 +7,12 @@
  * statements live in Phase 2's store implementation.
  */
 import { randomUUID } from 'node:crypto';
-import { canTransition } from '../domain/state-machine.js';
+import { canTransition, RUN_STATE_TABLE } from '../domain/state-machine.js';
 import { IllegalTransitionError } from '../domain/errors.js';
+// T32: the self-event marker is declared once, in the domain barrel. Every
+// comment this daemon posts carries it, or the ingress loop-prevention filter
+// cannot tell the bot's own comments from a human's and the bot answers itself.
+import { BOT_COMMENT_MARKER_PREFIX } from '../domain/index.js';
 import type { Run, RunId, RunState } from '../domain/types.js';
 import type {
   AgentResult,
@@ -35,8 +39,29 @@ export interface RunEngine {
    */
   transition(runId: RunId, to: RunState, detail?: string): Promise<Run>;
   handle(event: DomainEvent): Promise<void>;
+  /**
+   * D-11 / INTK-08. Accepted from every non-terminal state; a no-op from a
+   * terminal one. States with no live child move to `cancelled` now; states
+   * with one record a cancel-requested flag instead.
+   */
+  cancel(runId: RunId, reason?: string): Promise<void>;
+  /** The read the supervisor checkpoint consults (D-11). */
+  isCancelRequested(runId: RunId): boolean;
+  /** D-10: re-edit the queue-position comment of every still-queued run. */
+  refreshQueuePositions(): Promise<void>;
   /** Resolves once every run this engine is driving has settled. */
   settle(): Promise<void>;
+}
+
+/**
+ * Thrown by `checkpoint()` to unwind the work path when a cancel has been
+ * requested. Local on purpose: it is control flow inside this module, not a
+ * domain error anyone else catches.
+ */
+class CancelledSignal extends Error {
+  constructor() {
+    super('cancel requested');
+  }
 }
 
 export interface RunEngineDeps {
@@ -127,9 +152,171 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
     return byProject ?? (issue.teamId ? config.mappings[issue.teamId] : undefined);
   }
 
-  async function fail(runId: RunId, reason: string): Promise<void> {
-    // T17 / D-13: a failed run is attempted exactly once. No retry loop, no
-    // requeue. The branch and worktree are left for the operator.
+  // --- notification plumbing ------------------------------------------------
+  //
+  // The ack comment id lives in `kv` rather than in a new `runs` column: it is
+  // one string per run, it survives a restart (so a restarted daemon still
+  // EDITS the position comment instead of posting a second one, D-10), and it
+  // costs no schema change on a table five layers already agree on.
+
+  const ackKey = (runId: RunId) => `ack:${runId}`;
+  const cancelKey = (runId: RunId) => `cancel:${runId}`;
+  const terminalKey = (runId: RunId) => `terminal:${runId}`;
+
+  interface Ack {
+    commentId: string;
+    /** Last position published, so an unchanged position edits nothing. */
+    position: number;
+  }
+
+  function readAck(runId: RunId): Ack | null {
+    const raw = store.kvGet(ackKey(runId));
+    return raw ? (JSON.parse(raw) as Ack) : null;
+  }
+
+  function writeAck(runId: RunId, ack: Ack): void {
+    store.kvSet(ackKey(runId), JSON.stringify(ack));
+  }
+
+  /** T32: never re-derive the marker, never post a comment without it. */
+  function botBody(text: string): string {
+    return `${BOT_COMMENT_MARKER_PREFIX}\n\n${text}`;
+  }
+
+  /**
+   * A notification channel must never fail a run (T-06-08). A Linear outage
+   * degrades ticket visibility; it does not stall the queue. Resolves to `null`
+   * when the call threw, and to the call's own value otherwise -- which for a
+   * void call is `undefined`, so `!== null` is the success test.
+   */
+  async function attempt<T>(what: string, runId: RunId, fn: () => Promise<T>): Promise<T | null> {
+    try {
+      return await fn();
+    } catch (err) {
+      log.warn({ runId, what, err: String(err) }, 'notification failed; run continues');
+      return null;
+    }
+  }
+
+  function ackText(run: Run, position: number): string {
+    return position > 0
+      ? `Picked up **${run.issueKey}** — queued, position ${position}. Starting as soon as a slot frees up.`
+      : `Picked up **${run.issueKey}** — starting work in \`${run.repoSlug}\`.`;
+  }
+
+  /**
+   * D-09 / INTK-02 / INTK-03 / invariant 12. The run row is already at `queued`
+   * when we get here; these three Linear calls are everything else that must
+   * happen before any worktree or git work.
+   *
+   * Ten seconds is the budget and the ordering is what makes it achievable:
+   * three API calls are fast, a cold `git fetch` is not. Returned as an id that
+   * `drive()` takes as a parameter, so the work path cannot start without this
+   * having run — there would be nothing to pass it.
+   */
+  async function acknowledge(run: Run): Promise<string | null> {
+    const position = scheduler.positionOf(run.id);
+    const created = await attempt('ack', run.id, () =>
+      linear.createComment(run.issueId, botBody(ackText(run, position))),
+    );
+    if (created) writeAck(run.id, { commentId: created.id, position });
+
+    await attempt('in-progress', run.id, () => linear.setIssueState(run.issueId, 'started'));
+
+    // INTK-03: assignee-based pickup takes the ticket out of the operator's
+    // "Assigned to me" view for the whole run. Without the subscription they
+    // lose sight of their own ticket.
+    await attempt('subscriber', run.id, () =>
+      linear.addSubscriber(run.issueId, config.operatorUserId),
+    );
+
+    return created?.id ?? null;
+  }
+
+  /**
+   * D-10 / INTK-06. The position is shown by EDITING the acknowledgement
+   * comment. A queue that moves three times must leave exactly one comment on
+   * the ticket, not four — one ticket turning into a wall of bot noise is how
+   * an operator learns to mute the bot.
+   */
+  async function refreshQueuePositions(): Promise<void> {
+    for (const run of store.listByState('queued')) {
+      const ack = readAck(run.id);
+      // A swallowed acknowledgement leaves no edit target. Posting a fresh
+      // comment here would defeat the whole point, so this no-ops instead.
+      if (!ack) continue;
+      const position = scheduler.positionOf(run.id);
+      if (position === 0 || position === ack.position) continue;
+      const updated = await attempt('position', run.id, () =>
+        linear.updateComment(ack.commentId, botBody(ackText(run, position))),
+      );
+      if (updated !== null) writeAck(run.id, { ...ack, position });
+    }
+  }
+
+  /**
+   * T-06-06: what reaches the ticket is a short classification. The raw error
+   * only ever reaches the log file, whose PATH is what the comment carries —
+   * a serialized SDK error routinely carries request headers, and therefore the
+   * API key, into a comment everyone in the workspace can read.
+   */
+  function classify(err: unknown): string {
+    const msg = err instanceof Error ? err.message : String(err);
+    return msg.split('\n')[0].slice(0, 200);
+  }
+
+  function logPathFor(runId: RunId): string {
+    return `${config.logDir}/${runId}.log`;
+  }
+
+  function diagnosis(run: Run): string {
+    return [
+      `Run failed: ${run.failureReason ?? 'unknown failure'}`,
+      `Log: \`${logPathFor(run.id)}\``,
+      `Branch \`${run.branch}\` and worktree \`${run.worktreePath ?? '(never created)'}\` are left in place for you to inspect.`,
+      `This run will not be re-attempted. Re-assign the ticket to run it again.`,
+    ].join('\n');
+  }
+
+  function terminalText(run: Run): string {
+    switch (run.state) {
+      case 'delivered':
+        return `Done — ${run.prUrl}`;
+      case 'partial':
+        return `Partially delivered${run.prUrl ? ` — ${run.prUrl}` : ''}. See the child runs for what did not ship.`;
+      case 'cancelled':
+        return `Cancelled. Branch \`${run.branch}\` and its worktree are left in place.`;
+      default:
+        return diagnosis(run);
+    }
+  }
+
+  /**
+   * Invariant 11: the terminal state is always reported, from a `finally`, and
+   * reported exactly once. A crash, a throw in the delivering path or a
+   * rejected push all still produce one comment — silence on failure is the
+   * loudest complaint in this product category.
+   */
+  async function announceTerminal(runId: RunId): Promise<void> {
+    const run = store.getRun(runId);
+    if (!run || !RUN_STATE_TABLE[run.state].terminal) return;
+    // The guard is written before the call, not after: a second attempt is
+    // worse than a missing one here, and the call itself cannot throw.
+    if (store.kvGet(terminalKey(runId))) return;
+    store.kvSet(terminalKey(runId), run.state);
+    await attempt('terminal', runId, () =>
+      linear.createComment(run.issueId, botBody(terminalText(run))),
+    );
+  }
+
+  async function fail(runId: RunId, reason: string, raw?: unknown): Promise<void> {
+    // T17 / D-13 / OPS-04: a failed run is attempted exactly once. No retry
+    // loop, no requeue, no threshold. The branch and worktree are deliberately
+    // left in place — the worktree cleanup port is NOT called on this path.
+    // `ARCHITECTURE.md`'s bounded `failed -> queued` row is superseded: a second
+    // attempt on a run whose branch is already pushed produces a second PR for
+    // work that already shipped.
+    if (raw !== undefined) log.error({ runId, err: String(raw) }, 'run failed');
     store.updateRun(runId, { failureReason: reason, updatedAt: now() });
     await transition(runId, 'failed', reason);
   }
@@ -199,14 +386,27 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
     };
   }
 
-  async function drive(runId: RunId): Promise<void> {
+  /**
+   * The work path. It takes the acknowledgement comment id as a parameter
+   * rather than looking it up, so work structurally cannot start before the
+   * acknowledgement has happened (D-09) — there would be nothing to pass.
+   *
+   * It also takes the slot as an unawaited promise: the run parked for its slot
+   * before `acknowledge()` ran, so the acknowledgement could carry a real queue
+   * position. Parking holds nothing and costs nothing, so it is not "work".
+   */
+  async function drive(
+    runId: RunId,
+    ackCommentId: string | null,
+    slot: Promise<() => void>,
+  ): Promise<void> {
     // Parks here with no slot held until one is free. `awaiting_answer` runs
     // are not in the admitted set, so they cannot starve this.
-    const release = await scheduler.acquire(runId);
+    const release = await slot;
     const ac = new AbortController();
     aborts.set(runId, ac);
     try {
-      await transition(runId, 'preparing', 'slot acquired');
+      await transition(runId, 'preparing', ackCommentId ?? 'slot acquired');
       const queued = store.getRun(runId)!;
       const wt = await worktrees.create(runId, repoOf(queued), queued.branch!);
       store.updateRun(runId, { worktreePath: wt.path, updatedAt: now() });
@@ -216,10 +416,14 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
       const result = await agent.run(spawnRequest(prepared, prepared.issueTitle, false), ac.signal);
       await dispatch(runId, result, release);
     } catch (err) {
-      await fail(runId, String(err));
+      await fail(runId, classify(err), err);
     } finally {
       aborts.delete(runId);
       release();
+      await announceTerminal(runId);
+      // The release above admitted the next waiter, so everyone behind it moved
+      // up. Edit their comments; do not post new ones.
+      await refreshQueuePositions();
     }
   }
 
@@ -235,15 +439,18 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
       const result = await agent.run(spawnRequest(run, answer, true), ac.signal);
       await dispatch(runId, result, release);
     } catch (err) {
-      await fail(runId, String(err));
+      await fail(runId, classify(err), err);
     } finally {
       aborts.delete(runId);
       release();
+      await announceTerminal(runId);
+      await refreshQueuePositions();
     }
   }
 
   return {
     transition,
+    refreshQueuePositions,
 
     async handle(event: DomainEvent): Promise<void> {
       switch (event.kind) {
@@ -258,7 +465,14 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
           // ponytail: one repo here. Plan 05 fans a ticket into one child run
           // per repo; each child is already a first-class run to this engine.
           const run = createRun(issue, mapping.repos[0]);
-          track(drive(run.id));
+          // Park for a slot first. This holds nothing, spends nothing and
+          // returns immediately -- it exists only so the acknowledgement below
+          // can carry a real `positionOf()` rather than guessing.
+          const slot = scheduler.acquire(run.id);
+          // D-09, in order and before the worktree port is reachable at all:
+          // insert at `queued` (above), acknowledge, In Progress, subscribe.
+          const ackCommentId = await acknowledge(run);
+          track(drive(run.id, ackCommentId, slot));
           return;
         }
         case 'question.answered': {
