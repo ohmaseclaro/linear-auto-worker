@@ -75,6 +75,19 @@ store. So the guard that catches a *replayed* delivery is the one that throws on
 1-3 would still hold, which is exactly why four independent layers were specified — but this must
 be fixed, not relied upon.
 
+## PASS — OPS-03 / T7: rate limiting detected by extension code, not status
+
+| input | detected | correct |
+|---|---|---|
+| `{response:{status:400}, errors:[{extensions:{code:'RATELIMITED'}}]}` | yes | ✓ |
+| `RATELIMITED` with no status field | yes | ✓ |
+| **bare HTTP 429** | **no** | ✓ — confirms any `status === 429` branch is dead code |
+| other extension code (`AUTHENTICATION_ERROR`) | no | ✓ |
+| plain `Error` | no | ✓ |
+
+`computeBackoffMs` treats the reset header as UTC epoch **milliseconds** (reset 30s in the future
+→ 30000 ms) and clamps a reset already in the past to 0 rather than returning a negative delay.
+
 ## FAIL — T53: the store queries columns that do not exist
 
 Authoritative schema, read back from a real in-memory database after running the migration:
