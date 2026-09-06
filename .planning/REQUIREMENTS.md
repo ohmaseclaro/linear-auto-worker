@@ -145,13 +145,96 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| (populated by roadmap creation) | | |
+| SETUP-01 | Phase 8 — Setup Wizard & Safety Pass | Pending |
+| SETUP-02 | Phase 8 — Setup Wizard & Safety Pass | Pending |
+| SETUP-03 | Phase 8 — Setup Wizard & Safety Pass | Pending |
+| SETUP-04 | Phase 8 — Setup Wizard & Safety Pass | Pending |
+| SETUP-05 | Phase 8 — Setup Wizard & Safety Pass | Pending |
+| SETUP-06 | Phase 8 — Setup Wizard & Safety Pass | Pending |
+| SETUP-07 | Phase 8 — Setup Wizard & Safety Pass | Pending |
+| SETUP-08 | Phase 8 — Setup Wizard & Safety Pass | Pending |
+| SETUP-09 | Phase 8 — Setup Wizard & Safety Pass | Pending |
+| SETUP-10 | Phase 2 — Foundation | Pending |
+| TUN-01 | Phase 3 — Ingress | Pending |
+| TUN-02 | Phase 3 — Ingress | Pending |
+| TUN-03 | Phase 3 — Ingress | Pending |
+| HOOK-01 | Phase 7 — Integration & Daemon Lifecycle | Pending |
+| HOOK-02 | Phase 3 — Ingress | Pending |
+| HOOK-03 | Phase 3 — Ingress | Pending |
+| HOOK-04 | Phase 3 — Ingress | Pending |
+| HOOK-05 | Phase 3 — Ingress | Pending |
+| HOOK-06 | Phase 3 — Ingress | Pending |
+| HOOK-07 | Phase 3 — Ingress | Pending |
+| HOOK-08 | Phase 3 — Ingress | Pending |
+| HOOK-09 | Phase 3 — Ingress | Pending |
+| INTK-01 | Phase 3 — Ingress | Pending |
+| INTK-02 | Phase 6 — Orchestration | Pending |
+| INTK-03 | Phase 6 — Orchestration | Pending |
+| INTK-04 | Phase 5 — Outbound | Pending |
+| INTK-05 | Phase 3 — Ingress | Pending |
+| INTK-06 | Phase 6 — Orchestration | Pending |
+| INTK-07 | Phase 6 — Orchestration | Pending |
+| INTK-08 | Phase 6 — Orchestration | Pending |
+| AGNT-01 | Phase 4 — Execution | Pending |
+| AGNT-02 | Phase 4 — Execution | Pending |
+| AGNT-03 | Phase 4 — Execution | Pending |
+| AGNT-04 | Phase 4 — Execution | Pending |
+| AGNT-05 | Phase 4 — Execution | Pending |
+| AGNT-06 | Phase 4 — Execution | Pending |
+| AGNT-07 | Phase 4 — Execution | Pending |
+| AGNT-08 | Phase 4 — Execution | Pending |
+| AGNT-09 | Phase 4 — Execution | Pending |
+| AGNT-10 | Phase 4 — Execution | Pending |
+| AGNT-11 | Phase 4 — Execution | Pending |
+| QA-01 | Phase 4 — Execution | Pending |
+| QA-02 | Phase 6 — Orchestration | Pending |
+| QA-03 | Phase 6 — Orchestration | Pending |
+| QA-04 | Phase 6 — Orchestration | Pending |
+| QA-05 | Phase 6 — Orchestration | Pending |
+| QA-06 | Phase 6 — Orchestration | Pending |
+| QA-07 | Phase 6 — Orchestration | Pending |
+| DELV-01 | Phase 4 — Execution | Pending |
+| DELV-02 | Phase 4 — Execution | Pending |
+| DELV-03 | Phase 4 — Execution | Pending |
+| DELV-04 | Phase 4 — Execution | Pending |
+| DELV-05 | Phase 5 — Outbound | Pending |
+| DELV-06 | Phase 6 — Orchestration | Pending |
+| DELV-07 | Phase 6 — Orchestration | Pending |
+| DELV-08 | Phase 4 — Execution | Pending |
+| DELV-09 | Phase 4 — Execution | Pending |
+| NOTF-01 | Phase 5 — Outbound | Pending |
+| NOTF-02 | Phase 5 — Outbound | Pending |
+| NOTF-03 | Phase 5 — Outbound | Pending |
+| NOTF-04 | Phase 5 — Outbound | Pending |
+| NOTF-05 | Phase 5 — Outbound | Pending |
+| NOTF-06 | Phase 5 — Outbound | Pending |
+| OPS-01 | Phase 6 — Orchestration | Pending |
+| OPS-02 | Phase 2 — Foundation | Pending |
+| OPS-03 | Phase 5 — Outbound | Pending |
+| OPS-04 | Phase 6 — Orchestration | Pending |
+| OPS-05 | Phase 7 — Integration & Daemon Lifecycle | Pending |
+| CONF-01 | Phase 1 — Domain Contract, State Machine & Schema | Pending |
+| CONF-02 | Phase 1 — Domain Contract, State Machine & Schema | Pending |
 
 **Coverage:**
 - v1 requirements: 70 total
-- Mapped to phases: 0
-- Unmapped: 70 ⚠️
+- Mapped to phases: 70 ✓
+- Unmapped: 0
+
+**Per-phase totals:**
+
+| Phase | Requirements |
+|-------|--------------|
+| Phase 1 — Domain Contract, State Machine & Schema | 2 |
+| Phase 2 — Foundation | 2 |
+| Phase 3 — Ingress | 13 |
+| Phase 4 — Execution | 18 |
+| Phase 5 — Outbound | 9 |
+| Phase 6 — Orchestration | 15 |
+| Phase 7 — Integration & Daemon Lifecycle | 2 |
+| Phase 8 — Setup Wizard & Safety Pass | 9 |
+| **Total** | **70** |
 
 ---
 *Requirements defined: 2026-09-06*
-*Last updated: 2026-09-06 after initial definition*
+*Last updated: 2026-09-06 after roadmap creation — all 70 v1 requirements mapped*
