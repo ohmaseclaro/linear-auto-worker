@@ -98,3 +98,17 @@ Two remain in that suite and need judgment, not a rename:
   `journal_mode = 'memory'` by definition. Needs a temp-file fixture. **OPS-02's WAL requirement
   has therefore never actually been verified.**
 - `insertRun -> updateRun -> getRun` round-trip — inspect before assuming a rename.
+
+## The ESM mocking fix — both options tested, one is clearly right
+
+The wizard suites do `mock.method(execaModule, 'execa', ...)` on a frozen ESM namespace object.
+Two ways out, both measured on this machine:
+
+| option | status | cost |
+|---|---|---|
+| **Dependency injection** — `checkGitIdentity(exec: ExecaFn = execa)` | works today, no flag | changes ~6 function signatures across `preflight.ts`, `repo-safety.ts`, `mapping.ts`; production call sites unchanged because the real `execa` is the default |
+| `mock.module` | **`undefined` on Node 22** unless `--experimental-test-module-mocks` is passed | puts an experimental flag into the canonical gate permanently |
+
+**Take dependency injection.** `03-01` already uses exactly this shape for the ngrok SDK
+(`openTunnel(port, ngrok: NgrokApi = ngrokSdk)`), so it is an established convention in this
+codebase rather than a new one, and it keeps the verify command free of experimental flags.
