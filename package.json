@@ -7,7 +7,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "verify": "tsc && node --test \"dist/**/*.test.js\"",
+    "verify": "tsc && node --test \"dist/**/*.test.js\" && npm run smoke",
     "smoke": "tsx scripts/boot-smoke.ts",
     "typecheck": "tsc --noEmit",
     "test": "node --test \"dist/**/*.test.js\"",
