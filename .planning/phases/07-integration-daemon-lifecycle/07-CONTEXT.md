@@ -142,3 +142,18 @@ in the gate will surface them. Phase 7 must do each one explicitly.
    round-trip.
 8. **Expect `logger.test.ts`'s cycle-guard test to FAIL** on the first gate run (T48). It is a
    known gap, not a regression — fix `redact()` or delete the test deliberately.
+
+
+---
+
+## PRE-RESOLVED RECONCILIATION ITEMS (orchestrator, verified on main 2026-09-06)
+
+Located precisely so Phase 7 does not re-derive them. Each was confirmed by reading the
+merged tree, not inferred from a SUMMARY.
+
+| # | Item | Evidence on main | Resolution |
+|---|------|------------------|------------|
+| P1 | **Two `AgentResult` schemas exist.** | `src/domain/agent-result.ts` (written by 01-02) **and** `src/execution/agent-args.ts` (written by 04-01, which deliberately avoided creating the domain file so as not to hard-code the losing side — 01-02 had already created it). | Pick one. Phase 4's is the **live-verified** shape (`status: 'delivered' \| 'needs_input'`, `question`/`assumption`/`summary`); Phase 6's assumes `'complete' \| 'needs_input' \| 'cancelled'` with `prTitle`/`prBody`. Note `additionalProperties: false` — any surviving field must be added explicitly or the agent physically cannot return it (T58). |
+| P2 | **Delivery dedupe is a runtime TypeError, not a type error.** | `ports.ts:83` declares `tryInsertDelivery(deliveryId, receivedAt)`. `sqlite-store.ts:260` implements **`recordDelivery`**. `receiver.ts:201` calls `store.tryInsertDelivery(deliveryId)` — a method the real store does not have, **and with one argument where the interface takes two**. `fakes.ts:155-167` carries both as an alias, which is why nothing has surfaced. | T46 settles the name as **`recordDelivery`**. Rename in `ports.ts` and `receiver.ts`, fix the arity at the call site, drop the alias from `fakes.ts`. The fake's alias is currently masking this. |
+| P3 | **The `DomainEvent` union landed correctly** — all seven kinds present: `issue.assigned`, `issue.unassigned`, `comment.created` (ingress) and `run.requested`, `question.answered`, `run.cancelled`, `ignored` (engine). | Verified in `src/domain/ports.ts`. | Confirms T45's contract half is done and **the mapping half is still owed**. Without it the union typechecks and the daemon processes nothing. |
+| P4 | **Every port has a fake — no gap.** 21 exports in `ports.ts` = 14 behavioural ports (all faked) + 7 data shapes. `FakeTunnel implements TunnelManager`; only the name differs. | Verified by diffing exported ports against exported fakes. | No action. Recorded because two SUMMARYs disagree (14 vs 21) and the discrepancy is a naming artifact, not a missing fake. |
