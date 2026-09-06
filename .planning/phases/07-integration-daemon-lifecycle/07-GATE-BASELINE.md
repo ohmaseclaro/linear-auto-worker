@@ -10,20 +10,48 @@ tests 505 · pass 446 · fail 59 · duration 2.4s
 
 **88% first-time pass rate** on code written by ~20 agents in parallel with no test execution.
 
-## Failures are concentrated, not scattered
+## Accurate failure counts (an earlier estimate in this file overcounted — this is measured)
 
-| suite | approx failures | likely cause |
-|---|---|---|
-| `cli/wizard/mapping.test.js` | ~18 | shells out via `execa`; ESM module mocking under `node:test` |
-| `cli/wizard/repo-safety.test.js` | ~16 | same — `git remote`, `gh api` |
-| `cli/wizard/preflight.test.js` | ~16 | same — `git config`, `gh auth status`, `claude --version` |
-| `outbound/linear-client.test.js` | ~13 | SDK doubles vs the port that 07-04 just changed |
-| `orchestration/scheduler.test.js`, `run-engine.test.js` | ~22 | contract renames from 07-02 |
-| `infra/store/sqlite-store.test.js` | ~5 | written against the pre-T53 column names |
-| others | remainder | |
+| failures | suite |
+|---|---|
+| 9 | `cli/wizard/preflight.test.js` |
+| 7 | `orchestration/scheduler.test.js` |
+| 7 | `cli/wizard/repo-safety.test.js` |
+| 6 | `cli/wizard/mapping.test.js` |
+| 5 | `orchestration/run-engine.test.js` |
+| 4 | `infra/store/sqlite-store.test.js` |
+| 3 | `outbound/linear-client.test.js`, `orchestration/questions.test.js`, `execution/execute-run.test.js` |
+| 2 | `execution/event-router.test.js` |
+| 1 | `orchestration/fanout.test.js`, `infra/logger.test.js`, `execution/supervisor.test.js`, `execution/stream-parser.test.js` |
 
-Roughly **50 of 59 are the three wizard suites**, which share one shape: they mock a child-process
-call. That is likely **one fix pattern, not fifty bugs**. Triage by cause before by count.
+## ROOT CAUSE FOUND — 22 of 59 are one line, with the fix already in this repo
+
+All three wizard suites fail for **exactly one reason**, verified: 9 of 9, 7 of 7 and 6 of 6
+failures are
+
+```
+error: 'Cannot redefine property: execa'
+```
+
+The tests monkey-patch the `execa` **ESM named export**, which is non-configurable by
+specification — an ESM binding cannot be redefined. This is not 22 bugs; it is one testing
+approach that ESM forbids.
+
+**The fix pattern already exists in this codebase.** Plan 03-01 hit the same wall with the ngrok
+SDK and solved it with default-parameter injection:
+
+```ts
+export function openTunnel(port: number, ngrok: NgrokApi = ngrokSdk)
+export function installTunnelShutdownHooks(ngrok: NgrokApi = ngrokSdk): void
+```
+
+Apply the same shape to the wizard's child-process calls — accept an injected `execa` with the
+real one as the default — and the production call sites stay unchanged. Prefer this to
+`mock.module`, which is experimental and flag-gated.
+
+The remaining ~37 failures are contract renames from 07-02 and 07-04 (`scheduler`, `run-engine`,
+`linear-client`, `sqlite-store` written against pre-fix names) plus T48. Triage those by cause,
+not by count — several suites likely share a rename.
 
 ## Pre-declared, not a regression
 
