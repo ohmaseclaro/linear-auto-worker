@@ -41,6 +41,13 @@ const PASS: readonly string[] = [
  *      ("no approval surface"). Permission behaviour would therefore depend on how the
  *      operator happened to start the daemon. A denylist cannot anticipate 22 names it
  *      has never seen; an allowlist does not have to.
+ *
+ * THIS FUNCTION IS ONLY HALF THE BOUNDARY (T56). execa MERGES a supplied `env` over
+ * `process.env` unless `extendEnv: false` is passed alongside it, so a spawn site that
+ * forgets that flag withholds nothing at all while every assertion on this function's
+ * return value still passes. `supervisor.ts` sets it; `execute-run.test.ts` asserts on the
+ * env the SPAWN received, which is the only place the regression is visible. Note
+ * `node:child_process.spawn` has the opposite default, so the trap is execa-specific.
  */
 export function buildChildEnv(runId: string): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
