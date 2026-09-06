@@ -1,0 +1,68 @@
+src/domain/fakes.test.ts(28,37): error TS2305: Module '"./types.js"' has no exported member 'LinearIssue'.
+src/infra/config.ts(69,10): error TS2352: Conversion of type '{ defaults: { postLinearComments: boolean; slackNotify: boolean; baseBranch: string; draftPr: boolean; questionFlowEnabled: boolean; maxRunTimeMs: number; }; mappings: { repos: { repoDir: string; repoSlug: string; }[]; linearProjectId?: string | undefined; linearTeamId?: string | undefined; slackWebhookUrl?: string ...' to type 'Config' may be a mistake because neither type sufficiently overlaps with the other. If this was intentional, convert the expression to 'unknown' first.
+src/ingress/receiver.ts(201,16): error TS2554: Expected 2 arguments, but got 1.
+src/ingress/registrar.ts(51,9): error TS2339: Property 'kvPut' does not exist on type 'Store'.
+src/ingress/registrar.ts(52,9): error TS2339: Property 'kvPut' does not exist on type 'Store'.
+src/ingress/registrar.ts(99,25): error TS2345: Argument of type 'string | null | undefined' is not assignable to parameter of type 'string'.
+src/orchestration/fanout.test.ts(469,31): error TS2345: Argument of type '{ store: Store; engine: RunEngine; config: Config; log: Logger; }' is not assignable to parameter of type 'QuestionsDeps'.
+src/orchestration/fanout.test.ts(606,29): error TS2339: Property 'prUrl' does not exist on type 'Run'.
+src/orchestration/fanout.ts(178,5): error TS2353: Object literal may only specify known properties, and 'prUrl' does not exist in type 'ParentRun'.
+src/orchestration/qa-roundtrip.test.ts(103,31): error TS2345: Argument of type '{ store: InMemoryStore; engine: RunEngine; config: Config; log: Logger; }' is not assignable to parameter of type 'QuestionsDeps'.
+src/orchestration/qa-roundtrip.test.ts(134,22): error TS2339: Property 'calls' does not exist on type 'FakeAgentRunner'.
+src/orchestration/qa-roundtrip.test.ts(135,22): error TS2339: Property 'calls' does not exist on type 'FakeAgentRunner'.
+src/orchestration/qa-roundtrip.test.ts(152,22): error TS2339: Property 'calls' does not exist on type 'FakeAgentRunner'.
+src/orchestration/qa-roundtrip.test.ts(153,22): error TS2339: Property 'calls' does not exist on type 'FakeAgentRunner'.
+src/orchestration/qa-roundtrip.test.ts(154,22): error TS2339: Property 'calls' does not exist on type 'FakeAgentRunner'.
+src/orchestration/qa-roundtrip.test.ts(154,48): error TS2339: Property 'calls' does not exist on type 'FakeAgentRunner'.
+src/orchestration/qa-roundtrip.test.ts(155,22): error TS2339: Property 'calls' does not exist on type 'FakeAgentRunner'.
+src/orchestration/qa-roundtrip.test.ts(188,22): error TS2339: Property 'calls' does not exist on type 'FakeAgentRunner'.
+src/orchestration/questions.test.ts(35,5): error TS2353: Object literal may only specify known properties, and 'answeredBy' does not exist in type 'PendingQuestion'.
+src/orchestration/questions.test.ts(109,41): error TS2322: Type '"expired"' is not assignable to type '"cancelled" | "open" | "answered" | "timed_out" | undefined'.
+src/orchestration/questions.test.ts(231,23): error TS2339: Property 'answeredBy' does not exist on type 'PendingQuestion'.
+src/orchestration/questions.test.ts(280,34): error TS2322: Type '"expired"' is not assignable to type '"cancelled" | "open" | "answered" | "timed_out" | undefined'.
+src/orchestration/questions.test.ts(443,16): error TS2367: This comparison appears to be unintentional because the types '"issue.assigned" | "issue.unassigned" | "comment.created" | "run.requested" | "run.cancelled" | "question.answered" | "ignored"' and '"run.resumed"' have no overlap.
+src/orchestration/questions.test.ts(443,58): error TS2339: Property 'input' does not exist on type 'never'.
+src/orchestration/questions.ts(173,11): error TS2322: Type '{ kind: "question.answered"; questionId: string; answer: string; } | { kind: "run.resumed"; runId: string; input: string; reason: string; }' is not assignable to type 'DomainEvent'.
+src/orchestration/questions.ts(195,54): error TS2559: Type '{ repos?: { repoDir: string; }[] | undefined; }' has no properties in common with type 'Pick<ProjectMapping, "overrides">'.
+src/orchestration/questions.ts(228,19): error TS2339: Property 'questionFlow' does not exist on type 'MappingToggles'.
+src/orchestration/questions.ts(254,9): error TS2353: Object literal may only specify known properties, and 'answeredBy' does not exist in type 'PendingQuestion'.
+src/orchestration/questions.ts(282,11): error TS2322: Type '(questionId: string, answer: string) => Promise<{ status: "answered" | "expired"; answer: string; answeredBy: string | null; id: string; runId: string; text: string; assumption: string; linearCommentId: string | null; askedAt: number; deadlineAt: number; } | null>' is not assignable to type '(questionId: string, answer: string) => Promise<PendingQuestion | null>'.
+src/orchestration/questions.ts(291,40): error TS2345: Argument of type '{ status: "answered" | "expired"; answer: string; answeredBy: string | null; }' is not assignable to parameter of type 'Partial<PendingQuestion>'.
+src/orchestration/recovery.test.ts(101,31): error TS2345: Argument of type 'RunState | null' is not assignable to parameter of type 'RunState'.
+src/orchestration/recovery.test.ts(130,72): error TS2353: Object literal may only specify known properties, and 'answeredBy' does not exist in type 'Partial<PendingQuestion>'.
+src/orchestration/recovery.test.ts(293,24): error TS2339: Property 'failureReason' does not exist on type 'Run'.
+src/orchestration/recovery.test.ts(294,24): error TS2339: Property 'failureReason' does not exist on type 'Run'.
+src/orchestration/recovery.test.ts(296,27): error TS2339: Property 'failureReason' does not exist on type 'Run'.
+src/orchestration/recovery.test.ts(389,11): error TS2339: Property 'kvPut' does not exist on type 'InMemoryStore'.
+src/orchestration/recovery.test.ts(400,11): error TS2339: Property 'kvPut' does not exist on type 'InMemoryStore'.
+src/orchestration/recovery.test.ts(433,11): error TS2339: Property 'kvPut' does not exist on type 'InMemoryStore'.
+src/orchestration/recovery.test.ts(454,25): error TS2339: Property 'answeredBy' does not exist on type 'PendingQuestion'.
+src/orchestration/recovery.test.ts(461,11): error TS2339: Property 'kvPut' does not exist on type 'InMemoryStore'.
+src/orchestration/recovery.test.ts(483,11): error TS2339: Property 'kvPut' does not exist on type 'InMemoryStore'.
+src/orchestration/recovery.test.ts(505,11): error TS2339: Property 'kvPut' does not exist on type 'InMemoryStore'.
+src/orchestration/recovery.test.ts(521,11): error TS2339: Property 'kvPut' does not exist on type 'InMemoryStore'.
+src/orchestration/recovery.ts(148,32): error TS2538: Type 'null' cannot be used as an index type.
+src/orchestration/recovery.ts(149,21): error TS2538: Type 'null' cannot be used as an index type.
+src/orchestration/recovery.ts(241,18): error TS2339: Property 'updatedAt' does not exist on type 'LinearIssue'.
+src/orchestration/recovery.ts(242,17): error TS2339: Property 'updatedAt' does not exist on type 'LinearIssue'.
+src/orchestration/recovery.ts(260,36): error TS2339: Property 'listComments' does not exist on type 'LinearClient'.
+src/orchestration/recovery.ts(292,11): error TS2339: Property 'kvPut' does not exist on type 'Store'.
+src/orchestration/run-engine.test.ts(194,31): error TS2345: Argument of type '{ store: InMemoryStore; engine: RunEngine; config: Config; log: Logger; }' is not assignable to parameter of type 'QuestionsDeps'.
+src/orchestration/run-engine.ts(98,24): error TS2345: Argument of type 'RunState | null' is not assignable to parameter of type 'RunState'.
+src/orchestration/run-engine.ts(98,73): error TS2345: Argument of type 'RunState | null' is not assignable to parameter of type 'RunState'.
+src/orchestration/run-engine.ts(106,5): error TS2322: Type '{ state: RunState; updatedAt: number; kind: "repo"; repoDir: string; repoSlug: string; branch: string; worktreePath: string | null; sessionId: string | null; pid: number | null; ... 12 more ...; createdAt: number; } | { ...; }' is not assignable to type 'Run'.
+src/orchestration/run-engine.ts(121,40): error TS2345: Argument of type 'ParentRun' is not assignable to parameter of type 'Run'.
+src/orchestration/run-engine.ts(231,14): error TS2339: Property 'addSubscriber' does not exist on type 'LinearClient'.
+src/orchestration/run-engine.ts(231,48): error TS2339: Property 'operatorUserId' does not exist on type 'Config'.
+src/orchestration/run-engine.ts(252,16): error TS2339: Property 'updateComment' does not exist on type 'LinearClient'.
+src/orchestration/run-engine.ts(270,22): error TS2339: Property 'logDir' does not exist on type 'Config'.
+src/orchestration/run-engine.ts(275,26): error TS2339: Property 'failureReason' does not exist on type 'Run'.
+src/orchestration/run-engine.ts(303,34): error TS2538: Type 'null' cannot be used as an index type.
+src/orchestration/run-engine.ts(307,37): error TS2345: Argument of type 'string | null' is not assignable to parameter of type 'string'.
+src/orchestration/run-engine.ts(323,13): error TS2339: Property 'prUrl' does not exist on type 'Run'.
+src/orchestration/run-engine.ts(341,28): error TS2339: Property 'listRunsByParent' does not exist on type 'Store'.
+src/orchestration/run-engine.ts(377,33): error TS2538: Type 'null' cannot be used as an index type.
+src/orchestration/run-engine.ts(397,34): error TS2538: Type 'null' cannot be used as an index type.
+src/orchestration/run-engine.ts(416,9): error TS2322: Type 'RunState | null' is not assignable to type 'RunState'.
+src/orchestration/scheduler.ts(51,36): error TS2339: Property 'concurrency' does not exist on type 'MappingToggles'.
+src/orchestration/scheduler.ts(104,45): error TS2345: Argument of type 'RunState | null' is not assignable to parameter of type 'RunState'.
