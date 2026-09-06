@@ -169,7 +169,7 @@ Plans:
   5. The wizard finishes by registering the Linear webhook, so setup ends with a system that is already working rather than one that is merely configured
 **Plans**: 5 plans
 Plans:
-- [ ] 08-01-PLAN.md — CLI entry (`law setup|start|status`) + tracer + full toolchain preflight (D-01/D-08) + local repo discovery (D-02)
+- [x] 08-01-PLAN.md — CLI entry (`law setup|start|status`) + tracer + full toolchain preflight (D-01/D-08) + local repo discovery (D-02)
 - [ ] 08-02-PLAN.md — Linear API key validate+admin-probe and ngrok authtoken acquisition, persisted to `.env` at 0600 (SETUP-02/03/04)
 - [ ] 08-03-PLAN.md — Interactive Linear team/project + repo checklist mapping, Slack + toggle capture, re-run-in-place editing (SETUP-05/06)
 - [ ] 08-04-PLAN.md — CLAUDE.md/AGENTS.md warning+generate, remote/default-branch/ownerRepo capture, submodule + branch-protection warnings (SETUP-07/08)
@@ -223,7 +223,7 @@ Phase 1 first. Phases 2-6 in parallel. Phase 7 after all of them. Phase 8 last.
 | 5. Outbound | 0/2 | Not started | - |
 | 6. Orchestration | 0/TBD | Not started | - |
 | 7. Integration & Daemon Lifecycle | 0/6 | Planned | - |
-| 8. Setup Wizard & Safety Pass | 0/5 | Planned | - |
+| 8. Setup Wizard & Safety Pass | 1/5 | In Progress|  |
 
 ---
 *Roadmap created: 2026-09-06*
