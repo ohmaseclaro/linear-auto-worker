@@ -88,7 +88,36 @@ be fixed, not relied upon.
 `computeBackoffMs` treats the reset header as UTC epoch **milliseconds** (reset 30s in the future
 → 30000 ms) and clamps a reset already in the past to 0 rather than returning a negative delay.
 
-## FAIL — T53: the store queries columns that do not exist
+## RESOLVED — T53: fixed by the orchestrator after 07-02 reached tsc exit 0
+
+**The decisive result of this milestone.** After 07-02 drove the typecheck from 68 errors to
+**zero** — genuinely, with escape hatches going *down* (`as unknown as` 56→49, non-null 81→80,
+`@ts-ignore` still 0) — a store round-trip against the real schema still failed on **every**
+operation:
+
+```
+recordDelivery -> table deliveries has no column named id
+kvSet          -> table kv has no column named key
+kvGet          -> no such column: value
+```
+
+A green typecheck, an honest reconciliation, and a completely non-functional storage layer.
+07-02 could not have caught it: it worked from the compile errors, and the compiler does not
+know SQL column names.
+
+Fixed in `sqlite-store.ts`: `id`→`delivery_id`; `key`/`value`→`k`/`v`; and `updated_at` added to
+the kv insert (it is NOT NULL, so the statement fails even once the names are right). Re-verified:
+
+```
+recordDelivery (fresh) -> true      recordDelivery (dupe) -> false
+kvSet/kvGet            -> "abc123"  overwrite             -> "xyz789"
+kvGet (missing)        -> undefined pruneDeliveries       -> ok
+```
+
+`tsc` remains at 0. **Loop-prevention layer 4 (delivery-ID uniqueness) is functional as of this
+fix** — it was dead while every automated signal reported a clean codebase.
+
+## ORIGINAL FINDING — T53: the store queries columns that do not exist
 
 Authoritative schema, read back from a real in-memory database after running the migration:
 

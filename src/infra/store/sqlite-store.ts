@@ -260,8 +260,11 @@ export function createSqliteStore(db: Database.Database): Store {
 
     // ---- Deliveries ----
     recordDelivery(deliveryId, receivedAt) {
+      // Column is `delivery_id`, not `id` — see migrations/001-init.ts. TypeScript cannot
+      // check SQL column names, so this drift compiled clean and failed on the first
+      // webhook delivery. Caught only by executing the store against the real schema.
       const result = db
-        .prepare('INSERT OR IGNORE INTO deliveries (id, received_at) VALUES (?, ?)')
+        .prepare('INSERT OR IGNORE INTO deliveries (delivery_id, received_at) VALUES (?, ?)')
         .run(deliveryId, receivedAt);
       return result.changes > 0;
     },
@@ -270,16 +273,19 @@ export function createSqliteStore(db: Database.Database): Store {
     },
 
     // ---- KV ----
+    // Columns are `k`/`v`/`updated_at` — see migrations/001-init.ts. `updated_at` is NOT NULL,
+    // so an insert that omits it fails even once the names are right.
     kvGet(key) {
-      const row = db.prepare('SELECT value FROM kv WHERE key = ?').get(key) as
-        | { value: string }
+      const row = db.prepare('SELECT v FROM kv WHERE k = ?').get(key) as
+        | { v: string }
         | undefined;
-      return row?.value;
+      return row?.v;
     },
     kvSet(key, value) {
       db.prepare(
-        'INSERT INTO kv (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value'
-      ).run(key, value);
+        'INSERT INTO kv (k, v, updated_at) VALUES (?, ?, ?) ' +
+          'ON CONFLICT(k) DO UPDATE SET v = excluded.v, updated_at = excluded.updated_at'
+      ).run(key, value, Date.now());
     },
 
     // ---- Run events ----
