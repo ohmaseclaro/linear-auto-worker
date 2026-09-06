@@ -258,14 +258,14 @@ Phase 1 first. Phases 2-6 in parallel. Phase 7 after all of them. Phase 8 last.
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Domain Contract, State Machine & Schema | 0/TBD | Not started | - |
-| 2. Foundation | 1/2 | In Progress|  |
-| 3. Ingress | 0/TBD | Not started | - |
-| 4. Execution | 0/TBD | Not started | - |
-| 5. Outbound | 0/2 | Not started | - |
-| 6. Orchestration | 0/TBD | Not started | - |
-| 7. Integration & Daemon Lifecycle | 0/6 | Planned | - |
-| 8. Setup Wizard & Safety Pass | 1/5 | In Progress|  |
+| 1. Domain Contract, State Machine & Schema | 4/4 | Complete | 2026-09-06 |
+| 2. Foundation | 2/2 | Complete | 2026-09-06 |
+| 3. Ingress | 5/5 | Complete | 2026-09-06 |
+| 4. Execution | 6/6 | Complete | 2026-09-06 |
+| 5. Outbound | 2/2 | Complete | 2026-09-06 |
+| 6. Orchestration | 5/5 | Complete | 2026-09-06 |
+| 7. Integration & Daemon Lifecycle | 5/6 | In Progress | - |
+| 8. Setup Wizard & Safety Pass | 5/5 | Complete | 2026-09-06 |
 
 ---
 *Roadmap created: 2026-09-06*
