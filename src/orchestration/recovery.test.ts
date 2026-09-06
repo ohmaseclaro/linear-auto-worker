@@ -377,3 +377,177 @@ test('one unrecoverable row does not abandon the runs behind it', async () => {
   assert.deepEqual(report.requeued, ['r-preparing']);
   assert.equal(h.store.getRun('r-preparing')!.state, 'queued');
 });
+
+// --- Task 2: the reconciliation poll (INTK-07 / 03-CONTEXT D-04, D-05) ------
+
+const NOW = Date.parse('2026-09-06T12:00:00.000Z');
+const OLD = '2026-09-06T10:00:00.000Z';
+const FRESH = '2026-09-06T11:00:00.000Z';
+
+test('a bot-assigned issue with no non-terminal run is enqueued (INTK-07)', async () => {
+  const h = harness();
+  h.store.kvPut(POLL_WATERMARK_KEY, OLD);
+  h.issues.push({ id: 'ISS-new', identifier: 'ENG-99', updatedAt: FRESH });
+
+  const report = await reconcile(h.deps, NOW);
+
+  assert.deepEqual(report.enqueued, ['ISS-new']);
+  assert.deepEqual(h.events, [{ kind: 'run.requested', issueId: 'ISS-new' }]);
+});
+
+test('an issue that already has a non-terminal run is not enqueued again — three passes, one run', async () => {
+  const h = harness();
+  h.store.kvPut(POLL_WATERMARK_KEY, OLD);
+  h.issues.push({ id: 'ISS-running', identifier: 'ENG-1', updatedAt: FRESH });
+  seedRun(h.store, { state: 'running' });
+
+  await reconcile(h.deps, NOW);
+  await reconcile(h.deps, NOW);
+  await reconcile(h.deps, NOW);
+
+  assert.deepEqual(h.events, []);
+});
+
+test('an issue below the watermark is not re-enqueued on the next pass', async () => {
+  const h = harness();
+  h.issues.push({ id: 'ISS-new', identifier: 'ENG-99', updatedAt: FRESH });
+
+  const first = await reconcile(h.deps, NOW);
+  assert.deepEqual(first.enqueued, ['ISS-new']);
+  assert.equal(first.watermark, FRESH);
+  assert.equal(h.store.kvGet(POLL_WATERMARK_KEY), FRESH);
+
+  // The run the first pass created is not in this fake store, so only the
+  // watermark can prevent the second enqueue. That is the assertion.
+  const second = await reconcile(h.deps, NOW);
+  assert.deepEqual(second.enqueued, []);
+});
+
+test('a reply posted while the daemon was down resumes its run on the first poll, deadline unexpired', async () => {
+  // 03-CONTEXT D-05, the half everyone leaves out. An issue-level updatedAt diff
+  // sees that the issue changed; it does not see that a threaded reply landed on
+  // a comment, and a reply is not an issue field. Without the comment listing
+  // this run sits in `awaiting_answer` for its full four hours despite the
+  // operator having already answered in writing.
+  const h = harness();
+  h.store.kvPut(POLL_WATERMARK_KEY, OLD);
+  seedRun(h.store, { state: 'awaiting_answer' });
+  const q = seedQuestion(h.store, { deadlineAt: NOW + 3 * 60 * 60 * 1_000 });
+  h.comments.set('ISS-awaiting_answer', [
+    {
+      id: 'c-reply',
+      parentId: 'c-q1',
+      body: 'use sqlite',
+      authorId: 'human',
+      authorName: 'Ada',
+      createdAt: FRESH,
+    },
+  ]);
+
+  const report = await reconcile(h.deps, NOW);
+
+  assert.equal(report.resumed, 1);
+  assert.equal(h.store.getRun('r-awaiting_answer')!.state, 'running');
+  const answered = h.store.getQuestion(q.id)!;
+  assert.equal(answered.status, 'answered');
+  assert.equal(answered.answer, 'use sqlite');
+  assert.equal(answered.answeredBy, 'Ada');
+  // And it resumed because of the reply, not because the deadline elapsed.
+  assert.ok(answered.deadlineAt > NOW, 'the deadline had not passed');
+});
+
+test('every listed comment goes through the one correlator, never a second matcher here', async () => {
+  const h = harness();
+  h.store.kvPut(POLL_WATERMARK_KEY, OLD);
+  seedRun(h.store, { state: 'awaiting_answer' });
+  seedQuestion(h.store);
+  h.comments.set('ISS-awaiting_answer', [
+    { id: 'c-a', parentId: 'c-q1', body: 'yes', authorId: 'human', authorName: 'Ada', createdAt: FRESH },
+  ]);
+
+  await reconcile(h.deps, NOW);
+
+  assert.equal(h.ingested.length, 1);
+  assert.deepEqual(h.ingested[0], {
+    id: 'c-a',
+    issueId: 'ISS-awaiting_answer',
+    parentId: 'c-q1',
+    body: 'yes',
+    authorId: 'human',
+    authorName: 'Ada',
+  });
+});
+
+test('an issue with an open question but no new comments produces no correlation and no transition', async () => {
+  const h = harness();
+  h.store.kvPut(POLL_WATERMARK_KEY, FRESH);
+  seedRun(h.store, { state: 'awaiting_answer' });
+  seedQuestion(h.store);
+  // Older than the watermark: already covered by a previous clean pass.
+  h.comments.set('ISS-awaiting_answer', [
+    { id: 'c-old', parentId: 'c-q1', body: 'stale', authorId: 'human', authorName: 'Ada', createdAt: OLD },
+  ]);
+
+  const report = await reconcile(h.deps, NOW);
+
+  assert.deepEqual(h.ingested, []);
+  assert.equal(report.resumed, 0);
+  assert.deepEqual(h.transitions, []);
+  assert.equal(h.store.getRun('r-awaiting_answer')!.state, 'awaiting_answer');
+});
+
+test('a bot-authored comment found by the listing correlates to nothing (T-06-17)', async () => {
+  // These comments came straight off the API and passed none of Phase 3's four
+  // ingress guards. The bot-author drop lives inside `correlate()` precisely so
+  // this second entry point inherits it -- the bot's own question comment is the
+  // first thing this listing returns, and answering it is an infinite loop.
+  const h = harness();
+  h.store.kvPut(POLL_WATERMARK_KEY, OLD);
+  seedRun(h.store, { state: 'awaiting_answer' });
+  seedQuestion(h.store);
+  h.comments.set('ISS-awaiting_answer', [
+    { id: 'c-q1', parentId: null, body: 'which database?', authorId: BOT, authorName: 'bot', createdAt: FRESH },
+  ]);
+
+  const report = await reconcile(h.deps, NOW);
+
+  assert.equal(h.ingested.length, 1, 'the guard is inside correlate, so the comment still reaches it');
+  assert.equal(report.resumed, 0);
+  assert.equal(h.store.getRun('r-awaiting_answer')!.state, 'awaiting_answer');
+});
+
+test('a Linear failure mid-poll is swallowed and leaves the watermark where it was', async () => {
+  const h = harness();
+  h.store.kvPut(POLL_WATERMARK_KEY, OLD);
+  h.issues.push({ id: 'ISS-new', identifier: 'ENG-99', updatedAt: FRESH });
+  h.failLinear.on = true;
+
+  const report = await reconcile(h.deps, NOW);
+
+  // Degraded to "missing backlog until the next pass", not stopped.
+  assert.equal(report.advanced, false);
+  assert.equal(report.watermark, OLD);
+  assert.equal(h.store.kvGet(POLL_WATERMARK_KEY), OLD);
+
+  // The next pass re-covers the same window rather than skipping it. Preferring
+  // re-processing over skipping is safe here: the no-active-run check absorbs a
+  // duplicate, whereas a skipped window is silently lost work.
+  h.failLinear.on = false;
+  const retry = await reconcile(h.deps, NOW);
+  assert.deepEqual(retry.enqueued, ['ISS-new']);
+  assert.equal(h.store.kvGet(POLL_WATERMARK_KEY), FRESH);
+});
+
+test('the watermark never advances past our own clock', async () => {
+  // A Linear clock running ahead of ours must not carry the watermark into the
+  // future, because everything between now and there would be skipped.
+  const h = harness();
+  h.issues.push({ id: 'ISS-future', identifier: 'ENG-7', updatedAt: '2027-01-01T00:00:00.000Z' });
+
+  const report = await reconcile(h.deps, NOW);
+
+  assert.equal(report.advanced, false);
+  assert.equal(h.store.kvGet(POLL_WATERMARK_KEY), undefined);
+  // It is still enqueued -- the clamp bounds the watermark, not the work.
+  assert.deepEqual(report.enqueued, ['ISS-future']);
+});
