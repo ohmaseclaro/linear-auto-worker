@@ -85,7 +85,8 @@ export interface Store {
 
   // kv
   kvGet(k: string): string | undefined;
-  kvPut(k: string, v: string): void;
+  /** `kvSet`, not `kvPut` — this is the pair `src/infra/store/sqlite-store.ts` implements. */
+  kvSet(k: string, v: string): void;
 
   transaction<T>(fn: () => T): T;
   close(): void;
@@ -132,8 +133,27 @@ export interface Receiver {
   close(): Promise<void>;
 }
 
-/** Ingress's normalised output: the only shape the orchestration layer consumes. */
+/**
+ * Ingress's normalised output.
+ *
+ * **Two producers, two vocabularies, and a mapping step between them — do not tidy either
+ * set away.** The first three members are what Phase 3's router and poller emit: webhook
+ * facts, named after what Linear did. The last four are what Phase 6's run engine switches
+ * on: intentions, named after what the daemon should do. They share no `kind`.
+ *
+ * That gap is deliberate but it is not free: an ingress event handed straight to the
+ * engine falls through its `default:` arm, so the daemon boots clean, verifies clean and
+ * processes nothing. Wiring the translation — including which `comment.created` is an
+ * answer to which pending question (03-CONTEXT D-05's `parentId` correlation) — is Phase
+ * 7's job at the composition root. It does not belong in the contract, because deciding
+ * that a comment is an answer requires the store, and the contract has no dependencies.
+ */
 export type DomainEvent =
+  // ── produced by ingress (Phase 3) ──
+  | { kind: 'issue.assigned'; issueId: IssueId; deliveryId?: string }
+  | { kind: 'issue.unassigned'; issueId: IssueId; deliveryId?: string }
+  | { kind: 'comment.created'; issueId: IssueId; commentId: string; parentId?: string; deliveryId?: string }
+  // ── consumed by the run engine (Phase 6) ──
   | { kind: 'run.requested'; issueId: IssueId }
   | { kind: 'run.cancelled'; issueId: IssueId; reason: string }
   | { kind: 'question.answered'; questionId: string; answer: string; authorName: string }

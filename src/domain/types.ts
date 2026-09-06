@@ -56,6 +56,12 @@ export const HOLDS_SLOT: ReadonlyArray<RunState> = ['preparing', 'running', 'del
 export const HAS_CHILD: ReadonlyArray<RunState> = ['running'];
 
 // ── Runs ─────────────────────────────────────────────────────────────────────
+//
+// Every timestamp below is epoch MILLISECONDS, typed `number`. The matching SQLite columns
+// must be declared INTEGER, not TEXT: a TEXT column compares lexicographically, which
+// happens to order ms timestamps correctly only while they all share a digit width. The
+// question deadline sweep is a range query over one of these, so that accident is holding
+// up a real feature.
 
 /** Fields common to both kinds of run. Not exported: consumers take `Run`. */
 interface RunBase {
