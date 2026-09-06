@@ -1,0 +1,31 @@
+name: Feature request
+description: Something this should do and doesn't.
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Scope note, so nobody wastes an afternoon: this is deliberately a **single-operator,
+        local** tool. A hosted service, a web UI, an auth layer, or a multi-user model are
+        out of scope by design, not by omission. Everything else is fair game.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do that you currently can't?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you'd like it to do
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you tried instead
+      description: Including "nothing, I just stopped" — that is useful signal.

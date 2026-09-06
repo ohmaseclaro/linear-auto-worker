@@ -1,0 +1,45 @@
+name: A trap worth recording
+description: You lost time to a footgun in one of the tools this drives. That is a contribution.
+labels: [trap]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        [`docs/TRAPS.md`](https://github.com/ohmaseclaro/linear-auto-worker/blob/main/docs/TRAPS.md)
+        is the part of this repository most likely to be useful to a stranger. Every entry
+        was measured against the real tool rather than recalled — so the "how you verified"
+        field below is the one that matters.
+
+  - type: input
+    id: tool
+    attributes:
+      label: Which tool, at which version
+      placeholder: "@linear/sdk 93.0.1"
+    validations:
+      required: true
+
+  - type: textarea
+    id: failure
+    attributes:
+      label: The failure mode
+      description: What goes wrong, and — importantly — whether it fails loudly or silently.
+    validations:
+      required: true
+
+  - type: textarea
+    id: correct
+    attributes:
+      label: The correct move
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: How you verified it
+      description: >
+        The installed `.d.ts`, a live HTTP request, an actual CLI invocation, a probe script.
+        Anything but "I remember it works this way" — this stack's documentation and common
+        knowledge have both been wrong before.
+    validations:
+      required: true

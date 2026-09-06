@@ -115,7 +115,11 @@ export async function checkGhAuth(run: RunCommand = defaultRunCommand): Promise<
     }
     return { name, status: 'pass', detail: 'gh is authenticated' };
   } catch (err) {
-    const output = `${(err as any)?.stdout ?? ''}\n${(err as any)?.stderr ?? ''}`;
+    // `gh auth status` exits non-zero in cases that still printed the scope line, so the
+    // thrown error's captured output is read rather than discarded. Narrowed structurally:
+    // `catch` gives `unknown`, and execa's error carries these two as strings.
+    const failure = err as { stdout?: string; stderr?: string };
+    const output = `${failure?.stdout ?? ''}\n${failure?.stderr ?? ''}`;
     const scopesMatch = output.match(/Token scopes:\s*(.+)/i);
     if (scopesMatch && !scopesMatch[1].includes('workflow')) {
       return {

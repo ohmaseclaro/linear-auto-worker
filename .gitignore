@@ -6,3 +6,7 @@ dist/
 
 # auto-run-gsd: per-plan isolated worktrees
 .claude/worktrees/
+
+# GSD research tool cache: verbatim third-party web-search/fetch payloads, not our writing.
+# The synthesised documents in .planning/research/*.md are the record that is kept.
+.planning/research/.cache/

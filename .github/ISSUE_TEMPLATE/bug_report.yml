@@ -1,0 +1,53 @@
+name: Bug report
+description: Something behaved differently from what the docs say it should.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filing: if a run produced nothing and reported success, check
+        [`docs/TRAPS.md`](https://github.com/ohmaseclaro/linear-auto-worker/blob/main/docs/TRAPS.md)
+        first — several ways of misconfiguring `claude -p` exit 0 and look like success.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what happened, and what you expected instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log lines
+      description: >
+        The daemon logs structured JSON to `~/.linear-auto-worker/logs/`. The lines around
+        the failure are usually enough. Secrets are redacted by the logger, but please read
+        before pasting.
+      render: json
+
+  - type: input
+    id: command
+    attributes:
+      label: Which command
+      placeholder: law start
+    validations:
+      required: true
+
+  - type: textarea
+    id: env
+    attributes:
+      label: Environment
+      description: "Output of: `node -v && law --help | head -1 && gh --version | head -1 && claude --version && git --version`"
+      render: shell
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: gate
+    attributes:
+      label: Gate
+      options:
+        - label: "`npm run verify` passes on a clean clone of `main`"
+        - label: I have checked existing issues for this

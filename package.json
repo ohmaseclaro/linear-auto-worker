@@ -1,6 +1,30 @@
 {
   "name": "linear-auto-worker",
   "version": "0.1.0",
+  "description": "A local daemon that turns Linear issues assigned to your bot into draft pull requests.",
+  "license": "MIT",
+  "author": "Augusto Claro (https://github.com/ohmaseclaro)",
+  "homepage": "https://github.com/ohmaseclaro/linear-auto-worker#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ohmaseclaro/linear-auto-worker.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ohmaseclaro/linear-auto-worker/issues"
+  },
+  "keywords": [
+    "linear",
+    "linear-app",
+    "claude",
+    "claude-code",
+    "agent",
+    "automation",
+    "webhook",
+    "ngrok",
+    "pull-request",
+    "daemon",
+    "cli"
+  ],
   "private": true,
   "type": "module",
   "bin": {
