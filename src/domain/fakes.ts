@@ -704,6 +704,17 @@ export class FakeLinearClient implements LinearClient {
     this.webhookCounter = 0;
   }
 
+  /**
+   * Seed or REPLACE one issue, the way a human editing the ticket in Linear would.
+   *
+   * Needed because assignment is an event in time: a fixture seeded already-assigned is
+   * picked up by the boot sweep, so a test about the WEBHOOK path cannot tell the run its
+   * delivery produced from the run the sweep produced.
+   */
+  putIssue(issue: LinearIssue): void {
+    this.issues.set(issue.id, issue);
+  }
+
   viewer(): Promise<{ id: string; name: string }> {
     return Promise.resolve(this.bot);
   }
