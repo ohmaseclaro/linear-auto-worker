@@ -446,11 +446,15 @@ export function buildChildEnv(runId: string): NodeJS.ProcessEnv {
 
 ```ts
 // src/execution/prompt.ts
+// NOTE: written with \u escapes deliberately. NEVER paste literal invisible
+// characters into source or docs — they are unreviewable in a diff, which is
+// the same property that makes them an attack vector in the first place.
+const C0_C1      = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/g;  // keeps \t \n \r
+const ZERO_WIDTH = /[\u200B-\u200F\u202A-\u202E\u2060-\u2064\u206A-\u206F\uFEFF]/g;
+const TAG_CHARS  = /[\u{E0000}-\u{E007F}]/gu;   // Unicode tag block — pure invisible smuggling
+
 export function sanitizeUntrustedText(s: string): string {
-  return s
-    .replace(/[ ---]/g, "") // C0/C1, keep \t \n \r
-    .replace(/[​-‏‪-‮⁠-⁤⁪-⁯﻿]/g, "") // zero-width + bidi
-    .replace(/[0-F]/gu, "");                                   // tag chars (invisible smuggling)
+  return s.replace(C0_C1, "").replace(ZERO_WIDTH, "").replace(TAG_CHARS, "");
 }
 ```
 
