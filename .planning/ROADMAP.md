@@ -74,10 +74,10 @@ Decimal phases appear between their surrounding integers in numeric order.
   2. Three concurrent runs read and write run state without the daemon's event loop stalling, with the database in WAL mode and a busy timeout set
   3. Every log line is structured JSON carrying the run ID, and no line anywhere in the output contains an API key or authtoken
 
-**Plans**: 1/2 plans executed
+**Plans**: 2/2 plans executed
 
 - [x] 02-01-PLAN.md — Tracer: loadFoundation() wiring config to store to logger, plus full config validation (six toggles, project/team fallback, secrets) (wave 1)
-- [ ] 02-02-PLAN.md — SqliteStore's typed CRUD over all five tables, and the written proof that redaction survives a secret born after boot (wave 2)
+- [x] 02-02-PLAN.md — SqliteStore's typed CRUD over all five tables, and the written proof that redaction survives a secret born after boot (wave 2)
 
 ### Phase 3: Ingress
 
@@ -92,9 +92,11 @@ Decimal phases appear between their surrounding integers in numeric order.
   3. An event the bot itself caused is dropped by four independent guards — actor identity, invisible comment marker, a short self-write suppression window, and delivery-ID uniqueness — and an event with a null actor is treated as untrusted rather than as not-the-bot
   4. A counter of dropped self-events climbs while the bot is commenting, so a filter that is not wired in is visible rather than silent
   5. Assigning the bot to an issue produces exactly one pickup, decided from a fresh fetch of the issue rather than from the webhook payload, and a later unrelated edit to that same issue produces none
+
 **Plans**: 5 plans across 2 waves
 
 Plans:
+
 - [ ] 03-01-PLAN.md — ngrok tunnel: checked URL, singleton assertion, sanitised auth failure (TUN-01/02/03)
 - [ ] 03-02-PLAN.md — Webhook reconciler: persist-then-register, correct pagination, re-enable, prune (HOOK-02/03/09)
 - [ ] 03-03-PLAN.md — Loop-prevention layers 1-3 as named pure predicates (HOOK-07)
@@ -202,8 +204,10 @@ Plans:
   3. The operator builds the project→repo map by picking from listed Linear teams and projects and discovered local repos, never by hand-editing JSON, and captures the optional Slack webhook and per-mapping toggles in the same flow
   4. Every mapped repo is checked for a remote and a resolvable default branch — which is recorded in the mapping — and the operator is warned about any repo missing a `CLAUDE.md` or `AGENTS.md`, named as the highest-leverage success factor
   5. The wizard finishes by registering the Linear webhook, so setup ends with a system that is already working rather than one that is merely configured
+
 **Plans**: 5 plans
 Plans:
+
 - [ ] 08-01-PLAN.md — CLI entry (`law setup|start|status`) + tracer + full toolchain preflight (D-01/D-08) + local repo discovery (D-02)
 - [ ] 08-02-PLAN.md — Linear API key validate+admin-probe and ngrok authtoken acquisition, persisted to `.env` at 0600 (SETUP-02/03/04)
 - [ ] 08-03-PLAN.md — Interactive Linear team/project + repo checklist mapping, Slack + toggle capture, re-run-in-place editing (SETUP-05/06)
@@ -252,7 +256,7 @@ Phase 1 first. Phases 2-6 in parallel. Phase 7 after all of them. Phase 8 last.
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Domain Contract, State Machine & Schema | 0/TBD | Not started | - |
-| 2. Foundation | 1/2 | In Progress|  |
+| 2. Foundation | 2/2 | In Progress|  |
 | 3. Ingress | 0/TBD | Not started | - |
 | 4. Execution | 0/TBD | Not started | - |
 | 5. Outbound | 0/2 | Not started | - |
