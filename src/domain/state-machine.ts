@@ -124,6 +124,40 @@ export function cancelIsDeferred(s: RunState): boolean {
 }
 
 /**
+ * Is there any trigger that moves a run from `from` to `to`?
+ *
+ * State-to-state rather than state-plus-trigger, because the engine's `transition(runId,
+ * to)` names a destination and lets the table decide whether the move is legal — there is
+ * exactly one writer of `runs.state` and it should not also have to pick a trigger name.
+ */
+export function canTransition(from: RunState, to: RunState): boolean {
+  return Object.values(TRANSITIONS[from]).includes(to);
+}
+
+/** What one state means to the scheduler and to restart recovery. */
+export interface RunStateInfo {
+  state: RunState;
+  holdsSlot: boolean;
+  hasLiveChild: boolean;
+  terminal: boolean;
+}
+
+/**
+ * Every state and its properties, as an enumerable object.
+ *
+ * Enumerable on purpose: the scheduler's slot-accounting test walks `Object.keys()` so
+ * that a tenth state cannot escape it. And because the keys come from `TRANSITIONS`, which
+ * `tsc` requires to have an entry per `RunState`, a tenth state cannot escape this table
+ * either.
+ */
+export const RUN_STATE_TABLE: Readonly<Record<RunState, RunStateInfo>> = Object.fromEntries(
+  (Object.keys(TRANSITIONS) as RunState[]).map((s) => [
+    s,
+    { state: s, holdsSlot: holdsSlot(s), hasLiveChild: hasLiveChild(s), terminal: isTerminal(s) },
+  ]),
+) as Record<RunState, RunStateInfo>;
+
+/**
  * A ticket-level parent run stores no state of its own (D-04); its status is this pure
  * function of its children. Deriving rather than storing is what makes it impossible for
  * parent and child to disagree — the disagreement that would otherwise let one repo's
