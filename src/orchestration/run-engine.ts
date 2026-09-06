@@ -704,10 +704,22 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
     async stop(): Promise<void> {
       stopping = true;
       for (const ac of aborts.values()) ac.abort();
-      // Not awaited here: the caller bounds the wait, because a group that needs the full
-      // SIGINT+SIGTERM ladder takes 25 seconds and an operator pressing Ctrl-C twice must
-      // not be made to wait it out.
-      await Promise.resolve();
+      // Resolves when the aborted drivers have finished unwinding, which is when the
+      // supervisor's escalation has finished — a driver removes itself from `aborts` in
+      // its `finally`, and it only gets there after `agent.run` returns, which only
+      // happens once the process group has actually been reaped.
+      //
+      // `aborts` and NOT `settle()`, and the difference is the whole fix. `settle()` waits
+      // for every driver, including one parked on `scheduler.acquire` for a slot the
+      // shutdown just stopped admitting — that driver holds no child, can never proceed,
+      // and its run is already sitting at `queued`, which is exactly the state the next
+      // boot wants. Waiting for it made Ctrl-C on an idle daemon burn the full child-reap
+      // budget. A driver appears in `aborts` only AFTER it has its slot, so this waits for
+      // precisely the runs that can have a process behind them.
+      //
+      // The caller still bounds it: the full SIGINT+SIGTERM ladder is 25 seconds, and an
+      // operator pressing Ctrl-C twice must not be made to wait it out.
+      while (aborts.size > 0) await new Promise((r) => setTimeout(r, 25));
     },
 
     async handle(event: EngineEvent): Promise<void> {

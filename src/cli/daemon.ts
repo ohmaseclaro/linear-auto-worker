@@ -793,8 +793,7 @@ export async function bootDaemon(opts: BootOptions = {}): Promise<DaemonHandle> 
       //    step 6 possible: without it, a reaped child comes back as `cancelled`, the
       //    driver transitions the run to a terminal state and posts a comment saying so,
       //    and the requeue below would find nothing left to requeue.
-      await engine.stop();
-      await within(engine.settle(), CHILD_REAP_BUDGET_MS, 'reap children', log);
+      await within(engine.stop(), CHILD_REAP_BUDGET_MS, 'reap children', log);
 
       // 3. Politeness, time-boxed (T-07-23). The URL is about to stop answering; leaving
       //    the webhook enabled spends Linear's three retries on deliveries that cannot

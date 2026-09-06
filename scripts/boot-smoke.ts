@@ -32,7 +32,12 @@
 import * as net from 'node:net';
 import { randomBytes, randomUUID } from 'node:crypto';
 
-import { bootDaemon, SHUTDOWN_NOTE, type DaemonHandle } from '../src/cli/daemon.js';
+import {
+  bootDaemon,
+  installSignalHandlers,
+  SHUTDOWN_NOTE,
+  type DaemonHandle,
+} from '../src/cli/daemon.js';
 import {
   BOT_USER_ID,
   ISSUE_ID,
@@ -219,7 +224,43 @@ async function main(): Promise<void> {
     await daemon.engine.transition(run.id, 'running', 'smoke: manufacture an in-flight run');
 
     const port = daemon.port;
-    await daemon.shutdown('smoke');
+
+    // Through the SIGNAL path, not by calling shutdown directly — that is the path an
+    // operator actually takes, and the only one that also exercises the handler. `exit` is
+    // injected so the smoke does not take the process down with it.
+    const exits: number[] = [];
+    const before = {
+      int: process.listenerCount('SIGINT'),
+      term: process.listenerCount('SIGTERM'),
+    };
+    const uninstall = installSignalHandlers(daemon, (code) => exits.push(code));
+    // BOTH signals, counted rather than grepped. `SIGTERM` appears in prose in this
+    // codebase (the supervisor's escalation ladder is documented in several places), so a
+    // source grep for the string passes even with the handler removed. A listener count
+    // cannot be satisfied by a comment.
+    check(
+      process.listenerCount('SIGINT') === before.int + 1 &&
+        process.listenerCount('SIGTERM') === before.term + 1,
+      'installSignalHandlers registered a handler for SIGINT AND for SIGTERM',
+    );
+    process.emit('SIGINT', 'SIGINT');
+    await until(() => (exits.length > 0 ? exits : undefined), { label: 'SIGINT to shut down' });
+    check(exits[0] === 0, `SIGINT ran a clean shutdown and exited 0 (got ${String(exits[0])})`);
+
+    // The second signal is NOT swallowed. The graceful path can legitimately take half a
+    // minute reaping a child that ignores SIGINT, and an operator pressing Ctrl-C twice is
+    // asking to stop waiting — so it exits non-zero immediately rather than politely.
+    process.emit('SIGINT', 'SIGINT');
+    check(
+      exits.length === 2 && exits[1] === 1,
+      `a second signal escalates to an immediate exit (got ${JSON.stringify(exits)})`,
+    );
+    uninstall();
+    check(
+      process.listenerCount('SIGINT') === before.int &&
+        process.listenerCount('SIGTERM') === before.term,
+      'the remover leaves the process exactly as it found it',
+    );
 
     check(
       tunnel.closeProbes.length === 1 && tunnel.closeProbes[0] === port,
