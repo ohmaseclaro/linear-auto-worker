@@ -51,7 +51,11 @@ Decimal phases appear between their surrounding integers in numeric order.
   3. The state table records, for each state, whether it holds a concurrency slot and whether it has a live child — with `awaiting_answer` holding neither
   4. Running the migration on an empty database produces the full schema, and running it again is a no-op
   5. The project→repo map and its per-mapping toggles have exactly one definition, which the wizard writes and four layers read
-**Plans**: TBD
+**Plans**: 4 plans
+- [ ] 01-01-PLAN.md — Repo skeleton, the canonical `verify` script, the nine-state vocabulary and its transition table (wave 1)
+- [ ] 01-02-PLAN.md — Run and question records, the config shape (CONF-01/CONF-02), agent-result contract, and every port interface (wave 2)
+- [ ] 01-03-PLAN.md — An in-memory fake for all fourteen ports, plus a constructibility smoke test (wave 3)
+- [ ] 01-04-PLAN.md — The five-table schema and the `PRAGMA user_version` migration runner (wave 3)
 
 ### Phase 2: Foundation
 **Goal**: Configuration, persistence, and logging behave correctly enough that no other layer has to defend against them
