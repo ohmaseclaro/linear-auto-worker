@@ -5,7 +5,7 @@
  */
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { finishWorktree, prepareWorktree } from './worktree.js';
+import { finishWorktree, prepareWorktree, reconcileWorktrees } from './worktree.js';
 import type { RunCommand, RunCommandOptions, RunCommandResult } from './execute-run.js';
 
 interface RecordedCall {
@@ -196,3 +196,123 @@ describe('finishWorktree', () => {
   });
 });
 
+
+describe('reconcileWorktrees', () => {
+  const DAEMON_DIR = '/Users/operator/.linear-auto-worker';
+
+  function porcelainOf(paths: string[]): string {
+    return paths
+      .map((p) => `worktree ${p}\nHEAD abc123def456\nbranch refs/heads/some-branch\n`)
+      .join('\n');
+  }
+
+  test('prunes worktrees under the daemon root with no referencing run row', async () => {
+    const referenced = `${DAEMON_DIR}/worktrees/acme/ENG-1`;
+    const unreferenced1 = `${DAEMON_DIR}/worktrees/acme/ENG-2`;
+    const unreferencedWithSpace = `${DAEMON_DIR}/worktrees/acme/ENG-3 fix the thing`;
+
+    const { run, calls } = makeRunner((call) => {
+      if (call.args.includes('prune')) return { exitCode: 0 };
+      if (call.args.includes('list')) {
+        return { exitCode: 0, stdout: porcelainOf([referenced, unreferenced1, unreferencedWithSpace]) };
+      }
+      return { exitCode: 0 };
+    });
+
+    const result = await reconcileWorktrees({
+      runCommand: run,
+      daemonDir: DAEMON_DIR,
+      repoPaths: ['/Users/operator/code/acme'],
+      nonTerminalRuns: [{ runId: 'run-1', worktreePath: referenced }],
+    });
+
+    assert.deepEqual(result.pruned.sort(), [unreferenced1, unreferencedWithSpace].sort());
+    assert.deepEqual(result.orphanedRuns, []);
+
+    const pruneIdx = calls.findIndex((c) => c.args.includes('prune'));
+    const listIdx = calls.findIndex((c) => c.args.includes('list'));
+    assert.ok(pruneIdx >= 0 && listIdx >= 0 && pruneIdx < listIdx, 'prune must run before the listing is read');
+
+    const removeCalls = calls.filter((c) => c.args.includes('remove'));
+    assert.equal(removeCalls.length, 2);
+    for (const rc of removeCalls) {
+      assert.ok(rc.args.includes('--force'));
+    }
+    assert.deepEqual(
+      removeCalls.map((c) => c.args[c.args.length - 1]).sort(),
+      [unreferenced1, unreferencedWithSpace].sort()
+    );
+  });
+
+  test('a worktree outside the daemon root is never removed even when unreferenced', async () => {
+    const outside = '/Users/operator/code/some-other-project';
+    const { run, calls } = makeRunner((call) => {
+      if (call.args.includes('prune')) return { exitCode: 0 };
+      if (call.args.includes('list')) return { exitCode: 0, stdout: porcelainOf([outside]) };
+      return { exitCode: 0 };
+    });
+
+    const result = await reconcileWorktrees({
+      runCommand: run,
+      daemonDir: DAEMON_DIR,
+      repoPaths: [outside],
+      nonTerminalRuns: [],
+    });
+
+    assert.deepEqual(result.pruned, []);
+    assert.ok(!calls.some((c) => c.args.includes('remove')), 'no removal argv may ever be issued for a path outside the daemon root');
+  });
+
+  test('a run row whose worktree path is absent from the listing is reported orphaned, no argv issued for it', async () => {
+    const alive = `${DAEMON_DIR}/worktrees/acme/ENG-1`;
+    const vanished = `${DAEMON_DIR}/worktrees/acme/ENG-vanished`;
+
+    const { run, calls } = makeRunner((call) => {
+      if (call.args.includes('prune')) return { exitCode: 0 };
+      if (call.args.includes('list')) return { exitCode: 0, stdout: porcelainOf([alive]) };
+      return { exitCode: 0 };
+    });
+
+    const result = await reconcileWorktrees({
+      runCommand: run,
+      daemonDir: DAEMON_DIR,
+      repoPaths: ['/Users/operator/code/acme'],
+      nonTerminalRuns: [
+        { runId: 'run-alive', worktreePath: alive },
+        { runId: 'run-orphaned', worktreePath: vanished },
+      ],
+    });
+
+    assert.deepEqual(result.orphanedRuns, ['run-orphaned']);
+    assert.deepEqual(result.pruned, []);
+    assert.ok(!calls.some((c) => c.args.some((a) => a.includes('ENG-vanished'))));
+  });
+
+  test('the porcelain parser handles multiple repos and blank-line-delimited records', async () => {
+    const a1 = `${DAEMON_DIR}/worktrees/acme/ENG-1`;
+    const b1 = `${DAEMON_DIR}/worktrees/beta/ENG-9`;
+
+    const { run } = makeRunner((call) => {
+      if (call.args.includes('prune')) return { exitCode: 0 };
+      if (call.args.includes('list')) {
+        const repoPath = call.args[1];
+        if (repoPath === '/repo/acme') return { exitCode: 0, stdout: porcelainOf([a1]) };
+        if (repoPath === '/repo/beta') return { exitCode: 0, stdout: porcelainOf([b1]) };
+      }
+      return { exitCode: 0 };
+    });
+
+    const result = await reconcileWorktrees({
+      runCommand: run,
+      daemonDir: DAEMON_DIR,
+      repoPaths: ['/repo/acme', '/repo/beta'],
+      nonTerminalRuns: [
+        { runId: 'run-a', worktreePath: a1 },
+        { runId: 'run-b', worktreePath: b1 },
+      ],
+    });
+
+    assert.deepEqual(result.pruned, []);
+    assert.deepEqual(result.orphanedRuns, []);
+  });
+});

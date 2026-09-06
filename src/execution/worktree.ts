@@ -188,3 +188,88 @@ export async function finishWorktree(o: FinishWorktreeInput): Promise<void> {
   if (o.verdict !== 'delivered') return;
   await removeWorktree(o);
 }
+
+export interface NonTerminalRun {
+  runId: string;
+  worktreePath: string;
+}
+
+export interface ReconcileWorktreesInput {
+  runCommand: RunCommand;
+  daemonDir: string;
+  /** Every mapped repository's local clone path. */
+  repoPaths: readonly string[];
+  /** The caller's own non-terminal run rows. This module reads no database (Phase 6/7 own it). */
+  nonTerminalRuns: readonly NonTerminalRun[];
+}
+
+export interface ReconcileResult {
+  /** Worktree paths removed because no non-terminal run row referenced them. */
+  pruned: string[];
+  /** Run ids whose recorded worktree path is no longer a real worktree. */
+  orphanedRuns: string[];
+}
+
+/**
+ * Parse `git worktree list --porcelain` into the one field this module needs. Written
+ * against the porcelain format rather than the human-readable one — the human format's
+ * columns are not stable and a path containing a space silently mis-splits it. Each
+ * worktree's path is carried on a single `worktree <path>` line with no further escaping,
+ * so slicing off the known prefix is sufficient even when the path has a space in it.
+ */
+function parseWorktreePaths(porcelain: string): string[] {
+  const paths: string[] = [];
+  for (const line of porcelain.split('\n')) {
+    if (line.startsWith('worktree ')) {
+      paths.push(line.slice('worktree '.length));
+    }
+    // `HEAD <sha>`, `branch <ref>`, `detached`, `bare`, `locked`, `prunable` and the
+    // blank line separating records carry no information this decision needs.
+  }
+  return paths;
+}
+
+/**
+ * Boot reconcile (AGNT-03). Prunes worktrees a crashed process orphaned and reports run
+ * rows whose worktree vanished, so the caller can fail them with a diagnosis rather than
+ * silently dropping or replaying them.
+ *
+ * Never removes the main working tree and never removes a worktree outside the daemon
+ * root — both are the same condition, since the main working tree never lives under the
+ * daemon-owned root in the first place. That containment check is the only thing standing
+ * between a bug in this function and deleting the operator's own work.
+ */
+export async function reconcileWorktrees(o: ReconcileWorktreesInput): Promise<ReconcileResult> {
+  const referenced = new Set(o.nonTerminalRuns.map((r) => path.resolve(r.worktreePath)));
+  const seen = new Set<string>();
+  const pruned: string[] = [];
+
+  for (const repoPath of o.repoPaths) {
+    // `worktree prune` first: a crashed process leaves stale administrative files that
+    // make an already-deleted directory still list as a worktree. Pruning clears them so
+    // the listing below reflects reality.
+    await o.runCommand('git', ['-C', repoPath, 'worktree', 'prune']);
+
+    const listing = await o.runCommand('git', ['-C', repoPath, 'worktree', 'list', '--porcelain']);
+    for (const worktreePath of parseWorktreePaths(listing.stdout)) {
+      const resolved = path.resolve(worktreePath);
+      seen.add(resolved);
+
+      if (!isUnderRoot(resolved, o.daemonDir)) {
+        // Not this daemon's to delete — includes the main working tree itself, which is
+        // never under the daemon-owned root.
+        continue;
+      }
+      if (referenced.has(resolved)) continue;
+
+      await o.runCommand('git', ['-C', repoPath, 'worktree', 'remove', '--force', worktreePath]);
+      pruned.push(worktreePath);
+    }
+  }
+
+  const orphanedRuns = o.nonTerminalRuns
+    .filter((r) => !seen.has(path.resolve(r.worktreePath)))
+    .map((r) => r.runId);
+
+  return { pruned, orphanedRuns };
+}
