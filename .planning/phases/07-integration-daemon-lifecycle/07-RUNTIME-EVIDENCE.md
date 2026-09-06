@@ -88,6 +88,26 @@ be fixed, not relied upon.
 `computeBackoffMs` treats the reset header as UTC epoch **milliseconds** (reset 30s in the future
 → 30000 ms) and clamps a reset already in the past to 0 rather than returning a negative delay.
 
+## PASS — Invariant 1 / INTK-06: the scheduler does not starve
+
+Executed against `createScheduler({config:{concurrency:3}})`:
+
+```
+3 acquired         inUse=3
+4th while full     admitted=false, positionOf('r4')=1
+after 3 releases   inUse=1, 4th admitted=true
+slots free         2
+double release     safe (no over-credit)
+```
+
+Three runs parking release their slots and the waiting run is admitted immediately — the
+practical form of SC3, and the property whose violation turns "three open questions" into
+"the daemon is dead" with the operator's natural diagnosis being wrong. `positionOf` reporting
+1 for the waiting run satisfies INTK-06's queue-position requirement.
+
+Double release is safe because the scheduler tracks an **admitted set, not a counter**, so a
+duplicate release cannot over-credit capacity and a resync cannot drift.
+
 ## RESOLVED — T53: fixed by the orchestrator after 07-02 reached tsc exit 0
 
 **The decisive result of this milestone.** After 07-02 drove the typecheck from 68 errors to
