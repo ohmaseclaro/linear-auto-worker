@@ -1,8 +1,17 @@
 import assert from 'node:assert/strict';
+import { mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import type { LinearClient } from '@linear/sdk';
 
-import { acquireLinearKey } from './secrets.js';
+import {
+  acquireLinearKey,
+  acquireNgrokToken,
+  maskSecret,
+  readSecretsEnv,
+  writeSecretsEnv,
+} from './secrets.js';
 
 // The real environment may carry a LINEAR_API_KEY for the operator's own daemon; the
 // process.env fallback branch is exercised explicitly below, so clear it for everything else.
@@ -144,4 +153,144 @@ test('acquireLinearKey: no failure message ever echoes the key back', async () =
     assert.ok(!result.ok);
     assert.ok(!result.fix.includes(key), `fix message leaked the key: ${opts}`);
   }
+});
+
+// ---------------------------------------------------------------------------
+// ngrok authtoken
+// ---------------------------------------------------------------------------
+
+async function tmpFile(name: string, contents?: string): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), 'law-secrets-'));
+  const path = join(dir, name);
+  if (contents !== undefined) await writeFile(path, contents);
+  return path;
+}
+
+test('acquireNgrokToken: an existing token skips both the yaml read and the prompt (D-04)', async () => {
+  const result = await acquireNgrokToken(
+    { NGROK_AUTHTOKEN: 'existing_token' },
+    {
+      prompt: neverPrompt,
+      yamlPaths: ['/nonexistent/should-not-be-read.yml'],
+    },
+  );
+
+  assert.ok(result.ok);
+  assert.equal(result.value.token, 'existing_token');
+  assert.equal(result.value.source, 'existing');
+});
+
+test('acquireNgrokToken: copies the VALUE out of ngrok.yml, never a reference to the file (T10)', async () => {
+  const yaml = await tmpFile(
+    'ngrok.yml',
+    'version: "3"\nagent:\n  authtoken: 2abcDEF_ngrokTokenValue\n  region: us\n',
+  );
+  const result = await acquireNgrokToken({}, { prompt: neverPrompt, yamlPaths: [yaml] });
+
+  assert.ok(result.ok);
+  assert.equal(result.value.token, '2abcDEF_ngrokTokenValue');
+  assert.equal(result.value.source, 'yaml');
+  assert.ok(
+    !result.value.token.includes('ngrok.yml'),
+    'the SDK reads only the environment — a path here fails at tunnel-open',
+  );
+});
+
+test('acquireNgrokToken: strips quotes and ignores commented-out authtoken lines', async () => {
+  const yaml = await tmpFile('ngrok.yml', '# authtoken: commented_out\nauthtoken: "quoted_token"\n');
+  const result = await acquireNgrokToken({}, { prompt: neverPrompt, yamlPaths: [yaml] });
+
+  assert.ok(result.ok);
+  assert.equal(result.value.token, 'quoted_token');
+});
+
+test('acquireNgrokToken: a missing yaml file falls through to the prompt, it never aborts setup', async () => {
+  let prompted = 0;
+  const result = await acquireNgrokToken(
+    {},
+    {
+      yamlPaths: ['/definitely/not/here/ngrok.yml'],
+      prompt: async () => {
+        prompted += 1;
+        return ' typed_token ';
+      },
+    },
+  );
+
+  assert.equal(prompted, 1);
+  assert.ok(result.ok);
+  assert.equal(result.value.token, 'typed_token');
+  assert.equal(result.value.source, 'prompted');
+});
+
+test('acquireNgrokToken: a yaml with no authtoken line falls through to the prompt', async () => {
+  const yaml = await tmpFile('ngrok.yml', 'version: "3"\nregion: eu\n');
+  const result = await acquireNgrokToken({}, { yamlPaths: [yaml], prompt: async () => 'typed' });
+
+  assert.ok(result.ok);
+  assert.equal(result.value.source, 'prompted');
+});
+
+test('acquireNgrokToken: an empty answer fails here rather than as an indiscriminable tunnel error (T25)', async () => {
+  const result = await acquireNgrokToken({}, { yamlPaths: [], prompt: async () => '  ' });
+
+  assert.ok(!result.ok);
+  assert.match(result.fix, /dashboard\.ngrok\.com/);
+});
+
+// ---------------------------------------------------------------------------
+// .env persistence
+// ---------------------------------------------------------------------------
+
+test('writeSecretsEnv: creates the .env at mode 0600', async () => {
+  const envPath = join(await mkdtemp(join(tmpdir(), 'law-env-')), '.env');
+  await writeSecretsEnv(envPath, { LINEAR_API_KEY: 'k1', NGROK_AUTHTOKEN: 't1' });
+
+  assert.equal((await stat(envPath)).mode & 0o777, 0o600);
+  const body = await readFile(envPath, 'utf8');
+  assert.match(body, /^LINEAR_API_KEY=k1$/m);
+  assert.match(body, /^NGROK_AUTHTOKEN=t1$/m);
+});
+
+test('writeSecretsEnv: merges in place, preserving unrelated lines, and re-chmods an existing file', async () => {
+  const envPath = await tmpFile('.env', 'SOME_OTHER=keep-me\nLINEAR_API_KEY=old\n');
+  const { chmod } = await import('node:fs/promises');
+  await chmod(envPath, 0o644);
+
+  await writeSecretsEnv(envPath, { LINEAR_API_KEY: 'new', NGROK_AUTHTOKEN: 't2' });
+
+  const body = await readFile(envPath, 'utf8');
+  assert.match(body, /^SOME_OTHER=keep-me$/m);
+  assert.match(body, /^LINEAR_API_KEY=new$/m);
+  assert.match(body, /^NGROK_AUTHTOKEN=t2$/m);
+  assert.doesNotMatch(body, /LINEAR_API_KEY=old/);
+  assert.equal(
+    (await stat(envPath)).mode & 0o777,
+    0o600,
+    'chmod must run on merge too, not only on create',
+  );
+});
+
+test('writeSecretsEnv: omitted keys are left untouched (an "existing"-sourced value is never rewritten)', async () => {
+  const envPath = await tmpFile('.env', 'LINEAR_API_KEY=untouched\n');
+  await writeSecretsEnv(envPath, { NGROK_AUTHTOKEN: 't3' });
+
+  const body = await readFile(envPath, 'utf8');
+  assert.match(body, /^LINEAR_API_KEY=untouched$/m);
+  assert.match(body, /^NGROK_AUTHTOKEN=t3$/m);
+});
+
+test('readSecretsEnv: round-trips what writeSecretsEnv wrote, and returns {} for a missing file', async () => {
+  const envPath = join(await mkdtemp(join(tmpdir(), 'law-env-')), '.env');
+  assert.deepEqual(await readSecretsEnv(envPath), {});
+
+  await writeSecretsEnv(envPath, { LINEAR_API_KEY: 'k9', NGROK_AUTHTOKEN: 't9' });
+  const parsed = await readSecretsEnv(envPath);
+  assert.equal(parsed.LINEAR_API_KEY, 'k9');
+  assert.equal(parsed.NGROK_AUTHTOKEN, 't9');
+});
+
+test('maskSecret: never returns the whole secret', () => {
+  assert.equal(maskSecret('lin_api_1234567890'), 'lin_ap…');
+  assert.equal(maskSecret('short'), '…');
 });
