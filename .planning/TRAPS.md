@@ -26,6 +26,16 @@ verified against live tools/registries during project research, not recalled fro
 | T14 | Body-parsing before HMAC verification destroys the byte-exact raw body | Re-stringifying a parsed body produces signature mismatches (key order, unicode escaping) | No HTTP framework; let the SDK handler consume the raw stream | 3 |
 | T15 | This machine runs **Node v22.23.1**; STACK.md recommends Node 24 (Active LTS) | Not fatal — `better-sqlite3@13` and `execa@10` both require only `>=22` — but the wizard's own preflight will flag the operator's box | Build against >=22; decide in Phase 8 whether the preflight hard-fails or warns on <24 | 1, 8 |
 
+## Verified clean (do not "fix" these)
+
+- **2026-09-06 — the entire pinned dependency set installs cleanly.** Verified by a real
+  `npm install` in a scratch directory: 87 packages, 11 s, every pin resolving exactly as
+  written in STACK.md. `typescript@~5.9` resolves to **5.9.3** (correctly not the TS7
+  `tsgo` rewrite), `@linear/sdk@93.0.1`, `better-sqlite3@13.0.3` shipping a prebuilt
+  `darwin-arm64.node` (no node-gyp, no Xcode CLT needed), and `@ngrok/ngrok-darwin-arm64`
+  present via optionalDependencies. **Do not bump any pin.** If an install fails, the
+  cause is local, not the version.
+
 ## Discovered during execution
 
 *(appended as waves hit them)*
