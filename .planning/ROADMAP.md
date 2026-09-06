@@ -118,7 +118,12 @@ Decimal phases appear between their surrounding integers in numeric order.
   5. Boot-time and periodic polling finds bot-assigned issues with no run record, and unassigning the bot cancels a queued run and requests cancellation of a running one
   6. One ticket mapped to several repos produces one sub-run per repo whose outcomes are reported independently, so a repo that fails never discards another repo's completed pull request
   7. A failed run is attempted exactly once — it posts a diagnosis with the error and log path and leaves the branch and worktree for the operator instead of retrying
-**Plans**: TBD
+**Plans**: 5 plans across 3 waves
+- [ ] 06-01-PLAN.md — Tracer: one run end to end through the Q&A detour, plus the semaphore whose slot rule reads the domain state table (wave 1)
+- [ ] 06-02-PLAN.md — Run engine: ack-before-work pickup, edit-in-place queue position, cancellation from every non-terminal state, failure attempted exactly once (wave 2)
+- [ ] 06-03-PLAN.md — Questions: threaded-first correlation with a top-level fallback, and the durable deadline sweep (wave 2)
+- [ ] 06-04-PLAN.md — Restart recovery per state, and the reconciliation poll including the missed-answer comment listing (wave 3)
+- [ ] 06-05-PLAN.md — Multi-repo fan-out with a parent status that is derived and never stored (wave 3)
 
 ### Phase 7: Integration & Daemon Lifecycle
 **Goal**: The core value works hands-off — an issue assigned to the bot becomes a reviewable pull request
