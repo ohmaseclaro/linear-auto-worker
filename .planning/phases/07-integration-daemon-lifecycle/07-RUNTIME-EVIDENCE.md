@@ -52,6 +52,29 @@ strips control and zero-width characters **before** the delimiter is rewritten. 
 split by an invisible character reassembles *after* the rewrite and escapes cleanly. Both layers
 D-14 requires are present and they compose.
 
+## PASS (layers 1-3) — HOOK-07: loop prevention fires correctly
+
+Executed `selfEventGuards` against synthetic payloads:
+
+| case | dropped | guard bucket |
+|---|---|---|
+| human comment | no | — |
+| bot actor id | yes | `actor:self` |
+| null actor | yes | `actor:null-untrusted` |
+| bot marker in body | yes | `marker:bot-authored` |
+| after `noteSelfWrite('Issue','i-42')` | yes | `suppression:self-write` |
+
+No false positive on the human comment, and `selfEventDropCounts` increments per guard —
+satisfying Phase 3 SC4 (an unwired filter is visible rather than silent). A side result: importing
+`BOT_COMMENT_MARKER_PREFIX` from `guards.js` **fails**, confirming T32 — guards imports it from
+the domain barrel and does not re-export a second copy.
+
+**Caveat — layer 4 is NOT verified and is currently broken.** Delivery-ID uniqueness lives in
+`receiver.ts:201` and calls `store.tryInsertDelivery`, which T53 proves does not exist on the real
+store. So the guard that catches a *replayed* delivery is the one that throws on first use. Layers
+1-3 would still hold, which is exactly why four independent layers were specified — but this must
+be fixed, not relied upon.
+
 ## FAIL — T53: the store queries columns that do not exist
 
 Authoritative schema, read back from a real in-memory database after running the migration:
