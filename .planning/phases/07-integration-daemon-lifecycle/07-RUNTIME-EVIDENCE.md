@@ -128,6 +128,26 @@ A channel whose `send` throws does **not** fail the run and does not propagate �
 The five milestone kinds are `picked_up`, `worktree_ready`, `agent_started`, `question_asked`,
 `terminal`, prefixed `run.` by the channel — matching D-01's "milestones only, 4-6 per run".
 
+## PASS — T64 fixed, and the AgentResult status boundary is deliberate
+
+`AgentResultSchema` properties: `status, summary, question, assumption, changedRepos, prTitle,
+prBody, failureReason`, `additionalProperties: false`. **`assumption` is present and
+`assumptionIfUnanswered` is gone** — T64 is fixed, so a timed-out question can now carry the
+assumption it posts to the ticket. `prTitle`/`prBody` survived, which 04-06's PR-body renderer needs.
+
+The enum looks like a mismatch and is not:
+
+| | statuses |
+|---|---|
+| wire schema (what the agent may return) | `complete`, `needs_input`, `failed` |
+| domain type (what the worker may hold) | those three **plus `cancelled`** |
+
+`cancelled` is worker-synthesised when the operator unassigns — the agent can never produce it,
+so its absence from the wire schema is correct. `run-engine` gives it its own arm precisely so a
+deliberately stopped run is not reported as a failure (06-02's fix), and `failed` needs no explicit
+case because the `default` arm already transitions to `failed` with a reason. Four variants, three
+on the wire, every path handled.
+
 ## RESOLVED — T53: fixed by the orchestrator after 07-02 reached tsc exit 0
 
 **The decisive result of this milestone.** After 07-02 drove the typecheck from 68 errors to
