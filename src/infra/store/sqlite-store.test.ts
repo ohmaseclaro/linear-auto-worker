@@ -100,8 +100,9 @@ test('findActiveRunByIssue: terminal-value filter, not a transition check', () =
   store.insertRun(makeRun({ id: 'run-done', issueId: 'ENG-8', state: 'delivered' }));
 
   const active = store.findActiveRunByIssue('ENG-9');
-  assert.equal(active?.id, 'run-active');
-  assert.equal(store.findActiveRunByIssue('ENG-8'), undefined);
+  assert.equal(active.length, 1);
+  assert.equal(active[0]?.id, 'run-active');
+  assert.deepEqual(store.findActiveRunByIssue('ENG-8'), []);
 });
 
 test('listByState() and nextQueued() filter and cap as named', () => {

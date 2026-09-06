@@ -19,8 +19,11 @@ export const WEBHOOK_LABEL = 'linear-auto-worker';
 
 const NGROK_URL = /\.ngrok(-free)?\.(app|dev|io)(\/|$)/;
 
-const KEY_ID = 'webhook_id';
-const KEY_SECRET = 'webhook_secret';
+/** kv keys. Exported so the composition root reads the SAME key this module writes —
+ *  a second spelling of 'webhook_secret' is a receiver that verifies against a secret
+ *  nobody registered, which fails as a 400 on every real delivery. */
+export const KEY_ID = 'webhook_id';
+export const KEY_SECRET = 'webhook_secret';
 
 export interface WebhookRegistration {
   id: string;

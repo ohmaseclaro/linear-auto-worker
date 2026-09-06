@@ -86,7 +86,7 @@ export interface Store {
    * exactly the risk CONTEXT.md calls out; the two are kept explicitly
    * distinct here so a future reader cannot miss it.
    */
-  findActiveRunByIssue(issueId: string): RunRow | undefined;
+  findActiveRunByIssue(issueId: string): RunRow[];
   listByState(...states: string[]): RunRow[];
   nextQueued(limit: number): RunRow[];
   childRuns(parentRunId: string): RunRow[];
@@ -96,6 +96,9 @@ export interface Store {
   getQuestion(id: string): QuestionRow | undefined;
   openQuestionsForIssue(issueId: string): QuestionRow[];
   findQuestionByCommentId(linearCommentId: string): QuestionRow | undefined;
+  /** Correlation tier 2: the short code carried in a question comment's marker is
+   *  the first 8 characters of the question id (`domain/types.ts:questionMarker`). */
+  findQuestionByShortCode(code: string): QuestionRow | undefined;
   /** Generic column-by-column patch -- same no-validation rule as `updateRun`. */
   updateQuestion(id: string, patch: Partial<QuestionRow>): void;
   expiredQuestions(now: number | string): QuestionRow[];
@@ -192,18 +195,20 @@ export function createSqliteStore(db: Database.Database): Store {
     updateRun(id, patch) {
       updateRow(db, 'runs', id, patch as Record<string, unknown>);
     },
+    // ALL active runs, not the newest one. A ticket fanned out over N repos has N
+    // child runs (D-12), and `run.cancelled` cancels every one of them -- a LIMIT 1
+    // here cancelled one child and silently left the rest running (DELV-07).
     findActiveRunByIssue(issueId) {
-      const row = db
+      const rows = db
         .prepare(
           `SELECT * FROM runs
            WHERE issue_id = ?
              AND state IS NOT NULL
              AND state NOT IN ('delivered', 'partial', 'failed', 'cancelled')
-           ORDER BY created_at DESC
-           LIMIT 1`
+           ORDER BY created_at DESC`
         )
-        .get(issueId);
-      return rowToCamel<RunRow>(row);
+        .all(issueId);
+      return rowsToCamel<RunRow>(rows);
     },
     listByState(...states) {
       if (states.length === 0) return [];
@@ -246,6 +251,12 @@ export function createSqliteStore(db: Database.Database): Store {
       const row = db
         .prepare('SELECT * FROM questions WHERE linear_comment_id = ?')
         .get(linearCommentId);
+      return rowToCamel<QuestionRow>(row);
+    },
+    findQuestionByShortCode(code) {
+      const row = db
+        .prepare('SELECT * FROM questions WHERE substr(id, 1, 8) = ? LIMIT 1')
+        .get(code);
       return rowToCamel<QuestionRow>(row);
     },
     updateQuestion(id, patch) {
