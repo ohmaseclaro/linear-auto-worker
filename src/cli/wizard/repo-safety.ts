@@ -8,8 +8,7 @@
  * non-throwing `SafetyWarning` — a repo with warnings is still usable, just flagged, and one
  * repo's check failure never aborts checks for the rest (T-08-15).
  */
-import { confirm } from '@inquirer/prompts';
-import { execa } from 'execa';
+import { defaultRunCommand, realPrompts, type RunCommand, type WizardPrompts } from './deps.js';
 import { access, constants, readFile, writeFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 
@@ -80,7 +79,10 @@ async function writeStarterAgentDoc(repoPath: string): Promise<void> {
  * existing repo under either name is silently passed: this is a warning-and-offer, not a
  * gate, so a repo the operator already trusts is never blocked from mapping.
  */
-export async function checkAgentDocs(repoPath: string): Promise<SafetyWarning | null> {
+export async function checkAgentDocs(
+  repoPath: string,
+  prompts: WizardPrompts = realPrompts,
+): Promise<SafetyWarning | null> {
   for (const name of AGENT_DOC_NAMES) {
     if (await fileExists(join(repoPath, name))) return null;
   }
@@ -91,7 +93,7 @@ export async function checkAgentDocs(repoPath: string): Promise<SafetyWarning | 
     `something mergeable`;
   console.log(`⚠ "${repoPath}": ${message}`);
 
-  const wantsStarter = await confirm({
+  const wantsStarter = await prompts.confirm({
     message: `Generate a starter CLAUDE.md for "${repoPath}"?`,
     default: true,
   });
@@ -128,9 +130,10 @@ async function checkSubmodules(repoPath: string): Promise<SafetyWarning | null> 
  *  ambiguous remotes). Never throws — an unreadable repo also becomes a warning. */
 async function resolveRemote(
   repoPath: string,
+  run: RunCommand,
 ): Promise<{ remoteName?: string; warning?: SafetyWarning }> {
   try {
-    const { stdout } = await execa('git', ['remote', '-v'], { cwd: repoPath });
+    const { stdout } = await run('git', ['remote', '-v'], { cwd: repoPath });
     const names = new Set(
       (stdout ?? '')
         .split('\n')
@@ -185,9 +188,10 @@ interface GhRepoView {
  */
 async function resolveDefaultBranch(
   repoPath: string,
+  run: RunCommand,
 ): Promise<{ defaultBranch?: string; ownerRepo?: string; warning?: SafetyWarning }> {
   try {
-    const { stdout } = await execa(
+    const { stdout } = await run(
       'gh',
       ['repo', 'view', '--json', 'defaultBranchRef,nameWithOwner'],
       { cwd: repoPath },
@@ -233,9 +237,10 @@ async function checkBranchProtection(
   repoPath: string,
   ownerRepo: string,
   branch: string,
+  run: RunCommand,
 ): Promise<SafetyWarning | null> {
   try {
-    await execa('gh', ['api', `repos/${ownerRepo}/branches/${branch}/protection`], {
+    await run('gh', ['api', `repos/${ownerRepo}/branches/${branch}/protection`], {
       cwd: repoPath,
     });
     return null;
@@ -254,21 +259,22 @@ async function checkBranchProtection(
 
 async function annotateOneRepo(
   repoPath: string,
+  deps: { run: RunCommand; prompts: WizardPrompts },
 ): Promise<{ info: RepoSafetyInfo; warnings: SafetyWarning[] }> {
   const warnings: SafetyWarning[] = [];
   const info: RepoSafetyInfo = { repoPath };
 
-  const docsWarning = await checkAgentDocs(repoPath);
+  const docsWarning = await checkAgentDocs(repoPath, deps.prompts);
   if (docsWarning) warnings.push(docsWarning);
 
   const submoduleWarning = await checkSubmodules(repoPath);
   if (submoduleWarning) warnings.push(submoduleWarning);
 
-  const remoteResult = await resolveRemote(repoPath);
+  const remoteResult = await resolveRemote(repoPath, deps.run);
   if (remoteResult.warning) warnings.push(remoteResult.warning);
   if (remoteResult.remoteName) info.remoteName = remoteResult.remoteName;
 
-  const branchResult = await resolveDefaultBranch(repoPath);
+  const branchResult = await resolveDefaultBranch(repoPath, deps.run);
   if (branchResult.warning) warnings.push(branchResult.warning);
   if (branchResult.defaultBranch) info.defaultBranch = branchResult.defaultBranch;
   if (branchResult.ownerRepo) info.ownerRepo = branchResult.ownerRepo;
@@ -278,6 +284,7 @@ async function annotateOneRepo(
       repoPath,
       info.ownerRepo,
       info.defaultBranch,
+      deps.run,
     );
     if (protectionWarning) warnings.push(protectionWarning);
   }
@@ -293,7 +300,9 @@ async function annotateOneRepo(
  */
 export async function annotateRepoSafety(
   mappings: Mapping[],
+  deps: { run?: RunCommand; prompts?: WizardPrompts } = {},
 ): Promise<{ mappings: EnrichedMapping[]; warnings: SafetyWarning[] }> {
+  const resolved = { run: deps.run ?? defaultRunCommand, prompts: deps.prompts ?? realPrompts };
   const allWarnings: SafetyWarning[] = [];
   const enrichedMappings: EnrichedMapping[] = [];
 
@@ -301,7 +310,7 @@ export async function annotateRepoSafety(
     const repoSafety: RepoSafetyInfo[] = [];
     for (const repoPath of mapping.repos) {
       try {
-        const { info, warnings } = await annotateOneRepo(repoPath);
+        const { info, warnings } = await annotateOneRepo(repoPath, resolved);
         repoSafety.push(info);
         allWarnings.push(...warnings);
       } catch (err) {
