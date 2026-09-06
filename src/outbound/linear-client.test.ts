@@ -340,3 +340,162 @@ describe('the call() rate-limit wrapper', () => {
     await assert.rejects(() => client.getIssue('issue-1'), (err: unknown) => err === statusOnly);
   });
 });
+
+describe('webhook CRUD', () => {
+  const webhookPage = (
+    nodes: Array<Record<string, unknown>>,
+    endCursor?: string,
+  ) => ({ nodes, pageInfo: { hasNextPage: endCursor !== undefined, endCursor } });
+
+  it('pages listWebhooks to completion instead of trusting the first 50', async () => {
+    const cursors: Array<string | undefined> = [];
+    const client = new LinearClientImpl({
+      apiKey: API_KEY,
+      sdk: asSdk({
+        webhooks: async (args: { after?: string }) => {
+          cursors.push(args.after);
+          if (args.after === undefined) {
+            return webhookPage(
+              [{ id: 'wh-1', label: 'law', url: 'https://a/x', enabled: true, resourceTypes: ['Issue'] }],
+              'cur-1',
+            );
+          }
+          return webhookPage([
+            { id: 'wh-2', label: 'other', url: 'https://b/x', enabled: false, resourceTypes: ['Comment'] },
+          ]);
+        },
+      }),
+    });
+
+    const webhooks = await client.listWebhooks();
+
+    assert.deepEqual(cursors, [undefined, 'cur-1']);
+    // Exactly two — not four. A loop built on fetchNext() (which mutates and returns
+    // `this`, appending into page.nodes) double-counts every page (TRAPS T22), and the
+    // registrar would then classify its own live webhook as a duplicate and delete it.
+    assert.deepEqual(
+      webhooks.map((w) => w.id),
+      ['wh-1', 'wh-2'],
+    );
+  });
+
+  it('never returns the signing secret, even when the SDK hands one over', async () => {
+    const client = new LinearClientImpl({
+      apiKey: API_KEY,
+      sdk: asSdk({
+        webhooks: async () =>
+          webhookPage([
+            {
+              id: 'wh-1',
+              label: 'law',
+              url: 'https://a/x',
+              enabled: true,
+              resourceTypes: ['Issue'],
+              secret: 'lin_wh_SIGNING_SECRET',
+            },
+          ]),
+      }),
+    });
+
+    const webhooks = await client.listWebhooks();
+
+    assert.deepEqual(Object.keys(webhooks[0]!).sort(), [
+      'enabled',
+      'id',
+      'label',
+      'resourceTypes',
+      'url',
+    ]);
+    assert.ok(!JSON.stringify(webhooks).includes('SIGNING_SECRET'));
+  });
+
+  it('normalises the SDK’s optional label/url/resourceTypes', async () => {
+    const client = new LinearClientImpl({
+      apiKey: API_KEY,
+      sdk: asSdk({
+        webhooks: async () => webhookPage([{ id: 'wh-1', enabled: true }]),
+      }),
+    });
+
+    assert.deepEqual(await client.listWebhooks(), [
+      { id: 'wh-1', label: null, url: '', enabled: true, resourceTypes: [] },
+    ]);
+  });
+
+  it('createWebhook passes the caller’s secret through and returns only the id', async () => {
+    let received: Record<string, unknown> | undefined;
+    const client = new LinearClientImpl({
+      apiKey: API_KEY,
+      sdk: asSdk({
+        createWebhook: async (input: Record<string, unknown>) => {
+          received = input;
+          return {
+            webhook: Promise.resolve({ id: 'wh-new', secret: 'lin_wh_SIGNING_SECRET' }),
+          };
+        },
+      }),
+    });
+
+    const input = {
+      label: 'linear-auto-worker',
+      url: 'https://tunnel.ngrok-free.app/linear/webhook',
+      teamId: 'team-1',
+      secret: 'lin_wh_SIGNING_SECRET',
+      resourceTypes: ['Issue', 'Comment'],
+    };
+    const result = await client.createWebhook(input);
+
+    assert.deepEqual(received, input);
+    assert.deepEqual(result, { id: 'wh-new' });
+  });
+
+  it('updateWebhook re-points and re-enables in one call', async () => {
+    const calls: Array<[string, Record<string, unknown>]> = [];
+    const client = new LinearClientImpl({
+      apiKey: API_KEY,
+      sdk: asSdk({
+        updateWebhook: async (id: string, input: Record<string, unknown>) => {
+          calls.push([id, input]);
+          return { success: true };
+        },
+      }),
+    });
+
+    await client.updateWebhook('wh-1', { url: 'https://new/x', enabled: true });
+
+    assert.deepEqual(calls, [['wh-1', { url: 'https://new/x', enabled: true }]]);
+  });
+
+  it('deleteWebhook forwards the id', async () => {
+    const deleted: string[] = [];
+    const client = new LinearClientImpl({
+      apiKey: API_KEY,
+      sdk: asSdk({
+        deleteWebhook: async (id: string) => {
+          deleted.push(id);
+          return { success: true };
+        },
+      }),
+    });
+
+    await client.deleteWebhook('wh-1');
+
+    assert.deepEqual(deleted, ['wh-1']);
+  });
+
+  it('routes webhook calls through call(), so a rate limit surfaces as RateLimitedError', async () => {
+    const client = new LinearClientImpl({
+      apiKey: API_KEY,
+      sdk: asSdk({
+        webhooks: async () => {
+          throw Object.assign(new Error('Bad Request'), {
+            status: 400,
+            errors: [{ extensions: { code: 'RATELIMITED' } }],
+          });
+        },
+      }),
+    });
+
+    await assert.rejects(() => client.listWebhooks(), RateLimitedError);
+  });
+});

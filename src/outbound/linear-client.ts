@@ -11,7 +11,11 @@
  *    carry the Authorization header and the full GraphQL query text.
  */
 
-import { LinearClient as SdkLinearClient, type Issue } from '@linear/sdk';
+import {
+  LinearClient as SdkLinearClient,
+  type Issue,
+  type Webhook as SdkWebhook,
+} from '@linear/sdk';
 
 import {
   RateLimitedError,
@@ -66,6 +70,42 @@ export interface LinearClient {
   listAssignedOpenIssues(botUserId: string): Promise<LinearIssue[]>;
   setIssueState(issueId: string, teamId: string, stateType: WorkflowStateType): Promise<void>;
   createComment(issueId: string, body: string, parentId?: string): Promise<{ id: string }>;
+
+  // Webhook CRUD, consumed only by Phase 3's registrar.
+  listWebhooks(): Promise<LinearWebhookSummary[]>;
+  createWebhook(input: CreateWebhookInput): Promise<{ id: string }>;
+  updateWebhook(id: string, input: UpdateWebhookInput): Promise<void>;
+  deleteWebhook(id: string): Promise<void>;
+}
+
+/**
+ * A webhook, projected down to the fields the registrar reconciles against.
+ *
+ * TRAPS T23: the SDK's `Webhook` object carries its signing `secret`, so a single
+ * `log.info({ webhooks })` would write every signing secret to disk. Nothing outside this
+ * module ever holds a raw Webhook — this shape is what listWebhooks hands back.
+ */
+export interface LinearWebhookSummary {
+  id: string;
+  label: string | null;
+  url: string;
+  enabled: boolean;
+  resourceTypes: string[];
+}
+
+export interface CreateWebhookInput {
+  label: string;
+  url: string;
+  teamId: string;
+  /** Caller-supplied. This facade never generates a secret and never reads one back. */
+  secret: string;
+  resourceTypes: string[];
+}
+
+export interface UpdateWebhookInput {
+  url?: string;
+  enabled?: boolean;
+  resourceTypes?: string[];
 }
 
 export interface LinearClientOptions {
@@ -262,5 +302,46 @@ export class LinearClientImpl implements LinearClient {
       if (!comment) throw new Error(`Linear returned no comment for issue ${issueId}`);
       return { id: comment.id };
     });
+  }
+
+  /**
+   * Every webhook in the workspace. Paged to completion — the connection defaults to 50,
+   * and a registrar that sees only the first page reconciles against a partial view and
+   * happily registers a duplicate of a webhook it could not see.
+   */
+  async listWebhooks(): Promise<LinearWebhookSummary[]> {
+    return this.call('listWebhooks', async () => {
+      const webhooks = await pageAll<SdkWebhook>((after) =>
+        this.sdk.webhooks({ first: PAGE_SIZE, after }),
+      );
+      // T23: project away `secret` here, at the only place raw Webhook objects exist.
+      return webhooks.map((w) => ({
+        id: w.id,
+        label: w.label ?? null,
+        url: w.url ?? '',
+        enabled: w.enabled,
+        resourceTypes: w.resourceTypes ?? [],
+      }));
+    });
+  }
+
+  async createWebhook(input: CreateWebhookInput): Promise<{ id: string }> {
+    return this.call('createWebhook', async () => {
+      // TRAPS T21: the SDK method is `createWebhook`. `webhookCreate` is the GraphQL
+      // mutation name and does not exist on the client.
+      const payload = await this.sdk.createWebhook(input);
+      const webhook = await payload.webhook;
+      if (!webhook) throw new Error(`Linear returned no webhook for "${input.label}"`);
+      // Id only. The secret came from the caller and goes no further than the request.
+      return { id: webhook.id };
+    });
+  }
+
+  async updateWebhook(id: string, input: UpdateWebhookInput): Promise<void> {
+    await this.call('updateWebhook', () => this.sdk.updateWebhook(id, input));
+  }
+
+  async deleteWebhook(id: string): Promise<void> {
+    await this.call('deleteWebhook', () => this.sdk.deleteWebhook(id));
   }
 }
