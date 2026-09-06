@@ -140,7 +140,17 @@ Decimal phases appear between their surrounding integers in numeric order.
   3. Interrupt and terminate shut the daemon down cleanly in reverse boot order — spawned children killed, tunnel closed, in-flight runs marked — and the next boot recovers those runs rather than stranding them
   4. A real signed webhook produces a queued run while the execution layer is still faked, proving the ingress seam before any Claude session is spent on it
   5. A run that asks a question survives a full daemon restart and resumes on the operator's threaded reply
-**Plans**: TBD
+**Plans**: 6 plans
+
+Plans:
+- [ ] 07-01-PLAN.md — Make the merged eight-branch tree installable; reconcile package.json/tsconfig, gate the dependency set, take the first full-tree typecheck
+- [ ] 07-02-PLAN.md — Fold every `Contract additions requested` into src/domain/ and drive the whole tree to a clean compile
+- [ ] 07-03-PLAN.md — Tracer: composition root + boot smoke; a signed webhook becomes a queued run with execution still faked
+- [ ] 07-04-PLAN.md — Wire the real worktree/agent, deliverer and notifier into the engine
+- [ ] 07-05-PLAN.md — Complete the ordered boot (bind before tunnel) and the reverse-order shutdown
+- [ ] 07-06-PLAN.md — Extend the canonical verify with the boot smoke, run the first full gate, write the live-gated human checklist
+
+**Live-gated:** success criteria 1 and 5 require a real Linear workspace, a live ngrok tunnel and real `gh`. They are built in this phase and verified manually via `07-HUMAN-UAT.md`; no plan task blocks on them.
 
 ### Phase 8: Setup Wizard & Safety Pass
 **Goal**: A fresh machine reaches a working daemon in one command, and the preflight catches the things that quietly ruin runs
@@ -202,7 +212,7 @@ Phase 1 first. Phases 2-6 in parallel. Phase 7 after all of them. Phase 8 last.
 | 4. Execution | 0/TBD | Not started | - |
 | 5. Outbound | 0/TBD | Not started | - |
 | 6. Orchestration | 0/TBD | Not started | - |
-| 7. Integration & Daemon Lifecycle | 0/TBD | Not started | - |
+| 7. Integration & Daemon Lifecycle | 0/6 | Planned | - |
 | 8. Setup Wizard & Safety Pass | 0/TBD | Not started | - |
 
 ---
