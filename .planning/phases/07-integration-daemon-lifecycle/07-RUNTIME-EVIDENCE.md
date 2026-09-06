@@ -38,6 +38,20 @@ Two cells are more carefully modelled than the criteria required: `delivering` a
 each hold a slot but have **no live child** — correct, because the worker is doing git/`gh` work
 while the agent process is already gone. That distinction is what lets the cap bound real RAM.
 
+## PASS — D-14 / T63: prompt-injection containment holds under attack
+
+Executed `buildAgentPrompt` against two crafted ticket bodies:
+
+| attack | result |
+|---|---|
+| body contains a literal `</untrusted-ticket-data>` | defanged — the closing tag does not survive inside the wrapped body |
+| the same tag **split by zero-width characters** | defanged, and the zero-width characters are stripped |
+
+The second case is the one that matters, and it passes because of ordering: `sanitizeUntrustedText`
+strips control and zero-width characters **before** the delimiter is rewritten. Reversed, a tag
+split by an invisible character reassembles *after* the rewrite and escapes cleanly. Both layers
+D-14 requires are present and they compose.
+
 ## FAIL — T53: the store queries columns that do not exist
 
 Authoritative schema, read back from a real in-memory database after running the migration:
