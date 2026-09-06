@@ -51,10 +51,21 @@ export interface LinearIssue {
   stateType: string;
 }
 
+/**
+ * The workflow-state *types* this daemon transitions issues into. Linear fixes these
+ * strings; only the human-facing `name` is renameable, which is why nothing here ever
+ * matches on a name (05-CONTEXT D-06 / INTK-04).
+ */
+export type WorkflowStateType = 'started' | 'completed' | 'canceled';
+
 export interface LinearClient {
   /** Preflight: who does this API key authenticate as? */
   viewer(): Promise<{ id: string; name: string }>;
   getIssue(issueId: string): Promise<LinearIssue>;
+  /** Boot sweep: everything still open and assigned to the bot. */
+  listAssignedOpenIssues(botUserId: string): Promise<LinearIssue[]>;
+  setIssueState(issueId: string, teamId: string, stateType: WorkflowStateType): Promise<void>;
+  createComment(issueId: string, body: string, parentId?: string): Promise<{ id: string }>;
 }
 
 export interface LinearClientOptions {
@@ -62,6 +73,13 @@ export interface LinearClientOptions {
   log?: LogFn;
   /** Test seam: inject a stubbed SDK client. ponytail: cheaper than a DI container. */
   sdk?: SdkLinearClient;
+}
+
+/** The fields of a WorkflowState this facade actually reads. */
+interface TeamWorkflowState {
+  id: string;
+  type: string;
+  position: number;
 }
 
 /** Structural shape of any `@linear/sdk` connection we page over. */
@@ -121,6 +139,8 @@ async function toLinearIssue(issue: Issue): Promise<LinearIssue> {
 export class LinearClientImpl implements LinearClient {
   private readonly sdk: SdkLinearClient;
   private readonly log: LogFn;
+  /** teamId -> that team's workflow states. Populated on first use, never re-queried. */
+  private readonly statesByTeam = new Map<string, TeamWorkflowState[]>();
 
   constructor(opts: LinearClientOptions) {
     // 05-CONTEXT D-08 / TRAPS T9: the personal API key header carries NO `Bearer` prefix.
@@ -172,5 +192,75 @@ export class LinearClientImpl implements LinearClient {
     // The relation fetches inside toLinearIssue are themselves Linear calls, so they run
     // inside call() rather than after it.
     return this.call('getIssue', async () => toLinearIssue(await this.sdk.issue(issueId)));
+  }
+
+  async listAssignedOpenIssues(botUserId: string): Promise<LinearIssue[]> {
+    return this.call('listAssignedOpenIssues', async () => {
+      const issues = await pageAll<Issue>((after) =>
+        this.sdk.issues({
+          first: PAGE_SIZE,
+          after,
+          filter: {
+            assignee: { id: { eq: botUserId } },
+            state: { type: { nin: ['completed', 'canceled'] } },
+          },
+        }),
+      );
+      return Promise.all(issues.map(toLinearIssue));
+    });
+  }
+
+  async setIssueState(
+    issueId: string,
+    teamId: string,
+    stateType: WorkflowStateType,
+  ): Promise<void> {
+    await this.call('setIssueState', async () => {
+      const states = await this.resolveTeamStates(teamId);
+      // 05-CONTEXT D-06 / INTK-04: matched on `type`, NEVER on `name` — operators rename
+      // "In Progress" to "Doing"/"Active" freely — and never a hardcoded UUID, since state
+      // ids are per-team and one would break the moment a ticket arrives from a second
+      // team. Where a team has several states of one type (the stock Linear workspace has
+      // both "In Progress" and "In Review" typed `started`) the lowest `position` wins:
+      // the one earliest in the workflow.
+      const [state] = states
+        .filter((s) => s.type === stateType)
+        .sort((a, b) => a.position - b.position);
+      if (!state) {
+        throw new Error(
+          `Linear team ${teamId} has no workflow state of type "${stateType}"; ` +
+            `cannot move issue ${issueId}`,
+        );
+      }
+      await this.sdk.updateIssue(issueId, { stateId: state.id });
+    });
+  }
+
+  /** A team's workflow states, fetched once per team and memoized for the process lifetime. */
+  private async resolveTeamStates(teamId: string): Promise<TeamWorkflowState[]> {
+    const cached = this.statesByTeam.get(teamId);
+    if (cached) return cached;
+
+    const team = await this.sdk.team(teamId);
+    const states = await pageAll<TeamWorkflowState>((after) =>
+      team.states({ first: PAGE_SIZE, after }),
+    );
+    this.statesByTeam.set(teamId, states);
+    return states;
+  }
+
+  async createComment(
+    issueId: string,
+    body: string,
+    parentId?: string,
+  ): Promise<{ id: string }> {
+    return this.call('createComment', async () => {
+      // parentId goes straight through to CommentCreateInput — without it every bot
+      // comment is top-level and reply matching degrades to guesswork.
+      const payload = await this.sdk.createComment({ issueId, body, parentId });
+      const comment = await payload.comment;
+      if (!comment) throw new Error(`Linear returned no comment for issue ${issueId}`);
+      return { id: comment.id };
+    });
   }
 }
