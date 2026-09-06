@@ -1,0 +1,7 @@
+node_modules/
+dist/
+.env
+*.log
+
+# auto-run-gsd: per-plan isolated worktrees
+.claude/worktrees/
