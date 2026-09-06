@@ -335,7 +335,11 @@ export function createQuestions(deps: QuestionsDeps): Questions {
       const due = store.expiredQuestions(sweepAt);
       const expired: PendingQuestion[] = [];
       for (const q of due) {
-        if (resolutions.has(q.id)) continue; // already claimed by this process
+        // Both halves of the claim: the durable one is the row's own status,
+        // which `applyAnswer` moves off `open`; the in-process one covers the
+        // window before the engine has called back.
+        if (q.status !== 'open') continue;
+        if (resolutions.has(q.id)) continue;
         const run = store.getRun(q.runId);
         if (!run) {
           log.warn({ questionId: q.id, runId: q.runId }, 'overdue question with no run');

@@ -293,4 +293,171 @@ test('opening a question posts it to Linear and stores the comment id tier 1 mat
   assert.ok(h.transitions.some((t) => t.to === 'awaiting_answer'));
 });
 
+// -- the deadline: data in SQLite, swept by a tick, never a setTimeout -------
+
+const HOUR = 60 * 60 * 1000;
+
+function mappingWith(overrides: Record<string, unknown>) {
+  return [{ repos: [{ repoDir: '/code/api' }], overrides }];
+}
+
+test('the deadline is an absolute epoch-ms value four hours out by default', async () => {
+  const h = harness();
+  seedRun(h.store);
+  h.clock.t = 1_700_000_000_000;
+
+  const q = (await h.questions.openQuestion('r1', 'which database?', 'postgres'))!;
+
+  assert.equal(q.deadlineAt, 1_700_000_000_000 + DEFAULT_QUESTION_TIMEOUT_MS);
+  assert.equal(DEFAULT_QUESTION_TIMEOUT_MS, 4 * HOUR);
+  assert.equal(h.store.getQuestion(q.id)!.deadlineAt, q.deadlineAt);
+});
+
+test('a mapping overrides the deadline; a mapping naming nothing inherits it', async () => {
+  const overridden = harness({ config: { mappings: mappingWith({ questionTimeoutMs: HOUR }) } as never });
+  seedRun(overridden.store);
+  overridden.clock.t = 5_000;
+  const a = (await overridden.questions.openQuestion('r1', 'q', 'a'))!;
+  assert.equal(a.deadlineAt, 5_000 + HOUR);
+
+  // Sparse override (Phase 1 D-09): this mapping names a different toggle, so
+  // the deadline falls through to the default.
+  const inherited = harness({ config: { mappings: mappingWith({ baseBranch: 'trunk' }) } as never });
+  seedRun(inherited.store);
+  inherited.clock.t = 5_000;
+  const b = (await inherited.questions.openQuestion('r1', 'q', 'a'))!;
+  assert.equal(b.deadlineAt, 5_000 + DEFAULT_QUESTION_TIMEOUT_MS);
+});
+
+test('sweeping before the deadline does nothing', async () => {
+  const h = harness();
+  seedRun(h.store);
+  const q = (await h.questions.openQuestion('r1', 'which database?', 'postgres'))!;
+  h.events.length = 0;
+  h.comments.length = 0;
+
+  const expired = await h.questions.sweep(q.deadlineAt - 1);
+
+  assert.deepEqual(expired, []);
+  assert.deepEqual(h.events, []);
+  assert.deepEqual(h.comments, []);
+  assert.equal(h.store.getQuestion(q.id)!.status, 'open');
+});
+
+test('sweeping past the deadline expires, posts the assumption, and resumes on it', async () => {
+  const h = harness();
+  seedRun(h.store);
+  const q = (await h.questions.openQuestion('r1', 'which database?', 'postgres'))!;
+  h.events.length = 0;
+  h.comments.length = 0;
+
+  const expired = await h.questions.sweep(q.deadlineAt + 1);
+
+  assert.equal(expired.length, 1);
+  assert.equal(h.store.getQuestion(q.id)!.status, 'expired');
+  // QA-05 / T-06-15: the record shows what was decided.
+  assert.equal(h.comments.length, 1);
+  assert.ok(h.comments[0]!.body.includes('postgres'));
+  assert.equal(h.comments[0]!.parentId, q.linearCommentId);
+  // Expiry and answering converge on one resume path.
+  assert.deepEqual(h.events.map((e) => e.kind), ['question.answered']);
+  const resumed = h.events[0]!;
+  assert.equal(resumed.kind === 'question.answered' && resumed.answer, 'postgres');
+  assert.ok(h.transitions.some((t) => t.to === 'running'));
+});
+
+test('THE RESTART TEST: a question opened by a discarded instance still expires under a fresh one', async () => {
+  // QA-06 / invariant 8. Nothing about the deadline lived in the instance that
+  // opened it -- a `setTimeout` here would make this test fail, which is the
+  // entire point of it.
+  const store = new InMemoryStore();
+  const first = harness({ store });
+  seedRun(store);
+  const q = (await first.questions.openQuestion('r1', 'which database?', 'postgres'))!;
+
+  // Reconstruct over the same store. The old module is gone.
+  const second = harness({ store });
+  const expired = await second.questions.sweep(q.deadlineAt + 1);
+
+  assert.equal(expired.length, 1);
+  assert.equal(expired[0]!.id, q.id);
+  assert.equal(store.getQuestion(q.id)!.status, 'expired');
+  assert.equal(second.comments.length, 1);
+  assert.deepEqual(second.events.map((e) => e.kind), ['question.answered']);
+  // The instance that opened it did nothing on expiry -- it no longer exists.
+  assert.deepEqual(first.events, []);
+});
+
+test('sweeping twice past the deadline expires once and resumes once', async () => {
+  const h = harness();
+  seedRun(h.store);
+  const q = (await h.questions.openQuestion('r1', 'which database?', 'postgres'))!;
+  h.events.length = 0;
+  h.comments.length = 0;
+
+  await h.questions.sweep(q.deadlineAt + 1);
+  const again = await h.questions.sweep(q.deadlineAt + 60_000);
+
+  assert.deepEqual(again, []);
+  assert.equal(h.events.length, 1);
+  assert.equal(h.comments.length, 1);
+});
+
+test('a question answered before its deadline is not expired by a later sweep', async () => {
+  const h = harness();
+  seedRun(h.store);
+  const q = (await h.questions.openQuestion('r1', 'which database?', 'postgres'))!;
+  await h.questions.ingestComment(comment({ parentId: q.linearCommentId, body: 'sqlite' }));
+  h.events.length = 0;
+  h.comments.length = 0;
+
+  const expired = await h.questions.sweep(q.deadlineAt + HOUR);
+
+  assert.deepEqual(expired, []);
+  assert.deepEqual(h.events, []);
+  const stored = h.store.getQuestion(q.id)!;
+  assert.equal(stored.status, 'answered');
+  assert.equal(stored.answer, 'sqlite');
+});
+
+// -- QA-07: the question flow switched off for a mapping ---------------------
+
+test('with the question flow disabled, needs_input proceeds on the assumption immediately', async () => {
+  const h = harness({ config: { mappings: mappingWith({ questionFlow: false }) } as never });
+  seedRun(h.store);
+
+  const result = await h.questions.openQuestion('r1', 'which database?', 'postgres');
+
+  assert.equal(result, null);
+  // No question row: there is nothing to correlate, deadline or sweep.
+  assert.deepEqual(h.store.openQuestionsForIssue('ENG-42'), []);
+  // Never enters awaiting_answer, so the run never released its slot and never
+  // has to re-acquire one.
+  assert.equal(h.transitions.some((t) => t.to === 'awaiting_answer'), false);
+  // The assumption is still on the record.
+  assert.equal(h.comments.length, 1);
+  assert.ok(h.comments[0]!.body.includes('postgres'));
+  // Resumed straight away, on the assumption.
+  assert.deepEqual(h.events.map((e) => e.kind), ['run.resumed']);
+  const resumed = h.events[0]!;
+  assert.equal(resumed.kind === 'run.resumed' && resumed.input, 'postgres');
+});
+
+test('a disabled mapping does not disable the flow for another mapping', async () => {
+  const h = harness({
+    config: {
+      mappings: [
+        { repos: [{ repoDir: '/code/api' }], overrides: { questionFlow: false } },
+        { repos: [{ repoDir: '/code/web' }], overrides: {} },
+      ],
+    } as never,
+  });
+  seedRun(h.store, { id: 'r-web', repoDir: '/code/web' });
+
+  const q = await h.questions.openQuestion('r-web', 'which database?', 'postgres');
+
+  assert.notEqual(q, null);
+  assert.ok(h.transitions.some((t) => t.to === 'awaiting_answer'));
+});
+
 export { harness, seedRun, silent, question, comment, BOT };
