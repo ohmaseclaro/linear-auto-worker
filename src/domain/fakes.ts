@@ -314,3 +314,210 @@ export class RecordingLogger implements Logger {
     this.record('debug', objOrMsg, msg);
   }
 }
+
+// ── L1 INGRESS ───────────────────────────────────────────────────────────────
+
+/**
+ * `TunnelManager` fake. `openCount` gives Phase 3's "restarting the worker ten times
+ * leaves exactly one tunnel" test something to assert against.
+ */
+export class FakeTunnel implements TunnelManager {
+  openCount = 0;
+  private currentUrl: string | null;
+
+  constructor() {
+    this.currentUrl = null;
+  }
+
+  open(port: number): Promise<string> {
+    this.openCount += 1;
+    this.currentUrl = `https://fake-${port}.ngrok-free.app`;
+    return Promise.resolve(this.currentUrl);
+  }
+  url(): string | null {
+    return this.currentUrl;
+  }
+  close(): Promise<void> {
+    this.currentUrl = null;
+    return Promise.resolve();
+  }
+}
+
+/**
+ * `WebhookRegistrar` fake. `reconcile` is idempotent create-or-update — repeated calls
+ * return the SAME id, because a fake that minted a new one per call would make Phase 3's
+ * idempotency test pass for the wrong reason.
+ */
+export class FakeWebhookRegistrar implements WebhookRegistrar {
+  reconcileCount = 0;
+  disabled = false;
+  lastUrl: string | null;
+  private readonly webhookId: string;
+  private readonly secret: string;
+
+  constructor(seed?: { webhookId?: string; secret?: string }) {
+    this.lastUrl = null;
+    this.webhookId = seed?.webhookId ?? 'fake-webhook-id';
+    this.secret = seed?.secret ?? 'fake-webhook-secret';
+  }
+
+  reconcile(publicUrl: string): Promise<{ webhookId: string; secret: string }> {
+    this.reconcileCount += 1;
+    this.lastUrl = publicUrl;
+    return Promise.resolve({ webhookId: this.webhookId, secret: this.secret });
+  }
+  disable(): Promise<void> {
+    this.disabled = true;
+    return Promise.resolve();
+  }
+}
+
+/**
+ * `Receiver` fake. `deliver()` is a test-only escape hatch that pushes a `WebhookDelivery`
+ * straight through the stored callback, so a test never stands up a real HTTP server.
+ */
+export class FakeReceiver implements Receiver {
+  secret: string | null;
+  private onDelivery: ((d: WebhookDelivery) => void) | null;
+
+  constructor() {
+    this.secret = null;
+    this.onDelivery = null;
+  }
+
+  listen(onDelivery: (d: WebhookDelivery) => void): Promise<number> {
+    this.onDelivery = onDelivery;
+    return Promise.resolve(0);
+  }
+  setSecret(secret: string): void {
+    this.secret = secret;
+  }
+  close(): Promise<void> {
+    this.onDelivery = null;
+    return Promise.resolve();
+  }
+  /** Test helper: push a delivery through the seam with no HTTP server involved. */
+  deliver(d: WebhookDelivery): void {
+    this.onDelivery?.(d);
+  }
+}
+
+/**
+ * `EventRouter` fake. Scripted: returns queued `DomainEvent` values in order, falling back
+ * to `ignored` once drained. Records every delivery it was handed.
+ */
+export class FakeEventRouter implements EventRouter {
+  readonly delivered: WebhookDelivery[];
+  private readonly queue: DomainEvent[];
+
+  constructor(scripted: DomainEvent[] = []) {
+    this.delivered = [];
+    this.queue = [...scripted];
+  }
+
+  route(d: WebhookDelivery): Promise<DomainEvent> {
+    this.delivered.push(d);
+    const next = this.queue.shift();
+    return Promise.resolve(next ?? { kind: 'ignored', reason: 'fake event router queue drained' });
+  }
+}
+
+// ── L2 ORCHESTRATION ─────────────────────────────────────────────────────────
+
+/**
+ * `Scheduler` fake. A GENUINE counting semaphore, not a permissive stub — the property
+ * Phase 6 must test is that three parked questions leave all three slots free, and a
+ * scheduler that always says yes would let a slot-leak defect ship undetected.
+ */
+export class FakeScheduler implements Scheduler {
+  private readonly cap: number;
+  private inUseCount: number;
+  private running: boolean;
+  private readonly waitQueue: Array<{ runId: RunId; grant: () => void }>;
+
+  constructor(capacity = 3) {
+    this.cap = capacity;
+    this.inUseCount = 0;
+    this.running = false;
+    this.waitQueue = [];
+  }
+
+  start(): void {
+    this.running = true;
+  }
+  pause(): void {
+    this.running = false;
+  }
+
+  acquire(runId: RunId): Promise<() => void> {
+    return new Promise((resolve) => {
+      const grant = () => {
+        this.inUseCount += 1;
+        let released = false;
+        resolve(() => {
+          if (released) return; // idempotent: a doubled release must not hand out a phantom slot
+          released = true;
+          this.inUseCount -= 1;
+          const next = this.waitQueue.shift();
+          next?.grant();
+        });
+      };
+      if (this.inUseCount < this.cap) {
+        grant();
+      } else {
+        this.waitQueue.push({ runId, grant });
+      }
+    });
+  }
+
+  inUse(): number {
+    return this.inUseCount;
+  }
+  capacity(): number {
+    return this.cap;
+  }
+  /** 1-based place in the wait queue; 0 once admitted. */
+  positionOf(runId: RunId): number {
+    const idx = this.waitQueue.findIndex((w) => w.runId === runId);
+    return idx < 0 ? 0 : idx + 1;
+  }
+  /** Boot recovery: recompute the admitted count from what the runs table says holds a slot. */
+  syncFromStore(runs: readonly Run[]): void {
+    this.inUseCount = runs.filter((r) => r.kind === 'repo' && holdsSlot(r.state)).length;
+  }
+}
+
+/**
+ * `RunEngine` fake. Records every event handed to `handle`, every `tick`, and whether
+ * `recover`/`drain` were called, so Phase 3 can test its router without the real engine.
+ */
+export class FakeRunEngine implements RunEngine {
+  readonly handled: DomainEvent[];
+  readonly ticks: number[];
+  recovered: boolean;
+  drainedGraceMs: number | null;
+
+  constructor() {
+    this.handled = [];
+    this.ticks = [];
+    this.recovered = false;
+    this.drainedGraceMs = null;
+  }
+
+  handle(e: DomainEvent): Promise<void> {
+    this.handled.push(e);
+    return Promise.resolve();
+  }
+  recover(): Promise<void> {
+    this.recovered = true;
+    return Promise.resolve();
+  }
+  tick(now: number): Promise<void> {
+    this.ticks.push(now);
+    return Promise.resolve();
+  }
+  drain(graceMs: number): Promise<void> {
+    this.drainedGraceMs = graceMs;
+    return Promise.resolve();
+  }
+}
