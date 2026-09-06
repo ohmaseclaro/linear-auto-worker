@@ -121,7 +121,8 @@ CREATE TABLE IF NOT EXISTS kv (
 -- D-03: every transition appends one row here in the same transaction that mutates
 -- runs.state, so a transition that was not recorded is a missing row that restart recovery
 -- and the terminal comment both notice. Exactly these five columns: the trigger name goes
--- in `detail`, and a sixth column would drift from D-03. from_state/to_state rather than
+-- in the detail column, and a sixth column would drift from D-03. from_state/to_state
+-- rather than
 -- the bare words, which are SQL keywords needing quoting at every use site.
 CREATE TABLE IF NOT EXISTS run_events (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
