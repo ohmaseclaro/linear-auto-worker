@@ -40,7 +40,7 @@ function fetchRecorder(status = 200): { posts: Post[]; fetch: typeof globalThis.
   const posts: Post[] = [];
   const fetch = (async (input: unknown, init: { body?: string } = {}) => {
     posts.push({ url: String(input), body: JSON.parse(String(init.body)) });
-    return { ok: status >= 200 && status < 300, status } as Response;
+    return { ok: status >= 200 && status < 300, status } as unknown as Response;
   }) as unknown as typeof globalThis.fetch;
   return { posts, fetch };
 }
