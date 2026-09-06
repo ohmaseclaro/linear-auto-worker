@@ -16,10 +16,12 @@ import type { RunId, SessionId } from '../domain/types.js';
 import type { Logger } from '../infra/logger.js';
 import { AGENT_RESULT_JSON_SCHEMA, buildClaudeArgs } from './agent-args.js';
 import { buildChildEnv } from './agent-env.js';
-import { buildAgentPrompt } from './prompt.js';
-import { prepareWorktree } from './worktree.js';
+import { buildAgentPrompt, sanitizeUntrustedText } from './prompt.js';
+import { prepareWorktree, removeWorktree } from './worktree.js';
 import { runAgent } from './supervisor.js';
 import type { AgentSpawn } from './supervisor.js';
+import { classifyOutcome } from './verdict.js';
+import { deliver } from './deliver.js';
 
 export interface RunCommandResult {
   exitCode: number;
@@ -184,13 +186,82 @@ export async function executeRun(
     'agent exited'
   );
 
-  // 5-7. Verdict, delivery and cleanup are appended by task 2.
-  return {
-    verdict: 'failed',
+  // 5. Judge by what is in the worktree, never by how the child exited (D-06, T1).
+  const base = input.mapping.defaultBranch;
+  const committed = await runCommand('git', [
+    '-C',
+    worktree.path,
+    'log',
+    '--oneline',
+    `${base}..HEAD`,
+  ]);
+  const dirty = await runCommand('git', ['-C', worktree.path, 'status', '--porcelain']);
+  const classification = classifyOutcome({
+    evidence: {
+      commitCount: countLines(committed.stdout),
+      dirty: dirty.stdout.trim().length > 0,
+    },
+    result: agent.resultEvent,
+  });
+  log.info(
+    { verdict: classification.verdict, denialCause: classification.denialCause },
+    'run classified'
+  );
+
+  const outcome: ExecutionOutcome = {
+    verdict: classification.verdict,
     branch: worktree.branch,
     worktreePath: worktree.path,
     sessionId,
-    costUsd: agent.resultEvent?.total_cost_usd ?? 0,
-    numTurns: agent.resultEvent?.num_turns ?? 0,
+    costUsd: classification.costUsd,
+    numTurns: classification.numTurns,
+    question: classification.question,
+    assumption: classification.assumption,
   };
+
+  // A run with no commits delivers nothing and KEEPS its worktree (AGNT-02) — that
+  // worktree is the only evidence the operator has of what the agent actually did.
+  // `needs_input` keeps it too: Phase 6 resumes the same session in the same directory.
+  if (classification.verdict !== 'delivered' && classification.verdict !== 'partial') {
+    return outcome;
+  }
+
+  // 6. The worker pushes and opens the PR. The agent was told not to (DELV-01, D-12).
+  const delivery = await deliver({
+    runCommand,
+    worktreePath: worktree.path,
+    branch: worktree.branch,
+    base,
+    ownerRepo: input.mapping.ownerRepo,
+    defaultBranch: input.mapping.defaultBranch,
+    title: `${input.issue.identifier}: ${sanitizeUntrustedText(input.issue.title)}`,
+    body: buildPrBody(input, classification.summary),
+    // A partial run always ships a DRAFT, whatever the mapping says.
+    draft: input.mapping.draftPr || classification.verdict === 'partial',
+  });
+  outcome.prUrl = delivery.prUrl;
+  await deps.store.updateRun(input.runId, { prUrl: delivery.prUrl, updatedAt: Date.now() });
+  log.info({ prUrl: delivery.prUrl, ciTouched: delivery.ciTouched }, 'pull request opened');
+
+  // 7. Clean up on a clean result only.
+  if (classification.verdict === 'delivered') {
+    await removeWorktree({ runCommand, repoPath: input.mapping.repoPath, path: worktree.path });
+  }
+
+  return outcome;
+}
+
+function countLines(stdout: string): number {
+  return stdout.split('\n').filter((line) => line.trim().length > 0).length;
+}
+
+/** Minimal on purpose: plan 06 owns the template and the CI-touched prominence. */
+function buildPrBody(input: ExecuteRunInput, summary: string | undefined): string {
+  return [
+    `Automated by linear-auto-worker for ${input.issue.identifier}.`,
+    '',
+    input.issue.url,
+    '',
+    summary ? sanitizeUntrustedText(summary) : '(the agent returned no summary)',
+  ].join('\n');
 }
