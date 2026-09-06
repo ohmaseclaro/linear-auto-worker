@@ -1,83 +1,103 @@
 /**
  * Reconciler tests.
  *
- * The load-bearing one is the pagination count: T22's fetchNext() mutates and
- * returns `this`, so a loop that collects page.nodes per iteration sees every
- * earlier page twice. The fake below reproduces that mutate-and-return-this
- * semantic exactly -- a fake handing back a fresh page per call cannot fail the
- * six-not-nine assertion, which would make this whole file vacuous.
+ * ## What moved out of this file in 07-05, and where the coverage went
+ *
+ * The old version's load-bearing case was pagination: T22's `fetchNext()` mutates and
+ * returns `this`, so a loop collecting `page.nodes` per iteration sees every earlier page
+ * twice and issues nine deletes for six webhooks. That trap no longer exists HERE --
+ * the reconciler now speaks the domain port, and `LinearClientImpl.listWebhooks()` pages
+ * to completion with `pageAll` and hands back one flat array. T22 is owned by
+ * `outbound/linear-client.ts` and is asserted there.
+ *
+ * Same for T23. The old reconciler held raw `Webhook` objects, every one of which carries
+ * a live signing secret. The domain port's `listWebhooks()` returns a summary with no
+ * `secret` field at all, so leaking one from here is a compile error rather than a test.
+ * What survives as a real risk is the CALLER's secret, which this module does hold in
+ * order to pass it to the create mutation -- and that is what the last test covers.
+ *
+ * The payoff for the move is that the boot smoke can now run this step offline against
+ * `FakeLinearClient`, so the one boot step that mutates workspace configuration stops
+ * being the one boot step nothing exercises.
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import type { LinearClient, Webhook } from '@linear/sdk';
+import { FakeLinearClient } from '../domain/fakes.js';
 import type { Logger, Store } from '../domain/ports.js';
-import { reconcile, WEBHOOK_LABEL } from './registrar.js';
+import { disable, KEY_ID, KEY_SECRET, reconcile, WEBHOOK_LABEL } from './registrar.js';
 
 const TUNNEL = 'https://abc123.ngrok-free.app';
 const DESIRED = `${TUNNEL}/linear/webhook`;
+const TEAM = 'team-1';
+const SECRET = 'a'.repeat(64);
 
-/** Fake webhooks always carry a secret, so T23 has something to leak if we slip. */
-const hook = (
+type Summary = {
+  id: string;
+  label: string | null;
+  url: string;
+  enabled: boolean;
+  resourceTypes: string[];
+};
+
+/**
+ * The domain port, recorded. Extends the shared fake rather than re-declaring one, so a
+ * port method added later is a compile error here too.
+ */
+class RecordingWebhookClient extends FakeLinearClient {
+  readonly created: Array<Record<string, unknown>> = [];
+  readonly updated: Array<{ id: string; input: Record<string, unknown> }> = [];
+  readonly deleted: string[] = [];
+  readonly calls: string[] = [];
+  private readonly seeded: Summary[];
+  private createFails: boolean;
+
+  constructor(seeded: Summary[] = [], createFails = false) {
+    super();
+    this.seeded = seeded;
+    this.createFails = createFails;
+  }
+
+  override listWebhooks(): Promise<Summary[]> {
+    this.calls.push('client:listWebhooks');
+    return Promise.resolve([...this.seeded]);
+  }
+
+  override createWebhook(i: {
+    label: string;
+    url: string;
+    teamId: string;
+    secret: string;
+    resourceTypes: string[];
+  }): Promise<{ id: string }> {
+    this.calls.push('client:createWebhook');
+    this.created.push({ ...i });
+    if (this.createFails) return Promise.reject(new Error('webhook registration failed'));
+    return Promise.resolve({ id: 'created-id' });
+  }
+
+  override updateWebhook(
+    id: string,
+    i: { url?: string; enabled?: boolean; resourceTypes?: string[] },
+  ): Promise<void> {
+    this.calls.push('client:updateWebhook');
+    this.updated.push({ id, input: { ...i } });
+    return Promise.resolve();
+  }
+
+  override deleteWebhook(id: string): Promise<void> {
+    this.calls.push('client:deleteWebhook');
+    this.deleted.push(id);
+    return Promise.resolve();
+  }
+}
+
+const summary = (
   id: string,
   url: string,
   label: string | null = WEBHOOK_LABEL,
   enabled = true,
-): Webhook =>
-  ({ id, url, label, enabled, secret: `sekrit-${id}` }) as unknown as Webhook;
-
-const secretsOf = (pages: Webhook[][]): string[] =>
-  pages.flat().map((w) => (w as unknown as { secret: string }).secret);
-
-/**
- * T22 reproduction: one nodes array for the life of the connection, fetchNext()
- * appends the next page into it and returns the same object.
- */
-function connectionOf(pages: Webhook[][]) {
-  let cursor = 0;
-  const conn = {
-    nodes: [...(pages[0] ?? [])] as Webhook[],
-    pageInfo: {
-      get hasNextPage(): boolean {
-        return cursor < pages.length - 1;
-      },
-    },
-    async fetchNext() {
-      cursor += 1;
-      for (const w of pages[cursor] ?? []) conn.nodes.push(w);
-      return conn;
-    },
-  };
-  return conn;
-}
-
-function makeClient(pages: Webhook[][], calls: string[], createSuccess = true) {
-  const created: Array<Record<string, unknown>> = [];
-  const updated: Array<{ id: string; input: Record<string, unknown> }> = [];
-  const deleted: string[] = [];
-  const client = {
-    async webhooks(_args: unknown) {
-      calls.push('client:webhooks');
-      return connectionOf(pages);
-    },
-    async createWebhook(input: Record<string, unknown>) {
-      calls.push('client:createWebhook');
-      created.push(input);
-      return { success: createSuccess };
-    },
-    async updateWebhook(id: string, input: Record<string, unknown>) {
-      calls.push('client:updateWebhook');
-      updated.push({ id, input });
-      return { success: true };
-    },
-    async deleteWebhook(id: string) {
-      calls.push('client:deleteWebhook');
-      deleted.push(id);
-      return { success: true };
-    },
-  };
-  return { client: client as unknown as LinearClient, created, updated, deleted };
-}
+): Summary => ({ id, label, url, enabled, resourceTypes: ['Issue', 'Comment'] });
 
 function makeStore(calls: string[], seed: Record<string, string> = {}) {
   const kv = new Map<string, string>(Object.entries(seed));
@@ -86,6 +106,12 @@ function makeStore(calls: string[], seed: Record<string, string> = {}) {
     kvSet: (k: string, v: string) => {
       calls.push(`kv:put:${k}`);
       kv.set(k, v);
+    },
+    // Real enough to prove the pair is written together: the callback runs, and a throw
+    // inside it is not swallowed.
+    transaction: <T>(fn: () => T): T => {
+      calls.push('kv:transaction');
+      return fn();
     },
   } as unknown as Store;
   return { store, kv };
@@ -96,187 +122,155 @@ function makeLogger() {
   const record = (...args: unknown[]) => {
     lines.push(args);
   };
-  const log: Logger = {
-    child: () => log,
-    info: record,
-    warn: record,
-    error: record,
-    debug: record,
-  };
+  const log: Logger = { child: () => log, info: record, warn: record, error: record, debug: record };
   return { log, lines };
 }
 
-test('fresh install: generates id and secret and persists both before any Linear call', async () => {
+test('fresh install: creates with the caller secret and persists id and secret together', async () => {
   const calls: string[] = [];
-  const { client, created } = makeClient([[]], calls);
+  const client = new RecordingWebhookClient([]);
   const { store, kv } = makeStore(calls);
   const { log } = makeLogger();
 
-  const out = await reconcile(client, store, log, TUNNEL);
+  const out = await reconcile(client, store, log, {
+    tunnelUrl: TUNNEL,
+    teamId: TEAM,
+    secret: SECRET,
+  });
 
-  // HOOK-03 ordering: the secret is durable before a single byte leaves for Linear.
-  const secretWrite = calls.indexOf('kv:put:webhook_secret');
-  const firstRemote = calls.findIndex((c) => c.startsWith('client:'));
-  assert.notEqual(secretWrite, -1, 'secret was never persisted');
-  assert.notEqual(firstRemote, -1, 'no Linear call was made');
-  assert.ok(secretWrite < firstRemote, 'secret must be persisted before the first Linear call');
-
-  assert.match(out.secret, /^[0-9a-f]{64}$/, '32 random bytes, hex');
-  assert.equal(kv.get('webhook_id'), out.id);
-  assert.equal(kv.get('webhook_secret'), out.secret);
+  assert.equal(out.created, true);
+  assert.equal(out.id, 'created-id');
   assert.equal(out.url, DESIRED);
+  assert.equal(kv.get(KEY_ID), 'created-id');
+  assert.equal(kv.get(KEY_SECRET), SECRET);
 
-  assert.equal(created.length, 1);
-  assert.equal(created[0]?.id, out.id);
-  assert.equal(created[0]?.secret, out.secret);
-  assert.equal(created[0]?.url, DESIRED);
-  assert.equal(created[0]?.enabled, true);
-  assert.equal(created[0]?.label, WEBHOOK_LABEL);
-  assert.deepEqual(created[0]?.resourceTypes, ['Issue', 'Comment']);
+  // T-07-22: both writes inside ONE transaction, so no crash window leaves a live
+  // webhook whose signing secret is not on disk.
+  const txn = calls.indexOf('kv:transaction');
+  assert.notEqual(txn, -1, 'the pair must be written in a transaction');
+  assert.ok(calls.indexOf(`kv:put:${KEY_ID}`) > txn);
+  assert.ok(calls.indexOf(`kv:put:${KEY_SECRET}`) > txn);
+
+  assert.equal(client.created.length, 1);
+  assert.equal(client.created[0]?.secret, SECRET, 'the secret passed in is the secret sent');
+  assert.equal(client.created[0]?.url, DESIRED);
+  assert.equal(client.created[0]?.label, WEBHOOK_LABEL);
+  assert.equal(client.created[0]?.teamId, TEAM);
+  assert.deepEqual(client.created[0]?.resourceTypes, ['Issue', 'Comment']);
 });
 
-test('second boot: reuses the persisted id and secret, generates nothing new', async () => {
+test('existing registration is matched by LABEL, not by the persisted id', async () => {
+  // The operator deleted the webhook in the UI and re-made it; kv still holds the old id.
+  // Matching on the id alone would create a SECOND registration and then refuse to prune
+  // the first, because the prune skips whatever id is live.
   const calls: string[] = [];
-  const { client, created } = makeClient([[]], calls);
-  const { store } = makeStore(calls, {
-    webhook_id: 'persisted-id',
-    webhook_secret: 'persisted-secret',
-  });
+  const client = new RecordingWebhookClient([summary('made-in-the-ui', `${TUNNEL}/linear/webhook`)]);
+  const { store, kv } = makeStore(calls, { [KEY_ID]: 'long-gone', [KEY_SECRET]: SECRET });
   const { log } = makeLogger();
 
-  const out = await reconcile(client, store, log, TUNNEL);
+  const out = await reconcile(client, store, log, {
+    tunnelUrl: TUNNEL,
+    teamId: TEAM,
+    secret: SECRET,
+  });
 
-  assert.equal(out.id, 'persisted-id');
-  assert.equal(out.secret, 'persisted-secret');
-  assert.equal(created[0]?.id, 'persisted-id');
-  assert.equal(created[0]?.secret, 'persisted-secret');
+  assert.equal(out.created, false, 'a labelled registration exists; do not create a second');
+  assert.equal(out.id, 'made-in-the-ui');
+  assert.equal(kv.get(KEY_ID), 'made-in-the-ui', 'the persisted id is corrected');
+  assert.deepEqual(client.deleted, []);
 });
 
-test('existing registration: updated with enabled:true, never re-created (D-02)', async () => {
+test('a disabled registration is re-enabled in the same call as the URL update (D-02)', async () => {
   const calls: string[] = [];
-  const disabled = hook('persisted-id', 'https://old.ngrok-free.app/linear/webhook', WEBHOOK_LABEL, false);
-  const { client, created, updated, deleted } = makeClient([[disabled]], calls);
-  const { store } = makeStore(calls, {
-    webhook_id: 'persisted-id',
-    webhook_secret: 'persisted-secret',
-  });
+  const dead = summary('ours', 'https://old.ngrok-free.app/linear/webhook', WEBHOOK_LABEL, false);
+  const client = new RecordingWebhookClient([dead]);
+  const { store } = makeStore(calls, { [KEY_ID]: 'ours', [KEY_SECRET]: SECRET });
   const { log } = makeLogger();
 
-  await reconcile(client, store, log, TUNNEL);
+  const out = await reconcile(client, store, log, {
+    tunnelUrl: TUNNEL,
+    teamId: TEAM,
+    secret: SECRET,
+  });
 
-  assert.equal(created.length, 0, 'create path must not be reached when our id exists');
-  assert.equal(updated.length, 1);
-  assert.equal(updated[0]?.id, 'persisted-id');
-  assert.equal(updated[0]?.input.url, DESIRED);
-  // Unconditional re-enable: an auto-disabled webhook is the steady state here.
-  assert.equal(updated[0]?.input.enabled, true);
-  assert.deepEqual(deleted, [], 'our own live registration is never deleted');
+  assert.equal(out.reenabled, true, 'finding it disabled is the NORMAL case, not a repair');
+  assert.equal(client.created.length, 0, 'never re-create what can be updated');
+  assert.equal(client.updated.length, 1, 'one call, not an update then an enable');
+  assert.equal(client.updated[0]?.id, 'ours');
+  assert.equal(client.updated[0]?.input.url, DESIRED);
+  assert.equal(client.updated[0]?.input.enabled, true);
 });
 
-test('pagination: two pages of three yield six webhooks, not nine (T22)', async () => {
+test('prune is label-scoped: foreign and non-ngrok registrations are untouched (HOOK-09)', async () => {
   const calls: string[] = [];
-  const pages = [
-    [
-      hook('a', 'https://a.ngrok-free.app/linear/webhook'),
-      hook('b', 'https://b.ngrok-free.app/linear/webhook'),
-      hook('c', 'https://c.ngrok.io/linear/webhook'),
-    ],
-    [
-      hook('d', 'https://d.ngrok-free.app/linear/webhook'),
-      hook('e', 'https://e.ngrok.dev/linear/webhook'),
-      hook('f', 'https://f.ngrok-free.app/linear/webhook'),
-    ],
-  ];
-  const { client, deleted } = makeClient(pages, calls);
-  const { store } = makeStore(calls, {
-    webhook_id: 'not-in-either-page',
-    webhook_secret: 'persisted-secret',
-  });
+  const client = new RecordingWebhookClient([
+    summary('ours-live', 'https://live.ngrok-free.app/linear/webhook'),
+    summary('ours-stray-1', 'https://dead1.ngrok-free.app/linear/webhook'),
+    summary('ours-stray-2', 'https://dead2.ngrok.io/linear/webhook'),
+    summary('ours-stray-3', 'https://dead3.ngrok.dev/linear/webhook'),
+    summary('foreign', 'https://other-tool.ngrok-free.app/hook', 'some-other-tool'),
+    summary('unlabelled', 'https://anon.ngrok-free.app/hook', null),
+    summary('ours-static', 'https://worker.example.com/linear/webhook'),
+  ]);
+  const { store } = makeStore(calls, { [KEY_ID]: 'ours-live', [KEY_SECRET]: SECRET });
   const { log } = makeLogger();
 
-  await reconcile(client, store, log, TUNNEL);
+  await reconcile(client, store, log, { tunnelUrl: TUNNEL, teamId: TEAM, secret: SECRET });
 
-  // Six strays seen once each. A per-iteration collector would report nine and
-  // issue nine deletes -- the same double-count that, matched on URL rather than
-  // id, deletes this daemon's own live registration.
-  assert.equal(deleted.length, 6, 'six webhooks, not nine');
-  assert.deepEqual([...deleted].sort(), ['a', 'b', 'c', 'd', 'e', 'f']);
-});
-
-test('pagination: our own registration on page one survives a second page', async () => {
-  const calls: string[] = [];
-  const pages = [
-    [hook('persisted-id', 'https://old.ngrok-free.app/linear/webhook')],
-    [hook('stray', 'https://stray.ngrok-free.app/linear/webhook')],
-  ];
-  const { client, created, updated, deleted } = makeClient(pages, calls);
-  const { store } = makeStore(calls, {
-    webhook_id: 'persisted-id',
-    webhook_secret: 'persisted-secret',
-  });
-  const { log } = makeLogger();
-
-  await reconcile(client, store, log, TUNNEL);
-
-  assert.equal(created.length, 0);
-  assert.equal(updated.length, 1);
-  assert.deepEqual(deleted, ['stray']);
-});
-
-test('prune is label-scoped: foreign ngrok webhooks and non-ngrok webhooks are untouched (HOOK-09)', async () => {
-  const calls: string[] = [];
-  const pages = [
-    [
-      hook('persisted-id', 'https://live.ngrok-free.app/linear/webhook'),
-      hook('ours-stray', 'https://dead.ngrok-free.app/linear/webhook'),
-      hook('foreign', 'https://other-tool.ngrok-free.app/hook', 'some-other-tool'),
-      hook('unlabelled', 'https://anon.ngrok-free.app/hook', null),
-      hook('ours-static', 'https://worker.example.com/linear/webhook'),
-    ],
-  ];
-  const { client, deleted } = makeClient(pages, calls);
-  const { store } = makeStore(calls, {
-    webhook_id: 'persisted-id',
-    webhook_secret: 'persisted-secret',
-  });
-  const { log } = makeLogger();
-
-  await reconcile(client, store, log, TUNNEL);
-
-  assert.deepEqual(deleted, ['ours-stray']);
+  // Every stray our label owns, and nothing else. The live one is spared by the id
+  // check, the foreign tool by the label, our own static registration by the URL shape.
+  assert.deepEqual([...client.deleted].sort(), ['ours-stray-1', 'ours-stray-2', 'ours-stray-3']);
 });
 
 test('create failure is loud', async () => {
   const calls: string[] = [];
-  const { client } = makeClient([[]], calls, false);
-  const { store } = makeStore(calls);
+  const client = new RecordingWebhookClient([], true);
+  const { store, kv } = makeStore(calls);
   const { log } = makeLogger();
 
-  await assert.rejects(() => reconcile(client, store, log, TUNNEL), /registration failed/);
+  await assert.rejects(
+    () => reconcile(client, store, log, { tunnelUrl: TUNNEL, teamId: TEAM, secret: SECRET }),
+    /registration failed/,
+  );
+  assert.equal(kv.get(KEY_ID), undefined, 'no id is persisted for a webhook that does not exist');
 });
 
-test('no logged value contains a signing secret (T23)', async () => {
+test('disable() is best effort: a throwing Linear is logged, not propagated (T-07-23)', async () => {
   const calls: string[] = [];
-  const pages = [
-    [
-      hook('persisted-id', 'https://live.ngrok-free.app/linear/webhook'),
-      hook('ours-stray', 'https://dead.ngrok-free.app/linear/webhook'),
-      hook('foreign', 'https://other.ngrok-free.app/hook', 'some-other-tool'),
-    ],
-    [hook('ours-stray-2', 'https://dead2.ngrok-free.app/linear/webhook')],
-  ];
-  const { client } = makeClient(pages, calls);
-  const { store } = makeStore(calls, {
-    webhook_id: 'persisted-id',
-    webhook_secret: 'persisted-secret',
-  });
+  const client = new RecordingWebhookClient([summary('ours', DESIRED)]);
+  client.updateWebhook = () => Promise.reject(new Error('linear is down'));
+  const { store } = makeStore(calls, { [KEY_ID]: 'ours' });
+  const { log } = makeLogger();
+
+  // A shutdown that can be blocked by Linear being slow never reaches the steps that
+  // release the port, reap the children and mark the in-flight runs.
+  assert.equal(await disable(client, store, log), false);
+});
+
+test('disable() flips enabled off for the persisted id, and no-ops with no id', async () => {
+  const calls: string[] = [];
+  const client = new RecordingWebhookClient([summary('ours', DESIRED)]);
+  const { store } = makeStore(calls, { [KEY_ID]: 'ours' });
+  const { log } = makeLogger();
+
+  assert.equal(await disable(client, store, log), true);
+  assert.deepEqual(client.updated, [{ id: 'ours', input: { enabled: false } }]);
+
+  const { store: empty } = makeStore(calls);
+  assert.equal(await disable(new RecordingWebhookClient(), empty, log), false);
+});
+
+test('no logged value contains the signing secret (T23, residual)', async () => {
+  const calls: string[] = [];
+  const client = new RecordingWebhookClient([
+    summary('ours-live', 'https://live.ngrok-free.app/linear/webhook'),
+    summary('ours-stray', 'https://dead.ngrok-free.app/linear/webhook'),
+  ]);
+  const { store } = makeStore(calls, { [KEY_ID]: 'ours-live', [KEY_SECRET]: SECRET });
   const { log, lines } = makeLogger();
 
-  await reconcile(client, store, log, TUNNEL);
+  await reconcile(client, store, log, { tunnelUrl: TUNNEL, teamId: TEAM, secret: SECRET });
 
   assert.ok(lines.length > 0, 'the reconciler must log something, or this test is vacuous');
-  const serialised = JSON.stringify(lines);
-  for (const s of [...secretsOf(pages), 'persisted-secret']) {
-    assert.ok(!serialised.includes(s), `logger received a signing secret: ${s}`);
-  }
+  assert.ok(!JSON.stringify(lines).includes(SECRET), 'the caller secret reached the logger');
 });
