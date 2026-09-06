@@ -148,6 +148,31 @@ deliberately stopped run is not reported as a failure (06-02's fix), and `failed
 case because the `default` arm already transitions to `failed` with a reason. Four variants, three
 on the wire, every path handled.
 
+## PASS — QA-04 / D-06: answer correlation, all tiers
+
+Executed `correlate()` — the highest-bug-density path in the project:
+
+| case | outcome |
+|---|---|
+| threaded reply, **two** open questions | `matched` tier 1 |
+| top-level, exactly one open | `matched` tier 2 |
+| top-level, **two** open | `ambiguous` — refuses to guess |
+| parented to an unknown thread | `none / unknown_thread` — **does not** fall through to tier 2 |
+| bot-authored comment | `none / bot_authored` |
+| no open questions | `none / no_open_questions` |
+
+Two cases carry the design:
+
+- **Tier 1 exercised at N>1.** This is the test that would have caught T43, where tier 1 was dead
+  code and the tier-2 fallback masked it on every single-question ticket. At N=1 a broken tier 1
+  is invisible.
+- **A parented comment that matches nothing does not fall through.** Otherwise replying in an old
+  thread would silently answer a different question.
+
+The bot-author drop lives inside `correlate()` rather than at the ingress boundary, so boot
+recovery — which lists comments straight from the API and never passes the four ingress guards —
+inherits it for free.
+
 ## RESOLVED — T53: fixed by the orchestrator after 07-02 reached tsc exit 0
 
 **The decisive result of this milestone.** After 07-02 drove the typecheck from 68 errors to
