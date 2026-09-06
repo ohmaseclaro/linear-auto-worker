@@ -283,3 +283,13 @@ call site, not speculation.
 - `Store`: `appendRunEvent`, `listRunEvents`, `getQuestion(id)` — research sketches question
   lookup by comment id and short code but not by primary key.
 - `Scheduler` port: `positionOf`, `syncFromStore`
+
+### From Phase 3 planning (Ingress)
+
+- `Store`: `kvGet`, `kvPut`, `tryInsertDelivery` (the delivery-ID dedupe insert must be
+  atomic and report whether the row was new)
+- The `DomainEvent` union — ingress's normalised output, consumed by the router
+- `installTunnelShutdownHooks()`, `noteSelfWrite()`, `selfEventDropCounts`,
+  `pollForMissedWork()`
+- `secret` must be on Phase 2's logger redaction list (webhook signing secrets reach memory
+  through every `webhooks()` call — TRAPS T23)
