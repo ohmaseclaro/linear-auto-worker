@@ -1,0 +1,113 @@
+/**
+ * The contract between the spawned agent and the run engine.
+ *
+ * A turn's outcome is a schema-constrained JSON object, never prose and never an exit
+ * code. `claude -p --json-schema <this>` puts the parsed object in `result.structured_output`
+ * (TRAPS T31 — read that, not `result.result`), and `parseAgentResult` is the one place it
+ * becomes a value the worker will act on.
+ */
+
+import { AgentResultParseError } from './errors.js';
+
+/**
+ * Five outcomes. The agent itself can only produce the first three; `crashed` and
+ * `cancelled` are synthesised by the runner when there is no result to parse at all.
+ */
+export type AgentResult =
+  | { status: 'complete'; summary: string; prTitle: string; prBody: string }
+  | { status: 'needs_input'; summary: string; question: string; assumptionIfUnanswered: string }
+  | { status: 'failed'; summary: string; failureReason: string }
+  | { status: 'crashed'; exitCode: number; stderrTail: string }
+  | { status: 'cancelled' };
+
+/**
+ * A JSON Schema document, hand-written rather than derived from zod: `src/domain/` imports
+ * nothing outside itself, the CLI wants a schema document rather than a validator, and a
+ * conversion step would be one more moving part between the contract and the wire.
+ *
+ * Only the three statuses the agent can emit appear in the enum. Requiring
+ * `assumptionIfUnanswered` at ask time (QA-01) is what makes the timeout fallback honest:
+ * the assumption is the agent's own, stated before it knew whether anyone would answer.
+ */
+export const AgentResultSchema = {
+  type: 'object',
+  required: ['status', 'summary'],
+  additionalProperties: false,
+  properties: {
+    status: { enum: ['complete', 'needs_input', 'failed'] },
+    summary: { type: 'string', description: 'One paragraph of what happened this turn.' },
+    // present iff status === "needs_input"
+    question: {
+      type: 'string',
+      description: 'One specific question only the human can answer.',
+    },
+    assumptionIfUnanswered: {
+      type: 'string',
+      description: 'The reasonable default you will proceed with if nobody answers.',
+    },
+    // present iff status === "complete"
+    changedRepos: { type: 'array', items: { type: 'string' } },
+    prTitle: { type: 'string' },
+    prBody: { type: 'string' },
+    // present iff status === "failed"
+    failureReason: { type: 'string' },
+  },
+} as const;
+
+function str(o: Record<string, unknown>, key: string, status: string): string {
+  const v = o[key];
+  if (typeof v !== 'string' || v.length === 0) {
+    throw new AgentResultParseError(`agent result "${status}" is missing string field "${key}"`);
+  }
+  return v;
+}
+
+/**
+ * Narrow untrusted output into an `AgentResult`, or throw.
+ *
+ * The child's stdout is attacker-influenceable the moment a Linear issue body reaches the
+ * prompt (T-01-05), so nothing is inferred: the `status` discriminator is matched exactly
+ * and every field that member requires must be present and non-empty. An object crafted to
+ * look like a completed delivery cannot become one by omission.
+ */
+export function parseAgentResult(raw: unknown): AgentResult {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new AgentResultParseError(`agent result is not an object: ${typeof raw}`);
+  }
+  const o = raw as Record<string, unknown>;
+  const status = o.status;
+
+  switch (status) {
+    case 'complete':
+      return {
+        status,
+        summary: str(o, 'summary', status),
+        prTitle: str(o, 'prTitle', status),
+        prBody: str(o, 'prBody', status),
+      };
+    case 'needs_input':
+      return {
+        status,
+        summary: str(o, 'summary', status),
+        question: str(o, 'question', status),
+        assumptionIfUnanswered: str(o, 'assumptionIfUnanswered', status),
+      };
+    case 'failed':
+      return {
+        status,
+        summary: str(o, 'summary', status),
+        failureReason: str(o, 'failureReason', status),
+      };
+    case 'crashed': {
+      const exitCode = o.exitCode;
+      if (typeof exitCode !== 'number') {
+        throw new AgentResultParseError('agent result "crashed" is missing numeric "exitCode"');
+      }
+      return { status, exitCode, stderrTail: str(o, 'stderrTail', status) };
+    }
+    case 'cancelled':
+      return { status };
+    default:
+      throw new AgentResultParseError(`unknown agent result status: ${JSON.stringify(status)}`);
+  }
+}
