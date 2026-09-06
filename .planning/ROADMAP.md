@@ -66,7 +66,9 @@ Decimal phases appear between their surrounding integers in numeric order.
   1. A config file with a wrong or missing field is rejected at load with a message naming that field and the shape expected, rather than failing later as a runtime error
   2. Three concurrent runs read and write run state without the daemon's event loop stalling, with the database in WAL mode and a busy timeout set
   3. Every log line is structured JSON carrying the run ID, and no line anywhere in the output contains an API key or authtoken
-**Plans**: TBD
+**Plans**: 2 plans across 2 waves
+- [ ] 02-01-PLAN.md — Tracer: loadFoundation() wiring config to store to logger, plus full config validation (six toggles, project/team fallback, secrets) (wave 1)
+- [ ] 02-02-PLAN.md — SqliteStore's typed CRUD over all five tables, and the written proof that redaction survives a secret born after boot (wave 2)
 
 ### Phase 3: Ingress
 **Goal**: A Linear delivery reaches the system safely, exactly once, and never as an echo of the bot's own writes
@@ -107,7 +109,9 @@ Decimal phases appear between their surrounding integers in numeric order.
   4. The In Progress state is resolved per team at runtime with no hardcoded UUID anywhere, and a Linear rate limit is recognized by its error extension code — not an HTTP status — and backed off according to the reset header
   5. The pull request URL reaches Linear, Slack, and the logs
   6. A notification channel failing never fails the run
-**Plans**: TBD
+**Plans**: 2 plans
+- [ ] 05-01-PLAN.md — Linear client facade: rate-limit-aware call wrapper, per-team In Progress resolution, comment threading, paginated webhook CRUD (wave 1)
+- [ ] 05-02-PLAN.md — Fan-out notifier: non-disableable log channel, per-mapping Linear comment channel with the self-event marker, terminal/question-only Slack channel, bounded retry (wave 2)
 
 ### Phase 6: Orchestration
 **Goal**: Runs are queued, driven through the state machine, blocked on humans without cost, and recovered after a restart
@@ -207,10 +211,10 @@ Phase 1 first. Phases 2-6 in parallel. Phase 7 after all of them. Phase 8 last.
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Domain Contract, State Machine & Schema | 0/TBD | Not started | - |
-| 2. Foundation | 0/TBD | Not started | - |
+| 2. Foundation | 0/2 | Planned | - |
 | 3. Ingress | 0/TBD | Not started | - |
 | 4. Execution | 0/TBD | Not started | - |
-| 5. Outbound | 0/TBD | Not started | - |
+| 5. Outbound | 0/2 | Not started | - |
 | 6. Orchestration | 0/TBD | Not started | - |
 | 7. Integration & Daemon Lifecycle | 0/6 | Planned | - |
 | 8. Setup Wizard & Safety Pass | 0/TBD | Not started | - |
