@@ -148,13 +148,19 @@ describe('setIssueState', () => {
   it('registers the write with loop guard 3 so the bot does not answer its own transition (T49)', async () => {
     const { sdk } = stubTeam();
     const client = new LinearClientImpl({ apiKey: API_KEY, sdk: asSdk(sdk) });
-    const payload = { actor: { id: 'a-human', type: 'user' }, type: 'Issue', data: { id: 'issue-1' } };
+    // A DISTINCT issue id. `noteSelfWrite`'s suppression map is module-level and its window
+    // is 90 seconds, so the three cases above — each of which calls
+    // `setIssueState('issue-1', …)` — had already stamped `Issue:issue-1` before this case
+    // ran, and the falsification below read `true` on a correctly wired guard. Shared
+    // process state across cases, not a wiring gap.
+    const issueId = 'issue-t49-only';
+    const payload = { actor: { id: 'a-human', type: 'user' }, type: 'Issue', data: { id: issueId } };
 
     // Falsification first (T71): with no self-write recorded, the guard must PASS the
     // event. A check that cannot be shown to go red proves nothing about the green.
     assert.equal(selfEventGuards(payload, 'user-bot').drop, false);
 
-    await client.setIssueState('issue-1', 'started');
+    await client.setIssueState(issueId, 'started');
 
     const after = selfEventGuards(payload, 'user-bot');
     assert.equal(after.drop, true);

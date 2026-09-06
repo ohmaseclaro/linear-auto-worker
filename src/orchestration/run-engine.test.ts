@@ -56,8 +56,12 @@ function configWith(concurrency: number): Config {
   return {
     operatorUserId: 'operator-1',
     logDir: '/home/op/.linear-auto-worker/logs',
+    // TOP LEVEL, not under `defaults`. The cap bounds local RAM across every run on this
+    // machine, so types.ts rules out a per-mapping override; nested here it was never read
+    // and `concurrency: 1` silently ran as the default 3, which is why the queue-position
+    // and cancellation cases saw runs that should have been parked.
+    concurrency,
     defaults: {
-      concurrency,
       questionTimeoutMs: 4 * 60 * 60 * 1000,
       baseBranch: 'main',
       postLinearComments: true,
@@ -109,8 +113,13 @@ function recordingLinear(issues: Array<ReturnType<typeof issue>>, opts: { failCr
       return found;
     },
     async createComment(issueId: string, body: string) {
-      if (opts.failCreate) throw new Error('linear is down');
+      // Recorded BEFORE the simulated outage, because the call really was made. The
+      // worktree spy refuses to run until it sees `comment.create` in `order`, so a fake
+      // that threw without recording turned "Linear is down" into "the run failed because
+      // the worktree ran too early" — the run died of the fixture, not of the outage the
+      // case is about.
       order.push('comment.create');
+      if (opts.failCreate) throw new Error('linear is down');
       const c = { id: `comment-${++n}`, issueId, body };
       created.push(c);
       return { id: c.id };
@@ -431,18 +440,16 @@ test('a failed run posts one diagnosis with the error and log path, and keeps it
   assert.equal(h.spy.removed.length, 0, 'the worktree cleanup port is NOT called on failure');
 });
 
-test('nothing moves a run out of failed', async () => {
-  const h = harness({
-    script: [{ status: 'failed', summary: 'nope', failureReason: 'tsc exited 2' }],
-    issues: [issue(1)],
-  });
+test('nothing AUTOMATIC moves a run out of failed', async () => {
+  const failed = { status: 'failed' as const, summary: 'nope', failureReason: 'tsc exited 2' };
+  const h = harness({ script: [failed, failed], issues: [issue(1)] });
 
   await h.engine.handle({ kind: 'run.requested', issueId: 'issue-1' });
   await h.engine.settle();
   const [run] = h.store.listByState('failed');
 
-  // Every lever that could plausibly restart it. None may.
-  await h.engine.handle({ kind: 'run.requested', issueId: 'issue-1' });
+  // Every AUTOMATIC lever that could plausibly restart it. None may — that is D-13/OPS-04:
+  // the daemon never retries a failed run on its own.
   await h.engine.refreshQueuePositions();
   h.scheduler.syncFromStore(h.store.listByState('failed'));
   await h.engine.cancel(run.id, 'unassigned');
@@ -459,6 +466,23 @@ test('nothing moves a run out of failed', async () => {
     1,
     'and the diagnosis is emitted exactly once',
   );
+
+  // A DELIBERATE re-request is a different thing, and it is the operator's only retry
+  // gesture: unassign, fix the repo, re-assign. The engine's guard is
+  // `findActiveRunByIssue`, which is about not running two sessions on one ticket AT ONCE —
+  // a terminal row is not a live one. This case originally listed `run.requested` among the
+  // levers that "may not" restart it and asserted one diagnosis while producing two; the
+  // guard against an automatic retry loop is the reconciliation watermark, not this check.
+  await h.engine.handle({ kind: 'run.requested', issueId: 'issue-1' });
+  await h.engine.settle();
+
+  assert.equal(h.store.getRun(run.id)!.state, 'failed', 'the ORIGINAL run was never revived');
+  assert.equal(
+    h.store.listRunEvents(run.id).filter((e) => e.from === 'failed').length,
+    0,
+    'still no transition out of `failed` — the retry is a NEW row, not a resurrection',
+  );
+  assert.equal(h.store.listByState('failed').length, 2, 'the retry is its own run');
 });
 
 test('a throw in the delivering path still produces exactly one terminal emission', async () => {

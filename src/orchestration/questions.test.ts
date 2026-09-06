@@ -163,7 +163,7 @@ function harness(over: { config?: Partial<Config>; store?: InMemoryStore } = {})
 
   const config = {
     botUserId: BOT,
-    defaults: { questionFlow: true, questionTimeoutMs: undefined, baseBranch: 'main' },
+    defaults: { questionsEnabled: true, questionTimeoutMs: undefined, baseBranch: 'main' },
     mappings: [],
     ...over.config,
   } as unknown as Config;
@@ -354,7 +354,7 @@ test('sweeping past the deadline expires, posts the assumption, and resumes on i
   const expired = await h.questions.sweep(q.deadlineAt + 1);
 
   assert.equal(expired.length, 1);
-  assert.equal(h.store.getQuestion(q.id)!.status, 'expired');
+  assert.equal(h.store.getQuestion(q.id)!.status, 'timed_out');
   // QA-05 / T-06-15: the record shows what was decided.
   assert.equal(h.comments.length, 1);
   assert.ok(h.comments[0]!.body.includes('postgres'));
@@ -381,7 +381,7 @@ test('THE RESTART TEST: a question opened by a discarded instance still expires 
 
   assert.equal(expired.length, 1);
   assert.equal(expired[0]!.id, q.id);
-  assert.equal(store.getQuestion(q.id)!.status, 'expired');
+  assert.equal(store.getQuestion(q.id)!.status, 'timed_out');
   assert.equal(second.comments.length, 1);
   assert.deepEqual(second.events.map((e) => e.kind), ['question.answered']);
   // The instance that opened it did nothing on expiry -- it no longer exists.
@@ -423,7 +423,7 @@ test('a question answered before its deadline is not expired by a later sweep', 
 // -- QA-07: the question flow switched off for a mapping ---------------------
 
 test('with the question flow disabled, needs_input proceeds on the assumption immediately', async () => {
-  const h = harness({ config: { mappings: mappingWith({ questionFlow: false }) } as never });
+  const h = harness({ config: { mappings: mappingWith({ questionsEnabled: false }) } as never });
   seedRun(h.store);
 
   const result = await h.questions.openQuestion('r1', 'which database?', 'postgres');
@@ -447,7 +447,7 @@ test('a disabled mapping does not disable the flow for another mapping', async (
   const h = harness({
     config: {
       mappings: [
-        { repos: [{ repoDir: '/code/api' }], overrides: { questionFlow: false } },
+        { repos: [{ repoDir: '/code/api' }], overrides: { questionsEnabled: false } },
         { repos: [{ repoDir: '/code/web' }], overrides: {} },
       ],
     } as never,

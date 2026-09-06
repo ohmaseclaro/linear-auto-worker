@@ -279,6 +279,7 @@ import type {
   Deliverer,
   LinearClient,
   Logger,
+  Run,
   Store,
   WorktreeManager,
 } from '../domain/ports.js';
@@ -468,8 +469,26 @@ function fanoutHarness(opts: {
   });
   questions = createQuestions({ store, engine, config, linear, log: silent });
 
-  const runsOf = (issueId: string) =>
-    ALL_STATES.flatMap((s) => raw.listByState(s)).filter((r) => r.issueId === issueId);
+  /**
+   * Every row for an issue, INCLUDING the stateless ticket parent.
+   *
+   * `listByState` structurally cannot return a parent: D-12 gives it no state, which is the
+   * whole point of the row. The parents are therefore recovered from the children's
+   * `parentRunId`. Without this step the parent is invisible here, and "the parent row
+   * exists" fails against an implementation that is doing exactly what D-12 asks.
+   */
+  const runsOf = (issueId: string): Run[] => {
+    const children = ALL_STATES.flatMap((s) => raw.listByState(s)).filter(
+      (r) => r.issueId === issueId,
+    );
+    const parentIds = new Set(
+      children.map((c) => c.parentRunId).filter((id): id is string => id !== null),
+    );
+    const parents = [...parentIds]
+      .map((id) => raw.getRun(id))
+      .filter((r): r is Run => r !== undefined);
+    return [...children, ...parents];
+  };
 
   return { store: raw, scheduler, engine, comments, order, runsOf, config };
 }
