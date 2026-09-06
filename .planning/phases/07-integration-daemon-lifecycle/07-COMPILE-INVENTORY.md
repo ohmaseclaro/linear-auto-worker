@@ -289,3 +289,28 @@ Start 07-03 with **S4** (the only runtime `TypeError` in the set) and **L1/L6** 
 errors for two mechanical renames and one deletion). Leave **S1/S3** — 19 errors, one
 narrowing discipline, one decision — for last, and resist the temptation to flatten the
 union.
+
+---
+
+## Final count (appended by plan 07-02)
+
+`npx tsc --noEmit` over the whole tree: **0 errors, exit 0**, from 68.
+
+| | |
+|---|---|
+| Starting errors | **68** |
+| Ending errors | **0** |
+| T54 syntax-mask re-check | `grep -cE 'TS1005\|TS1128\|TS1002\|TS1109\|TS1434'` → **0** (a syntax error aborts parsing and suppresses everything downstream; a zero that came from one is not a zero) |
+| Suppression comments added | **0** — `@ts-ignore` 0, `@ts-expect-error` 0, both unchanged from baseline |
+| `as unknown as` | **56 → 50** (six removed: three casts in `config.ts`/`config.test.ts` that survived zod validation, plus three test fixtures rebuilt as real `Config` values) |
+| `as any` / `: any` | unchanged (11 / 7, measured with the same `git grep -o` on both trees) |
+| Non-null assertions | **81 → 79**, and the eight in `run-engine.ts` that narrowing removed were replaced by a `repoRun()` helper that throws a named error rather than by a cast |
+
+07-02 took all 68, not the 25 this inventory assigned it: 07-03 builds the daemon and its
+boot smoke, and neither can run on a tree with 43 type errors. The clusters were still
+worked as classified — the split above is triage, not ownership.
+
+Both defects this compile structurally could not see remain open: the T53 column drift
+(07-06's store round-trip) and, for the half a contract cannot own, T45's mapping wiring
+(07-03). T45's *other* half is closed — the `DomainEvent` union is split, so skipping the
+mapping no longer compiles.
