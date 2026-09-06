@@ -2,6 +2,7 @@
 import { parseArgs } from 'node:util';
 import { runDoctor, runSetupWizard } from './wizard/index.js';
 import { bootDaemon, installSignalHandlers } from './daemon.js';
+import { runStatus } from './status.js';
 
 const USAGE = `law — turn Linear issues assigned to your bot into pull requests
 
@@ -16,7 +17,8 @@ commands:
                    deletes only after a per-item confirmation.
   start            Run the daemon: bind the local server, open the tunnel, reconcile the
                    webhook, then process assigned issues until interrupted.
-  status           Show queued and in-flight runs.
+  status           Show queued and in-flight runs, read straight from the store. Works
+                   whether or not the daemon is running.
 
 options:
   -h, --help       Show this message.
@@ -75,8 +77,7 @@ async function main(): Promise<number> {
       return new Promise<number>(() => undefined);
     }
     case 'status':
-      console.log('not yet implemented — run `law setup` first');
-      return 0;
+      return runStatus();
     default:
       console.error(`unknown command: ${command}\n`);
       console.error(USAGE);

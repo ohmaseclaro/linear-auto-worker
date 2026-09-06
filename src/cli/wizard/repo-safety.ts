@@ -82,6 +82,17 @@ async function writeStarterAgentDoc(repoPath: string): Promise<void> {
 export async function checkAgentDocs(
   repoPath: string,
   prompts: WizardPrompts = realPrompts,
+  /**
+   * Where the warning goes. Injected for the same reason `execa` is (see `deps.ts`): a
+   * library function that writes to `console` directly cannot be called from a test
+   * without leaking output into the runner. Concretely, this one raced `node --test`'s
+   * worker teardown and produced "Unable to deserialize cloned data" on roughly one run
+   * in three — a flaky red build with no failing assertion to point at.
+   *
+   * The wizard's own progress output in `index.ts` stays on `console` deliberately: there
+   * the terminal IS the interface. This is a library call the wizard happens to make.
+   */
+  report: (message: string) => void = (message) => console.log(message),
 ): Promise<SafetyWarning | null> {
   for (const name of AGENT_DOC_NAMES) {
     if (await fileExists(join(repoPath, name))) return null;
@@ -91,7 +102,7 @@ export async function checkAgentDocs(
     `no CLAUDE.md/AGENTS.md found — the spawned agent starts with zero project context, ` +
     `which research names the single highest-leverage factor in whether a run produces ` +
     `something mergeable`;
-  console.log(`⚠ "${repoPath}": ${message}`);
+  report(`⚠ "${repoPath}": ${message}`);
 
   const wantsStarter = await prompts.confirm({
     message: `Generate a starter CLAUDE.md for "${repoPath}"?`,
@@ -259,12 +270,12 @@ async function checkBranchProtection(
 
 async function annotateOneRepo(
   repoPath: string,
-  deps: { run: RunCommand; prompts: WizardPrompts },
+  deps: { run: RunCommand; prompts: WizardPrompts; report: (message: string) => void },
 ): Promise<{ info: RepoSafetyInfo; warnings: SafetyWarning[] }> {
   const warnings: SafetyWarning[] = [];
   const info: RepoSafetyInfo = { repoPath };
 
-  const docsWarning = await checkAgentDocs(repoPath, deps.prompts);
+  const docsWarning = await checkAgentDocs(repoPath, deps.prompts, deps.report);
   if (docsWarning) warnings.push(docsWarning);
 
   const submoduleWarning = await checkSubmodules(repoPath);
@@ -300,9 +311,13 @@ async function annotateOneRepo(
  */
 export async function annotateRepoSafety(
   mappings: Mapping[],
-  deps: { run?: RunCommand; prompts?: WizardPrompts } = {},
+  deps: { run?: RunCommand; prompts?: WizardPrompts; report?: (message: string) => void } = {},
 ): Promise<{ mappings: EnrichedMapping[]; warnings: SafetyWarning[] }> {
-  const resolved = { run: deps.run ?? defaultRunCommand, prompts: deps.prompts ?? realPrompts };
+  const resolved = {
+    run: deps.run ?? defaultRunCommand,
+    prompts: deps.prompts ?? realPrompts,
+    report: deps.report ?? ((message: string) => console.log(message)),
+  };
   const allWarnings: SafetyWarning[] = [];
   const enrichedMappings: EnrichedMapping[] = [];
 

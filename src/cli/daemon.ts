@@ -427,20 +427,21 @@ async function resolveStartedStates(
 /**
  * The fan-out, built here and reached ONLY through the run engine.
  *
- * ## Why the Linear comment channel is not in this array
+ * ## Why there is no Linear comment channel
  *
- * 05-CONTEXT lists three channels and this constructs two. That is a deliberate deviation,
- * not an omission: the run engine already posts every Linear comment this product makes,
- * and it posts them with things `LinearCommentChannel` structurally cannot do — the
- * acknowledgement is EDITED in place as the queue moves (D-10 / INTK-06), a question is a
- * threaded reply whose comment id is stored for tier-1 answer correlation, and a
- * multi-repo ticket gets one rollup instead of one comment per child (D-12 / DELV-07).
- * `LinearCommentChannel.enabled()` gates on the mapping toggle alone and fires on every
- * kind, so adding it here would post a SECOND, poorer comment for every milestone on every
- * ticket — the wall of bot noise D-10 exists to prevent.
+ * 05-CONTEXT lists three channels and this constructs two. The run engine already posts
+ * every Linear comment this product makes, and it posts them with things a generic
+ * per-event channel structurally cannot do: the acknowledgement is EDITED in place as the
+ * queue moves (D-10 / INTK-06), a question is a threaded reply whose comment id is stored
+ * for tier-1 answer correlation, and a multi-repo ticket gets one rollup rather than one
+ * comment per child (D-12 / DELV-07). A second channel firing on every kind would post a
+ * poorer duplicate of each — the wall of bot noise D-10 exists to prevent.
  *
- * The right resolution is to move the engine's four comment sites onto the channel, which
- * is a Phase 5/6 redesign and not a wiring change. Recorded in WINDOWS.md.
+ * The half-built channel that used to sit here was deleted rather than left dormant: two
+ * implementations of one job is a trap for whoever reads this next. `composeBody` survives
+ * in `notify/linear-channel.ts` because the Slack channel shares it. If the engine's four
+ * comment sites are ever moved onto a channel, that is a deliberate redesign which should
+ * write what it needs.
  *
  * ## What is NOT deviated from
  *

@@ -8,6 +8,29 @@ import { annotateRepoSafety, checkAgentDocs } from './repo-safety.js';
 import { defaultRunCommand, realPrompts, type RunCommand, type WizardPrompts } from './deps.js';
 import type { Mapping } from './mapping.js';
 
+// ## Why every call site injects `report`
+//
+// Left on the default (`console.log`), this file failed roughly one run in five with
+//
+//     Error: Unable to deserialize cloned data due to invalid or unsupported version.
+//         at #processRawBuffer (node:internal/test_runner/runner:354:20)
+//
+// and no failing assertion. That frame is Node's PARENT process parsing the child's
+// stdout: under `NODE_TEST_CONTEXT=child-v8` a test file reports results as V8-serialized
+// frames on fd 1, and the parent re-syncs on frame headers. Capturing the child's raw
+// stdout across six runs showed the bytes are deterministic (12629 B every time), so the
+// desync is in the parent's chunk handling, not in anything this file writes — an upstream
+// Node 22 bug we cannot fix from here.
+//
+// What we CAN do is stop feeding it: the only non-frame bytes on that stream came from the
+// wizard printing its operator-facing warning during case 7. Measured, under six `yes`
+// processes of CPU load: 1/20 corrupted with the warning printed, 0/80 with it silenced.
+// (`console.log` on its own is not sufficient to reproduce — a 40-line probe corrupted
+// 0/10 — so this is a trigger, not the defect.)
+//
+// The wizard's OWN output in `index.ts` deliberately stays on `console`: there the terminal
+// is the interface. Only the library functions under test take an injectable sink.
+//
 // First executed by plan 07-06. Originally written against
 // `mock.method(execaModule, 'execa', …)` and `mock.method(prompts, 'confirm', …)`, which threw
 // `Cannot redefine property` on all seven cases — an ESM namespace binding is
@@ -102,7 +125,7 @@ function stubRun(
 }
 
 test('checkAgentDocs: warns and writes a starter CLAUDE.md on explicit confirm', async () => {
-  const warning = await checkAgentDocs(missingDocsRepo, noPrompts(true));
+  const warning = await checkAgentDocs(missingDocsRepo, noPrompts(true), () => undefined);
   assert.ok(warning);
   assert.equal(warning?.kind, 'missing-agent-docs');
   assert.equal(warning?.fixOffered, true);
@@ -111,7 +134,7 @@ test('checkAgentDocs: warns and writes a starter CLAUDE.md on explicit confirm',
 
 test('checkAgentDocs: returns null when CLAUDE.md already exists (no confirm prompt)', async () => {
   // `noPrompts()` REJECTS on confirm — the assertion is that the prompt is never reached.
-  const warning = await checkAgentDocs(cleanRepo, noPrompts());
+  const warning = await checkAgentDocs(cleanRepo, noPrompts(), () => undefined);
   assert.equal(warning, null);
 });
 
@@ -124,6 +147,7 @@ test('annotateRepoSafety: clean repo records remoteName/defaultBranch/ownerRepo,
   });
   const { mappings, warnings } = await annotateRepoSafety([emptyMapping([cleanRepo])], {
     run,
+    report: () => undefined,
     prompts: noPrompts(),
   });
   assert.equal(warnings.length, 0);
@@ -135,6 +159,7 @@ test('annotateRepoSafety: clean repo records remoteName/defaultBranch/ownerRepo,
 test('annotateRepoSafety: no-remote repo warns and records no remoteName', async () => {
   const { mappings, warnings } = await annotateRepoSafety([emptyMapping([noRemoteRepo])], {
     run: stubRun({}),
+    report: () => undefined,
     prompts: noPrompts(),
   });
   const noRemote = warnings.find((w) => w.kind === 'no-remote');
@@ -151,6 +176,7 @@ test('annotateRepoSafety: submodule repo warns without aborting the rest of its 
   });
   const { mappings, warnings } = await annotateRepoSafety([emptyMapping([submoduleRepo])], {
     run,
+    report: () => undefined,
     prompts: noPrompts(),
   });
   assert.ok(warnings.some((w) => w.kind === 'submodules'));
@@ -167,6 +193,7 @@ test('annotateRepoSafety: missing branch protection warns, 404 and 403 both read
   });
   const { warnings } = await annotateRepoSafety([emptyMapping([cleanRepo])], {
     run,
+    report: () => undefined,
     prompts: noPrompts(),
   });
   const protectionWarning = warnings.find((w) => w.kind === 'no-branch-protection');
@@ -186,7 +213,7 @@ test('annotateRepoSafety: one repo failing unexpectedly never blocks the next re
   });
   const { mappings, warnings } = await annotateRepoSafety(
     [emptyMapping([nonexistentRepo, cleanRepo])],
-    { run, prompts: noPrompts(false) },
+    { run, report: () => undefined, prompts: noPrompts(false) },
   );
   assert.equal(mappings[0]?.repoSafety.length, 2, 'both repos must produce an entry');
   assert.ok(

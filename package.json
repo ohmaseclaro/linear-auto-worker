@@ -14,13 +14,14 @@
     "node": ">=22"
   },
   "scripts": {
-    "verify": "tsc && npm run assets && node --test \"dist/**/*.test.js\" && npm run smoke",
+    "verify": "npm run clean && tsc && npm run assets && node --test \"dist/**/*.test.js\" && npm run smoke",
     "smoke": "tsx scripts/boot-smoke.ts",
     "typecheck": "tsc --noEmit",
     "test": "npm run assets && node --test \"dist/**/*.test.js\"",
-    "build": "tsc && npm run assets",
+    "build": "npm run clean && tsc && npm run assets",
     "dev": "tsx watch src/index.ts",
-    "assets": "node -e \"require('fs').cpSync('src','dist/src',{recursive:true,filter:(f)=>!f.endsWith('.ts')})\""
+    "assets": "node -e \"require('fs').cpSync('src','dist/src',{recursive:true,filter:(f)=>!f.endsWith('.ts')})\"",
+    "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\""
   },
   "dependencies": {
     "@inquirer/prompts": "8.7.1",

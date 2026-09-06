@@ -20,7 +20,6 @@
  * correlation concern, not this channel's.
  */
 
-import { BOT_COMMENT_MARKER_PREFIX } from '../../domain/index.js';
 import { noteSelfWrite } from '../../ingress/guards.js';
 import type { LinearClient, LogFn } from '../linear-client.js';
 import type { NotifyChannel, NotifyResult, RunEvent } from './notifier.js';
@@ -72,57 +71,5 @@ function composeTerminal(e: Extract<RunEvent, { kind: 'terminal' }>): string {
       return `Failed.${reason} The branch and worktree are left in place for inspection.\n\n${cost}`;
     case 'cancelled':
       return `Cancelled.${reason}\n\n${cost}`;
-  }
-}
-
-export interface LinearCommentChannelOptions {
-  client: LinearClient;
-  /**
-   * Per-mapping toggle (NOTF-05). Turning this off costs zero logging, because the log
-   * channel is a separate, unconditional entry rather than a peer in the same array.
-   */
-  postLinearComments: (mappingId: string) => boolean;
-  log?: LogFn;
-}
-
-export class LinearCommentChannel implements NotifyChannel {
-  readonly name = 'linear';
-  private readonly client: LinearClient;
-  private readonly postLinearComments: (mappingId: string) => boolean;
-  private readonly log: LogFn;
-
-  constructor(opts: LinearCommentChannelOptions) {
-    this.client = opts.client;
-    this.postLinearComments = opts.postLinearComments;
-    this.log = opts.log ?? (() => {});
-  }
-
-  enabled(e: RunEvent): boolean {
-    return this.postLinearComments(e.mappingId);
-  }
-
-  async emit(e: RunEvent): Promise<NotifyResult> {
-    const body = `${BOT_COMMENT_MARKER_PREFIX}${composeBody(e)}`;
-    // No parentId: none of this channel's kinds is itself a reply. Phase 6 threads answers.
-    const { id } = await this.client.createComment(e.issueId, body);
-
-    // Must not throw between the write landing and this returning — a rejection here would
-    // send the whole emit back through withBoundedRetry and post a duplicate comment.
-    try {
-      noteSelfWrite('Comment', id);
-    } catch (err) {
-      this.log(
-        {
-          severity: 'warn',
-          runId: e.runId,
-          commentId: id,
-          error: err instanceof Error ? err.message : String(err),
-        },
-        'notify.self_write_note_failed',
-      );
-    }
-
-    // Phase 6 persists this to correlate the operator's reply back to the question.
-    return e.kind === 'question_asked' ? { linearCommentId: id } : {};
   }
 }

@@ -3,7 +3,7 @@
  *
  * The gate is `enabled()`: `'terminal'` or `'question_asked'`, nothing else. Progress
  * milestones — picked up, worktree ready, agent started — never reach Slack, while still
- * reaching Linear via `LinearCommentChannel`. That difference lives entirely here, so the
+ * reaching Linear via the run engine's own comment sites. That difference lives entirely here, so the
  * fan-out loop in `notifier.ts` stays kind-agnostic and a fifth channel is a constructor
  * argument rather than another branch in the loop.
  *
