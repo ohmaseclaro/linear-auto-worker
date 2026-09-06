@@ -16,7 +16,7 @@
 - [ ] **SETUP-07**: Wizard warns for every mapped repo that has no `CLAUDE.md` or `AGENTS.md`, naming it as the highest-leverage success factor
 - [ ] **SETUP-08**: Wizard verifies each mapped repo has a remote and a resolvable default branch, and records that base branch in the mapping
 - [ ] **SETUP-09**: Wizard registers the Linear webhook end to end, so setup finishes with a system that is already working
-- [ ] **SETUP-10**: Config is validated against a schema at load time, with errors naming the offending field and expected shape
+- [x] **SETUP-10**: Config is validated against a schema at load time, with errors naming the offending field and expected shape
 
 ### Tunnel
 
@@ -154,7 +154,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | SETUP-07 | Phase 8 — Setup Wizard & Safety Pass | Pending |
 | SETUP-08 | Phase 8 — Setup Wizard & Safety Pass | Pending |
 | SETUP-09 | Phase 8 — Setup Wizard & Safety Pass | Pending |
-| SETUP-10 | Phase 2 — Foundation | Pending |
+| SETUP-10 | Phase 2 — Foundation | Complete |
 | TUN-01 | Phase 3 — Ingress | Pending |
 | TUN-02 | Phase 3 — Ingress | Pending |
 | TUN-03 | Phase 3 — Ingress | Pending |
@@ -217,6 +217,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | CONF-02 | Phase 1 — Domain Contract, State Machine & Schema | Pending |
 
 **Coverage:**
+
 - v1 requirements: 70 total
 - Mapped to phases: 70 ✓
 - Unmapped: 0
