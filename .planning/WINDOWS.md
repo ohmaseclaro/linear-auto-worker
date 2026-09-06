@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 3
+open_count: 4
 waived_count: 0
-fixed_count: 0
-total_count: 3
-last_updated: 2026-09-06T18:01:18.392Z
+fixed_count: 1
+total_count: 5
+last_updated: 2026-09-06T18:43:21.533Z
 ---
 
 # Broken Windows Ledger
@@ -17,7 +17,9 @@ last_updated: 2026-09-06T18:01:18.392Z
 |----|-------|------|------|------|-------------|--------|--------|-------------|-------------|
 | 1 | 02 | deviation | src/infra/logger.ts |  | redact() has no cycle guard; a circular object logged via createLogger() overflows the call stack (see 02-foundation/deferred-items.md) | open |  | 2026-09-06T16:56:01.511Z |  |
 | 2 | 07 | stub | src/domain/types.ts |  | Config.operatorUserId is optional and nothing writes it; run-engine skips the INTK-03 subscribe with a warn until the wizard gains a prompt (07-CONTEXT P8) | open |  | 2026-09-06T18:01:18.325Z |  |
-| 3 | 07 | deviation | src/outbound/linear-client.ts |  | outbound LinearClient/LinearIssue do not match src/domain/ports.ts; updateComment/addSubscriber/listComments unimplemented and setIssueState/createWebhook/teamId diverge - 07-04 seam | open |  | 2026-09-06T18:01:18.392Z |  |
+| 3 | 07 | deviation | src/outbound/linear-client.ts |  | outbound LinearClient/LinearIssue do not match src/domain/ports.ts; updateComment/addSubscriber/listComments unimplemented and setIssueState/createWebhook/teamId diverge - 07-04 seam | fixed |  | 2026-09-06T18:01:18.392Z | 2026-09-06T18:43:21.392Z |
+| 4 | 07 | deviation | src/cli/daemon.ts |  | The notifier is constructed with the log and Slack channels only; LinearCommentChannel is excluded because the run engine already owns every Linear comment (ack edited in place D-10, threaded questions, multi-repo rollup) and adding it would double-post every milestone - 07-04 | open |  | 2026-09-06T18:43:21.462Z |  |
+| 5 | 07 | stub | src/cli/daemon.ts |  | toNotifyEvent reports costUsd 0 and tokensUsed 0 on every terminal notification: runs has no cost or token column, so Slack and the log say $0.0000 for every run - 07-04 | open |  | 2026-09-06T18:43:21.533Z |  |
 
 ````json
 [
@@ -52,9 +54,33 @@ last_updated: 2026-09-06T18:01:18.392Z
     "file": "src/outbound/linear-client.ts",
     "line": null,
     "description": "outbound LinearClient/LinearIssue do not match src/domain/ports.ts; updateComment/addSubscriber/listComments unimplemented and setIssueState/createWebhook/teamId diverge - 07-04 seam",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-09-06T18:01:18.392Z",
+    "resolved_at": "2026-09-06T18:43:21.392Z"
+  },
+  {
+    "id": 4,
+    "kind": "deviation",
+    "phase": "07",
+    "file": "src/cli/daemon.ts",
+    "line": null,
+    "description": "The notifier is constructed with the log and Slack channels only; LinearCommentChannel is excluded because the run engine already owns every Linear comment (ack edited in place D-10, threaded questions, multi-repo rollup) and adding it would double-post every milestone - 07-04",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-06T18:43:21.462Z",
+    "resolved_at": null
+  },
+  {
+    "id": 5,
+    "kind": "stub",
+    "phase": "07",
+    "file": "src/cli/daemon.ts",
+    "line": null,
+    "description": "toNotifyEvent reports costUsd 0 and tokensUsed 0 on every terminal notification: runs has no cost or token column, so Slack and the log say $0.0000 for every run - 07-04",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-06T18:43:21.533Z",
     "resolved_at": null
   }
 ]

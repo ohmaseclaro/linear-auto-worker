@@ -32,6 +32,7 @@ import type {
   IngressEvent,
   EventRouter,
   LinearClient,
+  WorkflowStateType,
   LinearComment,
   LinearIssue,
   Logger,
@@ -675,7 +676,9 @@ export class FakeLinearClient implements LinearClient {
     id: string;
     createdAt: string;
   }>;
-  readonly stateChanges: Array<{ id: IssueId; stateType: 'started' | 'review' }>;
+  readonly stateChanges: Array<{ id: IssueId; stateType: WorkflowStateType }>;
+  /** Every `(teamId, stateType)` this fake was asked to resolve, in order. */
+  readonly stateLookups: Array<{ teamId: string; stateType: WorkflowStateType }>;
   readonly subscribers: Array<{ issueId: IssueId; userId: string }>;
   private readonly issues: Map<IssueId, LinearIssue>;
   private readonly webhooks: Array<{
@@ -692,6 +695,7 @@ export class FakeLinearClient implements LinearClient {
   constructor(seed?: { issues?: LinearIssue[]; botUser?: { id: string; name: string } }) {
     this.comments = [];
     this.stateChanges = [];
+    this.stateLookups = [];
     this.subscribers = [];
     this.issues = new Map((seed?.issues ?? []).map((i) => [i.id, i]));
     this.webhooks = [];
@@ -711,7 +715,15 @@ export class FakeLinearClient implements LinearClient {
   listAssignedOpenIssues(botUserId: string): Promise<LinearIssue[]> {
     return Promise.resolve([...this.issues.values()].filter((i) => i.assigneeId === botUserId));
   }
-  setIssueState(id: IssueId, stateType: 'started' | 'review'): Promise<void> {
+  /**
+   * Deterministic, and non-empty for every team — a fake that could return '' would make
+   * the composition root's boot assertion untestable in the direction that matters.
+   */
+  resolveWorkflowStateId(teamId: string, stateType: WorkflowStateType): Promise<string> {
+    this.stateLookups.push({ teamId, stateType });
+    return Promise.resolve(`fake-state-${teamId}-${stateType}`);
+  }
+  setIssueState(id: IssueId, stateType: WorkflowStateType): Promise<void> {
     this.stateChanges.push({ id, stateType });
     return Promise.resolve();
   }
@@ -750,17 +762,18 @@ export class FakeLinearClient implements LinearClient {
   > {
     return Promise.resolve([...this.webhooks]);
   }
+  /** The secret is the CALLER's and is not read back (landmine #3) — hence `{ id }` only. */
   createWebhook(i: {
     label: string;
     url: string;
     teamId: string;
+    secret: string;
     resourceTypes: string[];
-  }): Promise<{ id: string; secret: string }> {
+  }): Promise<{ id: string }> {
     this.webhookCounter += 1;
     const id = `fake-webhook-${this.webhookCounter}`;
-    const secret = `fake-secret-${this.webhookCounter}`;
     this.webhooks.push({ id, label: i.label, url: i.url, enabled: true, resourceTypes: i.resourceTypes });
-    return Promise.resolve({ id, secret });
+    return Promise.resolve({ id });
   }
   updateWebhook(id: string, i: { url?: string; enabled?: boolean; resourceTypes?: string[] }): Promise<void> {
     const wh = this.webhooks.find((w) => w.id === id);

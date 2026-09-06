@@ -8,7 +8,7 @@
 import { execa } from 'execa';
 import type { Logger } from '../infra/logger.js';
 import { makeEventRouter } from './event-router.js';
-import type { AgentResultEvent, PermissionDenial } from './event-router.js';
+import type { AgentResultEvent, PermissionDenial, ProgressUpdate } from './event-router.js';
 import { makeLineParser } from './stream-parser.js';
 
 /**
@@ -86,6 +86,22 @@ export interface RunAgentInput {
   kill?: KillGroup;
   isAlive?: IsAlive;
   sleep?: Sleep;
+  /**
+   * 07-CONTEXT P5. `event-router.ts` has routed `task_summary` / `post_turn_summary` into
+   * this callback since plan 04, but nothing threaded it this far, so the milestones died
+   * in the router and a 40-minute run went silent between pickup and its terminal comment
+   * — which reads as a hung daemon. This field is the whole of the thread; the composition
+   * root decides where the updates go.
+   */
+  onProgress?: (update: ProgressUpdate) => void;
+  /**
+   * Cancellation (D-11 / INTK-08). Aborting reaps the process GROUP through the same
+   * escalation the deadline uses. Without it the daemon's cancel path has no way to reach
+   * a live child at all: `runAgent` owns the only pid, so an unassigned ticket would leave
+   * a `claude` session running for up to `maxRunMs` while the run row already said
+   * `cancelled`.
+   */
+  signal?: AbortSignal;
 }
 
 export interface AgentRunOutcome {
@@ -206,7 +222,7 @@ export async function runAgent(o: RunAgentInput): Promise<AgentRunOutcome> {
   const maxRunMs = o.maxRunMs > 0 ? o.maxRunMs : DEFAULT_MAX_RUN_MS;
 
   const badLines: string[] = [];
-  const router = makeEventRouter({ log: o.log });
+  const router = makeEventRouter({ log: o.log, onProgress: o.onProgress });
   const parser = makeLineParser(
     (event) => router.route(event),
     (line) => {
@@ -253,6 +269,12 @@ export async function runAgent(o: RunAgentInput): Promise<AgentRunOutcome> {
     void beginEscalation('deadline');
   }, maxRunMs);
 
+  // Not `timedOut`: a cancelled run is not a truncated one, and the verdict reads that
+  // flag to decide `partial` (T61).
+  const onAbort = (): void => void beginEscalation('cancelled');
+  if (o.signal?.aborted) onAbort();
+  else o.signal?.addEventListener('abort', onAbort, { once: true });
+
   // D-07: BOTH streams, concurrently, both started before either is awaited. An undrained
   // stdout deadlocks the child at ~64 KB, which a real GSD run reaches inside its first
   // minute — and the symptom is a run that hangs forever with no output, not an error.
@@ -287,6 +309,7 @@ export async function runAgent(o: RunAgentInput): Promise<AgentRunOutcome> {
   // Completion is whichever of the two finishes first, never the promise alone.
   await Promise.race([completed, reaped]);
   clearTimeout(timer);
+  o.signal?.removeEventListener('abort', onAbort);
   parser.flush();
 
   if (routerError !== undefined) throw routerError;
@@ -296,7 +319,11 @@ export async function runAgent(o: RunAgentInput): Promise<AgentRunOutcome> {
     exitCode,
     sessionId: o.sessionId,
     resultEvent,
-    denials: resultEvent?.permission_denials ?? [],
+    // Prefer the ROUTER's tally over the result event's (07-CONTEXT P5). A run the
+    // supervisor reaped has no result event at all, so reading only
+    // `resultEvent.permission_denials` reports zero denials for exactly the runs whose
+    // denials explain why they had to be reaped.
+    denials: router.denials.length > 0 ? [...router.denials] : (resultEvent?.permission_denials ?? []),
     badLines,
     timedOut,
     killedBy,

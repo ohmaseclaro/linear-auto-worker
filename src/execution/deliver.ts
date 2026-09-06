@@ -155,20 +155,52 @@ export async function deliver(o: DeliverInput): Promise<DeliveryResult> {
 /**
  * The open PR for this branch, or undefined.
  *
- * ponytail: the URL is CONSTRUCTED from `owner/repo` and the PR number rather than read
- * back, because the only flag that returns a URL here is the same machine-readable flag
- * T13 forbids elsewhere in this file, and one spelling of `gh` invocation across the file
- * is worth more than a URL round-trip. Ceiling: this assumes github.com. A GitHub
- * Enterprise host needs the real field read back instead.
+ * T60 — read this before "simplifying" back to a text parse. T13 is real but NARROW:
+ * `gh pr create` has no `--json` and errors with `unknown flag`. `gh pr list --json` and
+ * `gh pr view --json` both exist (verified, gh 2.98.0). Applying T13 file-wide forced this
+ * function into parsing the first integer of the first non-empty line of non-TTY `gh pr
+ * list` output — an unverifiable parse of a format gh does not promise, on the one code
+ * path that decides whether the daemon opens a SECOND pull request for a branch that
+ * already has one. The ban belongs on the subcommand, not the flag; `deliver.test.ts`
+ * asserts exactly that.
+ *
+ * The URL now comes back from gh rather than being reassembled from `owner/repo`, so a
+ * GitHub Enterprise host works without a second code path.
  */
+interface GhPrListRow {
+  number?: unknown;
+  url?: unknown;
+}
+
 async function findOpenPrUrl(o: DeliverInput): Promise<string | undefined> {
-  const listArgs = ['pr', 'list', '--head', o.branch, '-R', o.ownerRepo, '--state', 'open'];
+  const listArgs = [
+    'pr',
+    'list',
+    '--head',
+    o.branch,
+    '-R',
+    o.ownerRepo,
+    '--state',
+    'open',
+    '--json',
+    'number,url',
+  ];
   const listed = await o.runCommand('gh', listArgs, { reject: false });
   if (listed.exitCode !== 0) return undefined;
 
-  const first = splitLines(listed.stdout)[0];
-  const number = first ? /^(\d+)/.exec(first)?.[1] : undefined;
-  return number ? `https://github.com/${o.ownerRepo}/pull/${number}` : undefined;
+  // gh prints `[]` for no match. Anything unparseable is treated as "no existing PR",
+  // which costs at worst a duplicate PR — the same failure the old parse had, without
+  // pretending a malformed payload is a number.
+  let rows: unknown;
+  try {
+    rows = JSON.parse(listed.stdout.trim() || '[]');
+  } catch {
+    return undefined;
+  }
+  if (!Array.isArray(rows)) return undefined;
+
+  const first = rows[0] as GhPrListRow | undefined;
+  return typeof first?.url === 'string' && first.url.length > 0 ? first.url : undefined;
 }
 
 function splitLines(s: string): string[] {

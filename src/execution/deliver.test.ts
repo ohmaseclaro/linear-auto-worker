@@ -47,7 +47,7 @@ function harness(o?: {
     calls.push({ file, args: [...args] });
     if (file === 'git' && args.includes('--name-only')) return ok(o?.files ?? 'src/a.ts\n');
     if (file === 'git' && args.includes('diff')) return ok(o?.diff ?? CLEAN_DIFF);
-    if (file === 'gh' && args[1] === 'list') return ok(o?.listStdout ?? '');
+    if (file === 'gh' && args[1] === 'list') return ok(o?.listStdout ?? '[]');
     if (file === 'gh' && args[1] === 'create') {
       // Reading it HERE is the assertion that the file existed when the command was
       // issued, not merely by the time the test looked.
@@ -176,12 +176,27 @@ test('a partial verdict still delivers, and delivers as a draft whatever the tog
   assert.ok(find(h.calls, 'gh', 'create')!.args.includes('--draft'));
 });
 
-test('no gh argv ever asks for machine-readable output — the flag does not exist (T13)', async () => {
+test('`gh pr create` never asks for machine-readable output — that flag does not exist (T13)', async () => {
   const h = harness();
   await deliver(input(h));
-  for (const call of h.calls.filter((c) => c.file === 'gh')) {
-    assert.equal(call.args.includes('--json'), false);
-  }
+  // T60: the ban is on the SUBCOMMAND, not the flag. `gh pr create --json` is an
+  // `unknown flag` error; `gh pr list --json` is supported and is what findOpenPrUrl now
+  // uses. A gate written against the flag alone forced the delivery path into an
+  // untestable text parse — a negative gate must name the subcommand it means.
+  const creates = h.calls.filter((c) => c.file === 'gh' && c.args[1] === 'create');
+  assert.equal(creates.length, 1);
+  for (const call of creates) assert.equal(call.args.includes('--json'), false);
+});
+
+test('the existing-PR lookup DOES use `gh pr list --json` (T60)', async () => {
+  const h = harness();
+  await deliver(input(h));
+  const list = h.calls.find((c) => c.file === 'gh' && c.args[1] === 'list');
+  assert.ok(list, 'gh pr list was never called');
+  assert.deepEqual(
+    list.args.slice(list.args.indexOf('--json')),
+    ['--json', 'number,url'],
+  );
 });
 
 // ------------------------------------------------------------------------ the PR URL
@@ -198,7 +213,9 @@ test('the PR URL is the last non-empty line, past a leading warning', async () =
 // --------------------------------------------------------------------- idempotency
 
 test('an existing open PR for the branch is returned and nothing is created', async () => {
-  const h = harness({ listStdout: '7\tFix the thing\tfeat/x\tOPEN\n' });
+  const h = harness({
+    listStdout: JSON.stringify([{ number: 7, url: 'https://github.com/acme/api/pull/7' }]),
+  });
   const result = await deliver(input(h));
   assert.equal(result.prUrl, 'https://github.com/acme/api/pull/7');
   assert.equal(result.alreadyExisted, true);

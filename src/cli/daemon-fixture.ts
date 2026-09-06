@@ -24,6 +24,7 @@ import { LINEAR_WEBHOOK_SIGNATURE_HEADER } from '@linear/sdk/webhooks';
 
 import { FakeLinearClient } from '../domain/fakes.js';
 import type { IssueId, LinearIssue, TunnelManager } from '../domain/ports.js';
+import { defaultRunCommand } from '../execution/execute-run.js';
 import { createSqliteStore } from '../infra/store/sqlite-store.js';
 import { openStore } from '../infra/store/db.js';
 import { KEY_SECRET } from '../ingress/registrar.js';
@@ -126,6 +127,19 @@ export async function makeWorkspace(secret: string): Promise<Workspace> {
  */
 export class RecordingLinear extends FakeLinearClient {
   readonly fetched: IssueId[] = [];
+
+  /**
+   * Seeds the bot user to `BOT_USER_ID` by default.
+   *
+   * This is not cosmetic. Since 07-04 the composition root takes the bot's identity from
+   * `viewer()` rather than from `config.json`, so a fixture whose fake viewer reports a
+   * DIFFERENT id than the one the fixture's issue is assigned to makes the router refuse
+   * every delivery — which is exactly what it should do, and exactly what the smoke caught
+   * the first time this ran.
+   */
+  constructor(seed?: { issues?: LinearIssue[]; botUser?: { id: string; name: string } }) {
+    super({ botUser: { id: BOT_USER_ID, name: 'Smoke Bot' }, ...seed });
+  }
 
   override getIssue(id: IssueId): Promise<LinearIssue> {
     this.fetched.push(id);
@@ -230,4 +244,29 @@ export async function until<T>(
     }
     await new Promise((r) => setTimeout(r, 10));
   }
+}
+
+/**
+ * A real git repository at `${dir}/repo`, matching the path `makeWorkspace` maps.
+ *
+ * Real, not a double: `prepareWorktree` shells out to `git worktree add`, and the whole
+ * point of exercising it is that no fake can tell you whether the branch was created, the
+ * HEAD is attached, or the directory landed where the containment check expects. Cheap
+ * enough — one `init` and one empty commit.
+ *
+ * Committer identity is passed per command rather than written to a config file, so this
+ * cannot pick up (or disturb) the operator's own git identity.
+ */
+export async function makeScratchRepo(dir: string, branch = 'main'): Promise<string> {
+  const repo = path.join(dir, 'repo');
+  await fs.mkdir(repo, { recursive: true });
+  const git = (...args: string[]): Promise<unknown> => defaultRunCommand('git', ['-C', repo, ...args]);
+
+  await defaultRunCommand('git', ['init', '--quiet', `--initial-branch=${branch}`, repo]);
+  await git('config', 'user.email', 'smoke@example.invalid');
+  await git('config', 'user.name', 'Smoke');
+  await fs.writeFile(path.join(repo, 'README.md'), '# scratch\n', 'utf8');
+  await git('add', 'README.md');
+  await git('commit', '--quiet', '-m', 'initial');
+  return repo;
 }

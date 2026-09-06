@@ -50,7 +50,7 @@ export type RunCommand = (
   options?: RunCommandOptions
 ) => Promise<RunCommandResult>;
 
-const defaultRunCommand: RunCommand = async (file, args, options) => {
+export const defaultRunCommand: RunCommand = async (file, args, options) => {
   const result = await execa(file, [...args], {
     cwd: options?.cwd,
     reject: options?.reject ?? true,
@@ -202,6 +202,11 @@ export async function executeRun(
       dirty: dirty.stdout.trim().length > 0,
     },
     result: agent.resultEvent,
+    // T61. Without this line a run the supervisor reaped at its deadline WITH commits in
+    // the worktree classifies `delivered`, and ships a truncated branch as a ready PR
+    // described as complete. `runAgent` has always returned it and `classifyOutcome` has
+    // always accepted it; only the argument was missing, so nothing could see the gap.
+    timedOut: agent.timedOut,
   });
   log.info(
     { verdict: classification.verdict, denialCause: classification.denialCause },

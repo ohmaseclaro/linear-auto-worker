@@ -76,6 +76,17 @@ export interface RunEngineDeps {
   log: Logger;
   /** Late-bound: questions calls back into the engine, so this breaks the cycle. */
   questions: () => Questions;
+  /**
+   * Called from `transition()` — the single writer of `runs.state` — with the run as it
+   * now is. One call site, deliberately: a notification emitted from a peer site beside
+   * the write is how a path that forgets to log gets added later, and with no dashboard
+   * the log IS the UI (05-CONTEXT D-04). The composition root owns the fan-out and the
+   * vocabulary translation; the engine knows nothing about channels.
+   *
+   * Synchronous and return-less on purpose. The notifier's own contract is that `emit`
+   * never rejects, and a transition must not be able to fail because Slack is down.
+   */
+  notify?: (run: RepoRun, detail?: string) => void;
   now?: () => number;
 }
 
@@ -121,7 +132,9 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
       store.appendRunEvent({ runId, from: run.state, to, at, detail: detail ?? null });
     });
     log.info({ runId, from: run.state, to }, 'run transitioned');
-    return { ...run, state: to, updatedAt: at };
+    const moved: RepoRun = { ...run, state: to, updatedAt: at };
+    deps.notify?.(moved, detail);
+    return moved;
   }
 
   /**
@@ -569,7 +582,12 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
       await transition(runId, 'preparing', ackCommentId ?? 'slot acquired');
       const queued = repoRun(runId);
       const wt = await worktrees.create(runId, repoOf(queued), queued.branch);
-      store.updateRun(runId, { worktreePath: wt.path, updatedAt: now() });
+      // The RESOLVED branch, not the requested one. D-11 suffixes a colliding branch name
+      // rather than resetting the existing one, so `wt.branch` and `queued.branch` differ
+      // on exactly the retries that matter. Recording only the path leaves the run row
+      // naming a ref that was never created, and `worktreeOf()` then hands the deliverer
+      // that dead name at push time.
+      store.updateRun(runId, { branch: wt.branch, worktreePath: wt.path, updatedAt: now() });
       checkpoint(runId);
       const prepared = await transition(runId, 'running', wt.path);
       // ponytail: the real brief (issue body, acceptance criteria, repo list)

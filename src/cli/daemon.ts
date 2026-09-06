@@ -1,16 +1,22 @@
 /**
  * The composition root. Every wire in the daemon is made here and nowhere else.
  *
- * ## The injection seam, and why it is exactly two ports wide
+ * ## The injection seam, and the one rule that decides what belongs in it
  *
- * `BootOptions` can override the tunnel and the Linear client. Nothing else. The rule is
- * not "make it testable" — it is: **a port is overridable only if it crosses a process or
- * network boundary this machine cannot cross offline.** ngrok needs an account and the
- * internet; Linear needs a workspace and an API key. Everything else — config loading, the
- * SQLite store, the migration, the receiver, the router, the scheduler, the run engine, the
- * question correlator, the recovery sweep — is constructed real, always, in every caller
- * including the boot smoke. A container with a slot per dependency would let the smoke boot
- * a graph of doubles and prove nothing about the graph that actually runs.
+ * **A port is overridable only if it crosses a process or network boundary this machine
+ * cannot cross in a test.** That is the whole rule, and it is not "make it testable":
+ * ngrok needs an account and the internet, Linear needs a workspace and an API key, the
+ * agent runner spawns `claude`, the deliverer pushes a ref to a remote the operator owns.
+ * Four ports meet it; `BootOptions` has four slots.
+ *
+ * Everything else — config loading, the SQLite store, the migration, the receiver, the
+ * router, the scheduler, the run engine, the question correlator, the recovery sweep, the
+ * WORKTREE MANAGER and the NOTIFIER — is constructed real, always, in every caller
+ * including the boot smoke. The worktree manager is the interesting one: `git` is local, so
+ * a test that wants a worktree creates a scratch repository rather than a double. A
+ * container with a slot per dependency would let the smoke boot a graph of doubles and
+ * prove nothing about the graph that actually runs, which is why every future plan must
+ * argue a fifth slot past the rule above rather than simply adding one.
  *
  * ## Boot order (07-CONTEXT D-01, D-02)
  *
@@ -32,30 +38,40 @@
  *
  * The scheduler is constructed and immediately **paused**, so no run can leave `queued` and
  * nothing can spawn a child process. Plan 05 owns starting it, signal handling and drain.
- * Plan 04 replaces the three execution fakes with the real worktree manager, agent runner
- * and deliverer.
  */
 import * as http from 'node:http';
 import { randomBytes } from 'node:crypto';
 
 import { loadFoundation } from '../infra/index.js';
+import { LinearClientImpl } from '../outbound/linear-client.js';
+import { Notifier, type RunEvent as NotifyEvent } from '../outbound/notify/notifier.js';
+import { SlackChannel } from '../outbound/notify/slack-channel.js';
 import { defaultRoot } from '../infra/config.js';
+import { resolveToggles } from '../domain/types.js';
 import { createSqliteStore } from '../infra/store/sqlite-store.js';
 import { asDomainStore } from '../infra/store/domain-store.js';
 import { createReceiver } from '../ingress/receiver.js';
 import { createRouter, type Router } from '../ingress/router.js';
 import { KEY_SECRET } from '../ingress/registrar.js';
 import { closeTunnel, openTunnel } from '../ingress/tunnel.js';
-import { createScheduler } from '../orchestration/scheduler.js';
+import { createScheduler, type Scheduler } from '../orchestration/scheduler.js';
 import { createQuestions, type Questions } from '../orchestration/questions.js';
 import { createRunEngine, type RunEngine } from '../orchestration/run-engine.js';
 import { recoverAtBoot } from '../orchestration/recovery.js';
-// Plan 04 replaces these three imports with the real execution layer. Until then they are
-// what makes D-01's ordering possible: the ingress seam is provable without a `claude`
-// process, a git worktree or a `gh` call.
-import { FakeAgentRunner, FakeDeliverer, FakeWorktreeManager } from '../domain/fakes.js';
+import {
+  createAgentRunner,
+  createDeliverer,
+  createWorktreeManager,
+  mappingIndex,
+} from './adapters.js';
+import type { AgentSpawn } from '../execution/supervisor.js';
+import { nonTerminalStates } from '../orchestration/recovery.js';
+import { isTerminal } from '../domain/state-machine.js';
+import type { RepoRun, RunState } from '../domain/types.js';
 import type {
+  AgentRunner,
   Config,
+  Deliverer,
   DomainEvent,
   EngineEvent,
   IngressEvent,
@@ -72,16 +88,40 @@ export interface BootOptions {
   tunnel?: TunnelManager;
   /** Crosses the network. Overridable. */
   linear?: LinearClient;
+  /** Crosses a PROCESS boundary — spawns `claude`. Overridable. */
+  agent?: AgentRunner;
+  /** Crosses the network — pushes a ref and opens a pull request. Overridable. */
+  deliverer?: Deliverer;
+  /**
+   * The `claude` spawn itself, when the default agent runner is wanted but the binary is
+   * not. Narrower than `agent`: the run-path test scripts a session while still exercising
+   * the real argv construction, env allowlist and stream routing.
+   */
+  spawn?: AgentSpawn;
 }
 
 export interface DaemonHandle {
   /** The ephemeral loopback port the receiver bound. */
   port: number;
+  /**
+   * The bot's Linear user id as the API KEY reports it, not as `config.json` claims it.
+   * Loop guard L1 compares every delivery's actor against this; an unresolved or stale
+   * value disables the guard silently rather than failing.
+   */
+  botUserId: string;
+  /** `teamId -> the id of that team's In Progress state`, resolved once, here. */
+  startedStateIds: ReadonlyMap<string, string>;
   /** The tunnel's public URL, or null if the tunnel returned none. */
   publicUrl: string;
   config: Config;
   store: Store;
   engine: RunEngine;
+  /**
+   * Paused at boot and left that way (07-CONTEXT D-01): nothing may leave `queued` here.
+   * Exposed rather than hidden because plan 05 owns starting it as part of the boot
+   * lifecycle, and the run-path test starts it to walk one run end to end.
+   */
+  scheduler: Scheduler;
   log: Logger;
   /** Plan 05 fills this in with drain + reverse-order shutdown (D-03/D-06). */
   shutdown(): Promise<void>;
@@ -156,27 +196,208 @@ function isIngressEvent(e: DomainEvent): e is IngressEvent {
   );
 }
 
+/**
+ * The bot's own user id, from the key that will do the writing.
+ *
+ * Taken from `viewer()` rather than from `config.botUserId` because the config value is
+ * whatever the wizard wrote once, and the key is what actually authenticates today. A
+ * disagreement between them means the operator swapped `LINEAR_API_KEY` without re-running
+ * setup: loop guard L1 would then compare every actor against an id the bot no longer has,
+ * and the daemon's own first comment would come back in as a human event and start a loop.
+ * That is why an empty id is fatal here rather than warned about downstream.
+ */
+async function resolveBotUserId(
+  linear: LinearClient,
+  config: Config,
+  log: Logger,
+): Promise<string> {
+  const me = await linear.viewer();
+  if (!me.id) {
+    throw new Error(
+      'bootDaemon: Linear viewer() returned no user id. Loop guard L1 compares every ' +
+        'delivery actor against it, so binding ingress without it would let the bot ' +
+        "answer its own comments. Check LINEAR_API_KEY in the config root's .env.",
+    );
+  }
+  if (config.botUserId && config.botUserId !== me.id) {
+    log.warn(
+      { configured: config.botUserId, authenticated: me.id },
+      'config.botUserId disagrees with the authenticated user; using the authenticated one',
+    );
+  }
+  return me.id;
+}
+
+/**
+ * Every configured team's In Progress state, resolved by TYPE and cached before ingress
+ * binds (05-CONTEXT D-06 / INTK-04).
+ *
+ * Never by name — teams rename "In Progress" to "Doing" freely — and never a hardcoded id,
+ * because state ids are per-team. Doing it here rather than on the first ticket means a
+ * team with no `started` state fails `law start` with the team named, instead of failing
+ * the acknowledgement of the first real run thirty seconds in.
+ */
+async function resolveStartedStates(
+  linear: LinearClient,
+  config: Config,
+  log: Logger,
+): Promise<ReadonlyMap<string, string>> {
+  const teamIds = new Set<string>();
+  if (config.teamId) teamIds.add(config.teamId);
+  for (const mapping of Object.values(config.mappings)) {
+    if (mapping.linearTeamId) teamIds.add(mapping.linearTeamId);
+  }
+
+  const resolved = new Map<string, string>();
+  for (const teamId of teamIds) {
+    const stateId = await linear.resolveWorkflowStateId(teamId, 'started');
+    if (!stateId) {
+      throw new Error(
+        `bootDaemon: Linear team ${teamId} resolved no "started" workflow state. Every ` +
+          `run moves its ticket to In Progress at pickup, so this would fail every run.`,
+      );
+    }
+    resolved.set(teamId, stateId);
+  }
+  log.info({ teams: resolved.size }, 'resolved the In Progress state for every mapped team');
+  return resolved;
+}
+
+/**
+ * The fan-out, built here and reached ONLY through the run engine.
+ *
+ * ## Why the Linear comment channel is not in this array
+ *
+ * 05-CONTEXT lists three channels and this constructs two. That is a deliberate deviation,
+ * not an omission: the run engine already posts every Linear comment this product makes,
+ * and it posts them with things `LinearCommentChannel` structurally cannot do — the
+ * acknowledgement is EDITED in place as the queue moves (D-10 / INTK-06), a question is a
+ * threaded reply whose comment id is stored for tier-1 answer correlation, and a
+ * multi-repo ticket gets one rollup instead of one comment per child (D-12 / DELV-07).
+ * `LinearCommentChannel.enabled()` gates on the mapping toggle alone and fires on every
+ * kind, so adding it here would post a SECOND, poorer comment for every milestone on every
+ * ticket — the wall of bot noise D-10 exists to prevent.
+ *
+ * The right resolution is to move the engine's four comment sites onto the channel, which
+ * is a Phase 5/6 redesign and not a wiring change. Recorded in WINDOWS.md.
+ *
+ * ## What is NOT deviated from
+ *
+ * The log channel. `Notifier` constructs its own and emits to it first, unretried and
+ * ungated; there is no argument that removes it (05-CONTEXT D-04 / NOTF-01). That is the
+ * half of the fan-out that matters most here, because it is the half the engine does not
+ * already do.
+ */
+function createDaemonNotifier(o: {
+  config: Config;
+  index: ReadonlyMap<string, string>;
+  log: Logger;
+}): Notifier {
+  const logFn = (fields: Record<string, unknown>, msg: string): void => o.log.info(fields, msg);
+  return new Notifier({
+    log: logFn,
+    channels: [
+      new SlackChannel({
+        // Per-mapping (Phase 1 D-09): a mapping with `notifySlack` off, or with no webhook
+        // configured, returns undefined and the channel gates itself out.
+        webhookUrl: (mappingId: string) => {
+          const mapping = o.config.mappings[mappingId];
+          if (!mapping) return undefined;
+          return resolveToggles(o.config.defaults, mapping).notifySlack
+            ? mapping.slackWebhookUrl
+            : undefined;
+        },
+        log: logFn,
+      }),
+    ],
+  });
+}
+
+/**
+ * `(RepoRun, RunState)` → the notifier's own vocabulary.
+ *
+ * The two sets do not line up and this is where that is admitted. Four of the nine states
+ * are terminal and collapse to one kind; `delivering` reports nothing, because a run that
+ * has begun pushing has not yet done anything a human needs told; and `worktree_ready` has
+ * no state of its own, since the engine transitions straight to `running` once the worktree
+ * exists — one event per transition beats two events for one write.
+ */
+const NOTIFY_KIND: Partial<Record<RunState, 'picked_up' | 'agent_started' | 'question_asked'>> = {
+  preparing: 'picked_up',
+  running: 'agent_started',
+  awaiting_answer: 'question_asked',
+};
+
+function toNotifyEvent(
+  run: RepoRun,
+  detail: string | undefined,
+  index: ReadonlyMap<string, string>,
+): NotifyEvent | null {
+  const base = {
+    runId: run.id,
+    issueId: run.issueId,
+    issueIdentifier: run.issueKey,
+    issueUrl: run.issueUrl,
+    mappingId: index.get(run.repoSlug) ?? '',
+    at: run.updatedAt,
+  };
+
+  if (isTerminal(run.state)) {
+    return {
+      ...base,
+      kind: 'terminal',
+      // The four terminal RunStates ARE the four TerminalRunStates, in the same spelling.
+      state: run.state as 'delivered' | 'partial' | 'failed' | 'cancelled',
+      // ponytail: zero, and honestly so — there is no cost or token column on `runs`, and
+      // inventing one here would be a schema change wearing a wiring change's clothes.
+      // Ceiling: Slack and the log report `$0.0000` on every run until the run row carries
+      // what `classifyOutcome` already computes. Recorded in WINDOWS.md.
+      costUsd: 0,
+      tokensUsed: 0,
+      ...(run.prUrl ? { prUrl: run.prUrl } : {}),
+      ...(run.failureReason ?? detail ? { reason: run.failureReason ?? detail } : {}),
+    };
+  }
+
+  const kind = NOTIFY_KIND[run.state];
+  if (!kind) return null;
+  if (kind === 'question_asked') {
+    return { ...base, kind, question: detail ?? 'a question is waiting on the ticket' };
+  }
+  return { ...base, kind };
+}
+
 export async function bootDaemon(opts: BootOptions = {}): Promise<DaemonHandle> {
   const root = opts.configDir ?? defaultRoot();
 
   // ── 1. config, secrets, logger, migrated database ──────────────────────────
-  const { config, logger, db } = loadFoundation(root);
+  const { config, secrets, logger, db } = loadFoundation(root);
   const log = logger.child({ component: 'daemon' });
 
   // ── 2. the store ───────────────────────────────────────────────────────────
   const store = asDomainStore(createSqliteStore(db));
 
-  // 07-04 owns the outbound facade seam: `outbound/linear-client.ts` declares its own
-  // `LinearClient` that does not match the port (three unimplemented methods, a different
-  // `setIssueState` arity). Failing loudly here beats booting a daemon that cannot talk to
-  // Linear and reports healthy.
-  const linear = opts.linear;
-  if (!linear) {
-    throw new Error(
-      'bootDaemon: no LinearClient. The real outbound facade does not yet satisfy the ' +
-        'domain port — 07-04 owns that seam. Pass `opts.linear` until it lands.',
-    );
-  }
+  // The seam 07-03 left throwing is closed: `LinearClientImpl` now `implements` the domain
+  // port rather than declaring a rival of it, so the five divergences 07-02 listed are
+  // compile errors if any of them comes back.
+  //
+  // The `log` argument is hard deliverable #4 and not optional in practice: it defaults to
+  // a no-op, and with a no-op every `linear.ratelimited` and every complexity-budget line
+  // is silently dropped. With no dashboard the log IS the UI (D-04).
+  const linear =
+    opts.linear ??
+    new LinearClientImpl({
+      apiKey: secrets.linearApiKey,
+      log: (fields, msg) => log.info(fields, msg),
+    });
+
+  // ── 2b. the two identities the rest of boot assumes are already resolved ───
+  // Both go through the substitutable client, so the smoke exercises this path offline
+  // against its seeded fake. Both are wrong to do per-event: the viewer id never changes
+  // within a process, and a per-event workflow-state lookup is a Linear round-trip on the
+  // acknowledgement's 10-second budget.
+  const botUserId = await resolveBotUserId(linear, config, log);
+  const startedStateIds = await resolveStartedStates(linear, config, log);
 
   const scheduler = createScheduler({ config, log });
   // D-01: no run may leave `queued` in this plan, and nothing may spawn a child process.
@@ -186,16 +407,43 @@ export async function bootDaemon(opts: BootOptions = {}): Promise<DaemonHandle> 
   // Late binding: questions calls back into the engine and the engine calls into
   // questions. The thunk is the port's own answer to that cycle.
   let questions: Questions;
+  // The repoSlug -> mapping-key index the toggles, the deliverer and the notifier all
+  // read. One pass over config, at boot, instead of a Linear round-trip per lookup.
+  const index = mappingIndex(config);
+  const adapterDeps = { store, config, log, index };
+
+  const worktrees = createWorktreeManager(adapterDeps);
+  const agent = opts.agent ?? createAgentRunner({ ...adapterDeps, spawn: opts.spawn });
+  const deliverer = opts.deliverer ?? createDeliverer(adapterDeps);
+
+  // P5, closed. `event-router.ts` has routed `task_summary` / `post_turn_summary` into a
+  // progress callback since Phase 4, but nothing threaded it out of the supervisor, so a
+  // 40-minute run said nothing between its acknowledgement and its terminal comment and
+  // read as hung. It goes to the log and not to a Linear comment on purpose: 05-CONTEXT
+  // D-01 caps the ticket at 4-6 milestone comments, and every comment the bot posts is an
+  // event the four ingress loop guards then have to drop.
+  agent.onProgress((runId, line) => log.info({ runId, progress: line }, 'agent progress'));
+
+  const notifier = createDaemonNotifier({ config, index, log });
+
   const engine = createRunEngine({
     store,
     scheduler,
     linear,
     config,
     log,
-    // ponytail: fakes, on purpose (D-01). Plan 04 swaps in the real three.
-    agent: new FakeAgentRunner(),
-    worktrees: new FakeWorktreeManager(config.worktreeRoot),
-    deliverer: new FakeDeliverer(),
+    agent,
+    worktrees,
+    deliverer,
+    // The ONE notification site. `transition()` is the only writer of `runs.state`, so
+    // hanging the fan-out off it makes "every transition is reported" structural rather
+    // than a convention every future edit has to remember.
+    notify: (run, detail) => {
+      const event = toNotifyEvent(run, detail, index);
+      // `emit` never rejects by contract, which is what makes a bare `void` safe here and
+      // is why a transition cannot fail because Slack is down.
+      if (event) void notifier.emit(event);
+    },
     questions: () => questions,
   });
   questions = createQuestions({ store, engine, config, linear, log });
@@ -203,6 +451,19 @@ export async function bootDaemon(opts: BootOptions = {}): Promise<DaemonHandle> 
   // ── 3. recovery sweep, BEFORE anything can deliver ─────────────────────────
   // `recoverAtBoot` logs its own report; a second line here would only duplicate it.
   await recoverAtBoot({ store, engine, scheduler, questions, linear, config, log });
+
+  // ── 3b. stale worktree collection, AFTER the sweep (04-CONTEXT D-11) ───────
+  // Order is the point: recovery is what decides which runs are still alive. Collecting
+  // first would prune the worktree of a run recovery was about to requeue, and the requeued
+  // run would then resume into a directory that no longer exists.
+  const live = new Set(store.listByState(...nonTerminalStates()).map((r) => r.id));
+  const pruned = await worktrees.gc(live).catch((err: unknown) => {
+    // Never fatal. A daemon that refuses to boot because a mapped clone moved is worse
+    // than one carrying a few orphaned directories it will report again next boot.
+    log.warn({ err: String(err) }, 'stale worktree collection failed; continuing');
+    return [] as string[];
+  });
+  if (pruned.length > 0) log.info({ pruned }, 'pruned worktrees with no non-terminal run');
 
   // The signing secret is OURS (HOOK-03 / 03-02 D-03): generated locally, persisted to kv
   // before any remote call, and never read back from Linear. Generating-and-persisting here
@@ -221,7 +482,7 @@ export async function bootDaemon(opts: BootOptions = {}): Promise<DaemonHandle> 
   const toEngineEvent = createIngressMapper({ store, linear });
   const router: Router = createRouter({
     log,
-    botUserId: config.botUserId,
+    botUserId,
     // The router asks Linear for the canonical issue; the port speaks `assigneeId`, the
     // router wants an `assignee` object. This projection is that seam and nothing more.
     client: {
@@ -247,7 +508,7 @@ export async function bootDaemon(opts: BootOptions = {}): Promise<DaemonHandle> 
 
   // ── 4. bind the loopback socket ────────────────────────────────────────────
   const server = http.createServer(
-    createReceiver({ secret, store, log, botUserId: config.botUserId, router }),
+    createReceiver({ secret, store, log, botUserId, router }),
   );
   const port = await new Promise<number>((resolve, reject) => {
     server.once('error', reject);
@@ -269,10 +530,13 @@ export async function bootDaemon(opts: BootOptions = {}): Promise<DaemonHandle> 
 
   return {
     port,
+    botUserId,
+    startedStateIds,
     publicUrl,
     config,
     store,
     engine,
+    scheduler,
     log,
     async shutdown(): Promise<void> {
       // Reverse boot order (D-03). Plan 05 adds child-process kill and the in-flight

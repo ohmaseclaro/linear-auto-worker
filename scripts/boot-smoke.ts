@@ -63,6 +63,25 @@ async function main(): Promise<void> {
 
     daemon = await bootDaemon({ configDir: workspace.dir, linear, tunnel });
 
+    // The two boot resolutions, asserted BEFORE anything about ingress — the daemon has
+    // already bound and already registered by the time the handle comes back, so a bot id
+    // that resolved empty would have disabled loop guard L1 by now. What this can still
+    // prove is that the resolution HAPPENED and produced a real value, and the daemon
+    // throws rather than continuing if either did not.
+    check(
+      daemon.botUserId === BOT_USER_ID,
+      `the bot user id was resolved from viewer(), not from config (got ${daemon.botUserId})`,
+    );
+    check(
+      daemon.startedStateIds.size > 0 &&
+        [...daemon.startedStateIds.values()].every((id) => id.length > 0),
+      `the In Progress state resolved for every mapped team (${daemon.startedStateIds.size} team(s))`,
+    );
+    check(
+      linear.stateLookups.every((l) => l.stateType === 'started'),
+      'the state was resolved by TYPE, never by name (05-CONTEXT D-06)',
+    );
+
     check(tunnel.probes.length === 1, 'the tunnel opened exactly once');
     check(
       tunnel.probes[0] === daemon.port,
