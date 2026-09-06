@@ -50,6 +50,31 @@ export interface RunEngine {
   isCancelRequested(runId: RunId): boolean;
   /** D-10: re-edit the queue-position comment of every still-queued run. */
   refreshQueuePositions(): Promise<void>;
+  /**
+   * Post the terminal comment for an ALREADY-terminal run, guarded so it happens once.
+   *
+   * T50 / R24. The driver calls this from its `finally`, which covers every run this
+   * process drove — and covers nothing else. A run failed by BOOT RECOVERY has no driver
+   * by construction (its driver died with the previous process), so before this was on
+   * the interface a recovered run was correctly `failed` in the database and in
+   * `run_events` while the ticket sat In Progress with no explanation on it. That is the
+   * exact silence 06-CONTEXT D-08 exists to forbid, and `recovery.ts` now calls this.
+   *
+   * Safe to call on a non-terminal run: it returns without writing.
+   */
+  announceTerminal(runId: RunId): Promise<void>;
+  /**
+   * Stop driving. Aborts every live child — which reaps its process GROUP through the
+   * supervisor's escalation — and tells every driver to stop writing run state.
+   *
+   * The second half is what makes a clean shutdown lossless (07-CONTEXT D-06). Without
+   * it, aborting a live child makes `agent.run` return `cancelled`, the driver
+   * transitions the run to `cancelled` (terminal) and posts a terminal comment to the
+   * ticket — so Ctrl-C would silently abandon every in-flight run and say so in Linear.
+   * With it, the driver unwinds without touching the run, and the daemon's shutdown is
+   * free to requeue what is safely requeueable.
+   */
+  stop(): Promise<void>;
   /** Resolves once every run this engine is driving has settled. */
   settle(): Promise<void>;
 }
@@ -97,6 +122,12 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
   /** Live child handles, keyed by run. Plan 02's cancel path reaches in here. */
   const aborts = new Map<RunId, AbortController>();
   const inFlight = new Set<Promise<void>>();
+  /**
+   * Set by `stop()` and never cleared: this engine is finished for the life of the
+   * process. Every driver checks it before writing run state, so a child reaped by
+   * shutdown unwinds silently instead of being reported as a cancellation.
+   */
+  let stopping = false;
 
   function track(p: Promise<void>): void {
     const wrapped = p.catch((err) => log.error({ err: String(err) }, 'run driver threw'));
@@ -484,6 +515,12 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
   }
 
   async function dispatch(runId: RunId, result: AgentResult, release: () => void): Promise<void> {
+    // The daemon is shutting down and this child was reaped by `stop()`, not by the
+    // operator. Writing anything here would turn a lossless stop into an abandoned run.
+    if (stopping) {
+      release();
+      return;
+    }
     switch (result.status) {
       case 'needs_input': {
         // The ordering that matters. Releasing after the write leaves a window
@@ -597,15 +634,21 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
       checkpoint(runId);
       await dispatch(runId, result, release);
     } catch (err) {
+      // `stopping` first: a shutdown abort surfaces here as an ordinary throw from the
+      // agent, and classifying it would write a failure diagnosis for a run the operator
+      // never failed.
+      if (stopping) return;
       if (err instanceof CancelledSignal) await finishCancel(runId, 'cancel requested');
       else await fail(runId, classify(err), err);
     } finally {
       aborts.delete(runId);
       release();
-      await announceTerminal(runId);
-      // The release above admitted the next waiter, so everyone behind it moved
-      // up. Edit their comments; do not post new ones.
-      await refreshQueuePositions();
+      if (!stopping) {
+        await announceTerminal(runId);
+        // The release above admitted the next waiter, so everyone behind it moved
+        // up. Edit their comments; do not post new ones.
+        await refreshQueuePositions();
+      }
     }
   }
 
@@ -631,13 +674,16 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
       checkpoint(runId);
       await dispatch(runId, result, release);
     } catch (err) {
+      if (stopping) return;
       if (err instanceof CancelledSignal) await finishCancel(runId, 'cancel requested');
       else await fail(runId, classify(err), err);
     } finally {
       aborts.delete(runId);
       release();
-      await announceTerminal(runId);
-      await refreshQueuePositions();
+      if (!stopping) {
+        await announceTerminal(runId);
+        await refreshQueuePositions();
+      }
     }
   }
 
@@ -646,6 +692,23 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
     refreshQueuePositions,
     cancel,
     isCancelRequested,
+    announceTerminal,
+
+    /**
+     * OPS-05 step 2. Aborting is what reaps the child's process GROUP: the supervisor
+     * listens on this signal and runs the negated-pid escalation (SIGINT -> SIGTERM ->
+     * SIGKILL, liveness checked between steps). Signalling the leader alone would orphan
+     * the agent's own Bash subprocesses and leave the supervisor's promise permanently
+     * pending, which is T29 measured rather than assumed.
+     */
+    async stop(): Promise<void> {
+      stopping = true;
+      for (const ac of aborts.values()) ac.abort();
+      // Not awaited here: the caller bounds the wait, because a group that needs the full
+      // SIGINT+SIGTERM ladder takes 25 seconds and an operator pressing Ctrl-C twice must
+      // not be made to wait it out.
+      await Promise.resolve();
+    },
 
     async handle(event: EngineEvent): Promise<void> {
       switch (event.kind) {
