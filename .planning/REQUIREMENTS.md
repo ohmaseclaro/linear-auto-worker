@@ -26,7 +26,7 @@
 
 ### Webhook Plumbing
 
-- [ ] **HOOK-01**: HTTP server is bound and serving before the tunnel opens, so no delivery ever hits a live URL backed by nothing
+- [x] **HOOK-01**: HTTP server is bound and serving before the tunnel opens, so no delivery ever hits a live URL backed by nothing
 - [ ] **HOOK-02**: Worker reconciles the Linear webhook at every boot by updating the existing registration's URL rather than creating a new one, so restarts never accumulate duplicate webhooks
 - [ ] **HOOK-03**: Webhook signing secret is generated locally and persisted before registration, then supplied to Linear rather than read back from the API
 - [ ] **HOOK-04**: Every inbound delivery has its HMAC verified against the raw request body before any JSON parsing; invalid signatures are rejected without side effects
@@ -98,7 +98,7 @@
 - [x] **OPS-02**: The SQLite store runs in WAL mode with a busy timeout and does not block the event loop under concurrent runs
 - [ ] **OPS-03**: Linear rate limiting is detected by its error extension code rather than an HTTP status, and backed off according to the reset header
 - [ ] **OPS-04**: A failed run is attempted once — failure posts a diagnosis with the error and log path, and leaves the branch and worktree for the operator, rather than retrying
-- [ ] **OPS-05**: The worker shuts down cleanly on interrupt and terminate — killing spawned children, closing the tunnel, and marking in-flight runs
+- [x] **OPS-05**: The worker shuts down cleanly on interrupt and terminate — killing spawned children, closing the tunnel, and marking in-flight runs
 
 ### Configuration
 
@@ -158,7 +158,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | TUN-01 | Phase 3 — Ingress | Pending |
 | TUN-02 | Phase 3 — Ingress | Pending |
 | TUN-03 | Phase 3 — Ingress | Pending |
-| HOOK-01 | Phase 7 — Integration & Daemon Lifecycle | Pending |
+| HOOK-01 | Phase 7 — Integration & Daemon Lifecycle | Complete |
 | HOOK-02 | Phase 3 — Ingress | Pending |
 | HOOK-03 | Phase 3 — Ingress | Pending |
 | HOOK-04 | Phase 3 — Ingress | Pending |
@@ -212,7 +212,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | OPS-02 | Phase 2 — Foundation | Complete |
 | OPS-03 | Phase 5 — Outbound | Pending |
 | OPS-04 | Phase 6 — Orchestration | Pending |
-| OPS-05 | Phase 7 — Integration & Daemon Lifecycle | Pending |
+| OPS-05 | Phase 7 — Integration & Daemon Lifecycle | Complete |
 | CONF-01 | Phase 1 — Domain Contract, State Machine & Schema | Pending |
 | CONF-02 | Phase 1 — Domain Contract, State Machine & Schema | Pending |
 

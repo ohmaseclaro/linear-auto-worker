@@ -11,7 +11,7 @@
  * instruction to "use the closest reasonable name and record the exact addition wanted" —
  * see this plan's SUMMARY under "Contract additions requested".
  */
-import { checkbox, confirm, input, select } from '@inquirer/prompts';
+import { realPrompts, type WizardPrompts } from './deps.js';
 import type { LinearClient } from '@linear/sdk';
 
 import type { DiscoveredRepo } from './repo-discovery.js';
@@ -155,11 +155,14 @@ export type ToggleOverrides = Partial<Record<ToggleName, boolean | string | numb
 
 const NO_PROJECT_VALUE = '__no_project__';
 
-async function promptMappingKey(candidates: {
-  teams: TeamCandidate[];
-  projects: ProjectCandidate[];
-}): Promise<MappingKey> {
-  const projectChoice = await select({
+async function promptMappingKey(
+  candidates: {
+    teams: TeamCandidate[];
+    projects: ProjectCandidate[];
+  },
+  p: WizardPrompts,
+): Promise<MappingKey> {
+  const projectChoice = await p.select({
     message: 'Which Linear project should this mapping key off?',
     choices: [
       ...candidates.projects.map((p) => ({ name: p.name, value: p.id })),
@@ -173,7 +176,7 @@ async function promptMappingKey(candidates: {
     return { kind: 'project', id: project.id, name: project.name };
   }
 
-  const teamId = await select({
+  const teamId = await p.select({
     message: 'Which Linear team should this mapping key off?',
     choices: candidates.teams.map((t) => ({ name: t.name, value: t.id })),
   });
@@ -196,8 +199,11 @@ function printRepoTrustDisclosure(repoPath: string): void {
   );
 }
 
-async function promptRepoSelection(discovered: DiscoveredRepo[]): Promise<string[]> {
-  const selected = await checkbox({
+async function promptRepoSelection(
+  discovered: DiscoveredRepo[],
+  p: WizardPrompts,
+): Promise<string[]> {
+  const selected = await p.checkbox({
     message: 'Which local repos attach to this mapping?',
     choices: discovered.map((r) => ({ name: `${r.name} (${r.path})`, value: r.path })),
   });
@@ -225,14 +231,14 @@ const TOGGLE_SPECS: Record<ToggleName, ToggleSpec> = {
   maxRunTimeMs: { message: 'Max run time override (ms):', kind: 'number' },
 };
 
-async function promptToggleOverrides(): Promise<ToggleOverrides | undefined> {
-  const wantsOverrides = await confirm({
+async function promptToggleOverrides(p: WizardPrompts): Promise<ToggleOverrides | undefined> {
+  const wantsOverrides = await p.confirm({
     message: 'Override any default behavior for this mapping?',
     default: false,
   });
   if (!wantsOverrides) return undefined;
 
-  const chosen = await checkbox({
+  const chosen = await p.checkbox({
     message: 'Which toggles should this mapping override?',
     choices: TOGGLE_NAMES.map((name) => ({ name, value: name })),
   });
@@ -242,12 +248,12 @@ async function promptToggleOverrides(): Promise<ToggleOverrides | undefined> {
   for (const name of chosen) {
     const spec = TOGGLE_SPECS[name];
     if (spec.kind === 'boolean') {
-      toggles[name] = await confirm({ message: spec.message });
+      toggles[name] = await p.confirm({ message: spec.message });
     } else if (spec.kind === 'number') {
-      const raw = await input({ message: spec.message });
+      const raw = await p.input({ message: spec.message });
       toggles[name] = Number(raw);
     } else {
-      toggles[name] = await input({ message: spec.message });
+      toggles[name] = await p.input({ message: spec.message });
     }
   }
   return toggles;
@@ -259,15 +265,15 @@ async function promptToggleOverrides(): Promise<ToggleOverrides | undefined> {
  * re-run "edit Slack/toggles" path call the same prompt sequence (D-04's edit-in-place has
  * to share code with fresh-add, or the two paths silently drift apart).
  */
-async function promptSlackAndToggles(): Promise<{
+async function promptSlackAndToggles(p: WizardPrompts): Promise<{
   slackWebhookUrl?: string;
   toggles?: ToggleOverrides;
 }> {
   const rawSlack = (
-    await input({ message: 'Slack incoming-webhook URL (optional):' })
+    await p.input({ message: 'Slack incoming-webhook URL (optional):' })
   ).trim();
   const slackWebhookUrl = rawSlack || undefined;
-  const toggles = await promptToggleOverrides();
+  const toggles = await promptToggleOverrides(p);
   return { slackWebhookUrl, toggles };
 }
 
@@ -276,10 +282,11 @@ async function promptSlackAndToggles(): Promise<{
 async function promptOneMapping(
   candidates: { teams: TeamCandidate[]; projects: ProjectCandidate[] },
   discovered: DiscoveredRepo[],
+  p: WizardPrompts,
 ): Promise<Mapping> {
-  const key = await promptMappingKey(candidates);
-  const repos = await promptRepoSelection(discovered);
-  const { slackWebhookUrl, toggles } = await promptSlackAndToggles();
+  const key = await promptMappingKey(candidates, p);
+  const repos = await promptRepoSelection(discovered, p);
+  const { slackWebhookUrl, toggles } = await promptSlackAndToggles(p);
   return { key, repos, slackWebhookUrl, toggles };
 }
 
@@ -317,9 +324,10 @@ type ExistingMappingAction = 'keep' | 'edit-repos' | 'edit-slack' | 'remove';
 async function reviewExistingMapping(
   mapping: Mapping,
   discovered: DiscoveredRepo[],
+  p: WizardPrompts,
 ): Promise<Mapping | null> {
   printExistingMapping(mapping);
-  const action = await select<ExistingMappingAction>({
+  const action = await p.select<ExistingMappingAction>({
     message: `What should happen to the "${mapping.key.name}" mapping?`,
     choices: [
       { name: 'keep as-is', value: 'keep' },
@@ -332,11 +340,11 @@ async function reviewExistingMapping(
   if (action === 'keep') return mapping;
   if (action === 'remove') return null;
   if (action === 'edit-repos') {
-    const repos = await promptRepoSelection(discovered);
+    const repos = await promptRepoSelection(discovered, p);
     return { ...mapping, repos };
   }
   // 'edit-slack'
-  const { slackWebhookUrl, toggles } = await promptSlackAndToggles();
+  const { slackWebhookUrl, toggles } = await promptSlackAndToggles(p);
   return { ...mapping, slackWebhookUrl, toggles };
 }
 
@@ -359,23 +367,24 @@ export async function buildMappings(
   linearClient: LinearClient,
   discovered: DiscoveredRepo[],
   existing?: Mapping[],
+  p: WizardPrompts = realPrompts,
 ): Promise<Mapping[]> {
   const candidates = await listMappingCandidates(linearClient);
   const result: Mapping[] = [];
 
   if (existing && existing.length > 0) {
     for (const mapping of existing) {
-      const outcome = await reviewExistingMapping(mapping, discovered);
+      const outcome = await reviewExistingMapping(mapping, discovered, p);
       if (outcome) result.push(outcome);
     }
   } else {
-    result.push(await promptOneMapping(candidates, discovered));
+    result.push(await promptOneMapping(candidates, discovered, p));
   }
 
-  let addMore = await confirm({ message: 'Add another mapping?', default: false });
+  let addMore = await p.confirm({ message: 'Add another mapping?', default: false });
   while (addMore) {
-    result.push(await promptOneMapping(candidates, discovered));
-    addMore = await confirm({ message: 'Add another mapping?', default: false });
+    result.push(await promptOneMapping(candidates, discovered, p));
+    addMore = await p.confirm({ message: 'Add another mapping?', default: false });
   }
 
   return result;

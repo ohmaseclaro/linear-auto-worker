@@ -48,7 +48,16 @@ export type AgentSpawn = (
  */
 export type KillGroup = (pid: number, signal: NodeJS.Signals) => void;
 
-/** Liveness, injected. Checked BETWEEN escalation steps — never assumed (T29). */
+/**
+ * Liveness, injected. Checked BETWEEN escalation steps — never assumed (T29).
+ *
+ * Like `KillGroup`, the `pid` handed here is ALREADY NEGATED: the question the escalation
+ * has to ask is "is anything in the GROUP still alive", not "is the leader still alive".
+ * `process.kill(-pgid, 0)` answers the first; `process.kill(pid, 0)` answers the second and
+ * is the bug 07-06 found — `sh -c 'sleep 600 & sleep 600'` is POSIX-required to make the
+ * BACKGROUND job ignore SIGINT, so the leader dies to SIGINT, the leader-only check reports
+ * "gone", the ladder stops, and the grandchild outlives the daemon holding its stdout pipe.
+ */
 export type IsAlive = (pid: number) => boolean;
 
 export type Sleep = (ms: number) => Promise<void>;
@@ -209,7 +218,10 @@ async function escalate(
     await deps.sleep(graceMs);
     // Checked, never assumed. Skipping this is what turns "SIGINT was enough" from a
     // measurement into a hope.
-    if (!deps.isAlive(pid)) break;
+    // NEGATED, like the kill above: a SIGINT-ignoring background grandchild keeps the
+    // GROUP alive while the leader is already reaped, and that is precisely the case the
+    // escalation exists for.
+    if (!deps.isAlive(-pid)) break;
   }
   return last;
 }

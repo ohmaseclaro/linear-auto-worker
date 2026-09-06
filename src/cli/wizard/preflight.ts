@@ -1,4 +1,4 @@
-import { execa } from 'execa';
+import { defaultRunCommand, type RunCommand } from './deps.js';
 import { access, constants } from 'node:fs/promises';
 import { homedir, totalmem } from 'node:os';
 import { join } from 'node:path';
@@ -65,12 +65,12 @@ export function checkNodeVersion(): PreflightResult {
 }
 
 /** git config user.name and user.email must both resolve non-empty. */
-export async function checkGitIdentity(): Promise<PreflightResult> {
+export async function checkGitIdentity(run: RunCommand = defaultRunCommand): Promise<PreflightResult> {
   const name = 'Git identity';
   try {
     const [nameResult, emailResult] = await Promise.all([
-      execa('git', ['config', 'user.name']),
-      execa('git', ['config', 'user.email']),
+      run('git', ['config', 'user.name']),
+      run('git', ['config', 'user.email']),
     ]);
     const userName = nameResult.stdout?.trim();
     const userEmail = emailResult.stdout?.trim();
@@ -99,10 +99,10 @@ export async function checkGitIdentity(): Promise<PreflightResult> {
  * rejected. Missing scope downgrades to warn, not fail, since it's not required
  * for most repos.
  */
-export async function checkGhAuth(): Promise<PreflightResult> {
+export async function checkGhAuth(run: RunCommand = defaultRunCommand): Promise<PreflightResult> {
   const name = 'GitHub CLI auth';
   try {
-    const result = await execa('gh', ['auth', 'status']);
+    const result = await run('gh', ['auth', 'status']);
     const output = `${result.stdout ?? ''}\n${result.stderr ?? ''}`;
     const scopesMatch = output.match(/Token scopes:\s*(.+)/i);
     if (scopesMatch && !scopesMatch[1].includes('workflow')) {
@@ -135,10 +135,10 @@ export async function checkGhAuth(): Promise<PreflightResult> {
 }
 
 /** `claude --version` must resolve on PATH. */
-export async function checkClaudeOnPath(): Promise<PreflightResult> {
+export async function checkClaudeOnPath(run: RunCommand = defaultRunCommand): Promise<PreflightResult> {
   const name = 'Claude CLI';
   try {
-    const result = await execa('claude', ['--version']);
+    const result = await run('claude', ['--version']);
     return { name, status: 'pass', detail: (result.stdout ?? '').trim() };
   } catch {
     return {
@@ -175,14 +175,14 @@ export async function checkGsdInstall(): Promise<PreflightResult> {
  * concurrency suggestion from total RAM and flags a low open-file ulimit
  * without changing status.
  */
-export async function checkResourceHeadroom(): Promise<PreflightResult> {
+export async function checkResourceHeadroom(run: RunCommand = defaultRunCommand): Promise<PreflightResult> {
   const name = 'Resource headroom';
   const totalRamGiB = totalmem() / 1024 ** 3;
   const suggestedConcurrency = Math.max(1, Math.min(3, Math.floor(totalRamGiB / 4)));
 
   let ulimitN = Number.POSITIVE_INFINITY;
   try {
-    const result = await execa('sh', ['-c', 'ulimit -n']);
+    const result = await run('sh', ['-c', 'ulimit -n']);
     const parsed = Number.parseInt((result.stdout ?? '').trim(), 10);
     if (Number.isFinite(parsed)) ulimitN = parsed;
   } catch {
@@ -203,13 +203,13 @@ export async function checkResourceHeadroom(): Promise<PreflightResult> {
   return { name, status: 'pass', detail };
 }
 
-export async function runPreflight(): Promise<PreflightResult[]> {
+export async function runPreflight(run: RunCommand = defaultRunCommand): Promise<PreflightResult[]> {
   return [
     checkNodeVersion(),
-    await checkGitIdentity(),
-    await checkGhAuth(),
-    await checkClaudeOnPath(),
+    await checkGitIdentity(run),
+    await checkGhAuth(run),
+    await checkClaudeOnPath(run),
     await checkGsdInstall(),
-    await checkResourceHeadroom(),
+    await checkResourceHeadroom(run),
   ];
 }

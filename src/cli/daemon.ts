@@ -772,7 +772,11 @@ export async function bootDaemon(opts: BootOptions = {}): Promise<DaemonHandle> 
    * arriving behind a SIGINT, a test asserting it — awaits the first rather than
    * re-signalling a process group whose pid may since have been reused by the OS.
    */
-  async function shutdown(reason: string): Promise<void> {
+  // NOT `async`. An async function wraps its return value in a FRESH promise, so
+  // `shutdown('a') === shutdown('b')` would be false and the memo would be invisible from
+  // the outside even though only one shutdown body ever runs. The work is already an IIFE;
+  // the keyword bought nothing and cost the identity the idempotence contract is read by.
+  function shutdown(reason: string): Promise<void> {
     if (shuttingDown) return shuttingDown;
     shuttingDown = (async () => {
       log.info({ reason }, 'shutting down');

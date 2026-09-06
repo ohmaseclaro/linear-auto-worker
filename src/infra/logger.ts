@@ -12,14 +12,35 @@ import { Writable } from 'node:stream';
  */
 const SECRET_KEY_PATTERN = /(token|secret|key|authorization)/i;
 
-function redact(value: unknown): unknown {
+/**
+ * TRAPS T48, closed by 07-06.
+ *
+ * The walker recursed over `Object.entries` with no cycle guard, so a genuinely circular
+ * payload overflowed the stack. That matters more than it reads: this is the LOG SINK, the
+ * one call every layer makes on every path, and a throw here takes the daemon down on the
+ * strength of a field somebody put a back-reference in.
+ *
+ * `value.map(redact)` was a second, quieter defect — `Array.prototype.map` passes
+ * `(element, index, array)`, so the index arrived as the second argument. Harmless while
+ * there was no second parameter; a silent seeding bug the moment there is one.
+ *
+ * ponytail: `seen` is never un-marked on the way back up, so a DAG (the same object
+ * referenced twice in sibling branches) renders the second occurrence as `[CIRCULAR]` too.
+ * That is the safe error for a log line. Track a path set instead if a real payload ever
+ * needs the distinction.
+ */
+function redact(value: unknown, seen: WeakSet<object> = new WeakSet()): unknown {
+  if (value && typeof value === 'object') {
+    if (seen.has(value)) return '[CIRCULAR]';
+    seen.add(value);
+  }
   if (Array.isArray(value)) {
-    return value.map(redact);
+    return value.map((element) => redact(element, seen));
   }
   if (value && typeof value === 'object') {
     const out: Record<string, unknown> = {};
     for (const [key, val] of Object.entries(value as Record<string, unknown>)) {
-      out[key] = SECRET_KEY_PATTERN.test(key) ? '[REDACTED]' : redact(val);
+      out[key] = SECRET_KEY_PATTERN.test(key) ? '[REDACTED]' : redact(val, seen);
     }
     return out;
   }

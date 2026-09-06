@@ -21,10 +21,18 @@ const silent: Logger = {
   debug: () => {},
 };
 
+// `concurrency` is TOP LEVEL on Config, never under `defaults` — it is a global cap on
+// local RAM, so types.ts rules out a per-mapping override explicitly. Nesting it here made
+// every capacity assertion silently read the default instead of the fixture's value.
 const configWith = (concurrency?: number) =>
-  ({ defaults: { concurrency }, mappings: {} }) as unknown as Config;
+  ({ concurrency, mappings: {} }) as unknown as Config;
 
-const runAt = (id: string, state: RunState): Run => ({ id, state }) as unknown as Run;
+// `kind` is load-bearing, not decoration: `syncFromStore` skips anything that is not a
+// `repo` run, because a ticket-kind parent has no state and holds no slot by construction
+// (D-04). A fixture without it is skipped by every one of these assertions, which is what
+// made all seven of them fail on the milestone's first gate run.
+const runAt = (id: string, state: RunState): Run =>
+  ({ kind: 'repo', id, state }) as unknown as Run;
 
 /** Lets every already-resolved acquisition settle before we assert. */
 const tick = () => new Promise((r) => setImmediate(r));

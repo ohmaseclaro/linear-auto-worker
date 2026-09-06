@@ -51,7 +51,7 @@ import { createSqliteStore } from '../../src/infra/store/sqlite-store.js';
 import { openStore } from '../../src/infra/store/db.js';
 import { isTerminal } from '../../src/domain/state-machine.js';
 import type { AgentSubprocess } from '../../src/execution/supervisor.js';
-import type { RunCommandResult } from '../../src/execution/execute-run.js';
+import { defaultRunCommand, type RunCommandOptions, type RunCommandResult } from '../../src/execution/execute-run.js';
 import type {
   AgentResult,
   AgentRunner,
@@ -69,9 +69,22 @@ import type {
 
 const SECRET = 'lifecycle-webhook-secret-0123456789abcdef';
 
-/** Preflight must not consult the operator's real `gh`, `git` or `claude`. */
-const okTools = (): Promise<RunCommandResult> =>
-  Promise.resolve({ exitCode: 0, stdout: '', stderr: '' });
+/**
+ * Preflight must not consult the operator's real `gh` or `claude` — but `git` MUST be real.
+ *
+ * This slot is not preflight-only: `BootOptions.runCommand` also reaches the worktree
+ * manager and the deliverer. A blanket `exitCode: 0` therefore answers "yes" to
+ * `git show-ref --verify refs/heads/<branch>`, so every candidate branch reads as already
+ * taken and `prepareWorktree` dies with "could not find a free branch name ... after 50
+ * attempts" — before any agent is spawned. That is why the three process-group cases here
+ * timed out on the milestone's first gate run: nothing was ever spawned to reap.
+ *
+ * `git` is local and the fixture's repository is real (rule 3 above), so it runs for real.
+ */
+const okTools = (file: string, args: readonly string[], options?: RunCommandOptions): Promise<RunCommandResult> =>
+  file === 'git'
+    ? defaultRunCommand(file, args, options)
+    : Promise.resolve({ exitCode: 0, stdout: '', stderr: '' });
 
 /** `process.kill(pid, 0)` is the liveness probe; ESRCH is "gone". */
 function alive(pid: number): boolean {

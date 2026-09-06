@@ -26,6 +26,7 @@ import { join } from 'node:path';
 import { runAgent, SIGINT_GRACE_MS, SIGTERM_GRACE_MS } from './supervisor.js';
 import type { AgentSubprocess, EscalationStep } from './supervisor.js';
 import type { Logger } from '../infra/logger.js';
+import { LawError } from '../domain/errors.js';
 
 const PID = 4242;
 
@@ -401,10 +402,25 @@ test('a system/init assertion reaps immediately and propagates out of runAgent',
     sleep: async () => undefined,
   });
 
+  // The rejection handler is attached BEFORE the push that causes it. `push()` ends with a
+  // `setImmediate` tick, and a promise that rejects with no handler attached by the end of
+  // that turn is reported by Node as an unhandledRejection — which fails the test with the
+  // very error it is asserting on. Ordering, not wording, is what made this case red.
+  //
+  // Asserted on the ERROR CODE and on the named missing skill, not on prose. The original
+  // form matched /GSD skills absent/ against a message that has read "GSD skills missing
+  // from the spawned session: …" since plan 04 — a wording gate that goes red on a reword
+  // and stays green on a real regression is the failure mode T71/T76 exist to prevent.
+  const rejected = assert.rejects(running, (err: unknown) => {
+    assert.ok(err instanceof LawError, 'the router refuses the session with a LawError');
+    assert.equal(err.code, 'AGENT_ENV');
+    assert.match(err.message, /gsd-execute-phase/, 'and names which skill was absent');
+    return true;
+  });
+
   // No GSD skills: the session would produce generic, non-GSD work and exit 0.
   await out.push(ndjson({ ...GOOD_INIT, skills: ['other-skill'] }));
-
-  await assert.rejects(running, /GSD skills absent/);
+  await rejected;
   assert.deepEqual(
     h.kills.map((k) => k.signal),
     ['SIGINT'],

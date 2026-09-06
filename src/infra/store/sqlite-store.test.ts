@@ -3,6 +3,9 @@
 // installed (no node_modules). Verified by inspection only.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { openStore, runMigrations } from './db.js';
 import { createSqliteStore } from './sqlite-store.js';
 import type { RunRow, QuestionRow } from './sqlite-store.js';
@@ -62,9 +65,22 @@ test('runMigrations() twice against the same file is a no-op the second time (D-
 });
 
 test('openStore() sets WAL journal mode and a 5000ms busy timeout (OPS-02)', () => {
-  const { db } = freshStore();
-  assert.equal(db.pragma('journal_mode', { simple: true }), 'wal');
-  assert.equal(db.pragma('busy_timeout', { simple: true }), 5000);
+  // A FILE, not `:memory:` (TRAPS T75). SQLite reports `journal_mode = 'memory'` for an
+  // in-memory database BY DEFINITION — there is no file to write a -wal alongside — so this
+  // assertion could never have passed against `freshStore()`, and OPS-02's WAL requirement
+  // was therefore never actually verified until 07-06 ran the suite.
+  const dir = mkdtempSync(join(tmpdir(), 'law-wal-'));
+  try {
+    const db = openStore(join(dir, 'store.db'));
+    try {
+      assert.equal(db.pragma('journal_mode', { simple: true }), 'wal');
+      assert.equal(db.pragma('busy_timeout', { simple: true }), 5000);
+    } finally {
+      db.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('recordDelivery() is dedupe-safe: true once, false on repeat, one row total', () => {
@@ -77,21 +93,32 @@ test('recordDelivery() is dedupe-safe: true once, false on repeat, one row total
   assert.equal(count.n, 1);
 });
 
-test('insertRun -> updateRun -> getRun round-trips, with no validation of the state value', () => {
+test('insertRun -> updateRun -> getRun round-trips, and the schema rejects a non-state', () => {
   const { store } = freshStore();
   const run = makeRun({ id: 'run-1', state: 'queued' });
   store.insertRun(run);
 
-  // Any string round-trips -- the store performs no transition legality
-  // check. That is Phase 6's RunEngine.transition(), not this file.
-  assert.doesNotThrow(() => store.updateRun('run-1', { state: 'not-a-real-state' }));
-  const after = store.getRun('run-1');
-  assert.equal(after?.state, 'not-a-real-state');
+  // The store performs no TRANSITION-LEGALITY check — that is Phase 6's
+  // `RunEngine.transition()`, not this file — so an illegal-but-real jump is written
+  // without complaint.
+  store.updateRun('run-1', { state: 'delivered' });
+  assert.equal(store.getRun('run-1')?.state, 'delivered');
 
   store.updateRun('run-1', { state: 'preparing' });
   const preparing = store.getRun('run-1');
   assert.equal(preparing?.state, 'preparing');
   assert.equal(preparing?.id, 'run-1');
+
+  // What it DOES enforce is membership, at the schema: Phase 1's migration carries a CHECK
+  // constraint listing the nine states. The original form of this case asserted the
+  // opposite ("any string round-trips") and was written before that constraint landed —
+  // the constraint is the better contract, so the assertion is inverted rather than the
+  // schema relaxed.
+  assert.throws(
+    () => store.updateRun('run-1', { state: 'not-a-real-state' }),
+    /CHECK constraint failed/,
+  );
+  assert.equal(store.getRun('run-1')?.state, 'preparing', 'the rejected write changed nothing');
 });
 
 test('findActiveRunByIssue: terminal-value filter, not a transition check', () => {

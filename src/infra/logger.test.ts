@@ -78,20 +78,24 @@ test('child() carries runId/issueId bindings and inherits redaction with no per-
 });
 
 test('a circular object logged through the redaction walker does not throw and does not hang', () => {
-  // KNOWN GAP (deferred, not fixed by this plan -- out of files_modified
-  // scope; logger.ts belongs to plan 02-01): redact() in logger.ts recurses
-  // over Object.entries() with no visited-set/cycle guard, so a genuinely
-  // circular object will overflow the call stack rather than redact cleanly.
-  // See .planning/phases/02-foundation/deferred-items.md. This assertion
-  // documents the required contract per this plan's <behavior> block; it is
-  // expected to fail until that gap is closed.
+  // TRAPS T48, filed by 02-02 as a known gap and CLOSED by 07-06 (the first run that could
+  // observe it): `redact()` now carries a visited WeakSet. This is the log sink — every
+  // layer calls it on every path — so a stack overflow here takes the daemon down over a
+  // field that happens to hold a back-reference.
   const circular: Record<string, unknown> = { name: 'self-referencing' };
   circular.self = circular;
 
+  let lines: string[] = [];
   assert.doesNotThrow(() => {
-    captureStdout(() => {
+    lines = captureStdout(() => {
       const logger = createLogger([]);
       logger.info({ payload: circular }, 'circular test');
-    });
+    }).lines;
   });
+
+  // Not just "did not throw": the surviving line must still carry the non-circular fields,
+  // or a guard that returned an empty object would pass the assertion above.
+  const output = lines.join('\n');
+  assert.match(output, /self-referencing/);
+  assert.match(output, /\[CIRCULAR\]/);
 });

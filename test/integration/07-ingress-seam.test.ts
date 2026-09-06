@@ -61,12 +61,24 @@ interface Ctx {
 /** Boot the real graph on its own throwaway config root, and always tear it down. */
 async function withDaemon(fn: (ctx: Ctx) => Promise<void>): Promise<void> {
   const workspace = await makeWorkspace(SECRET);
-  const linear = new RecordingLinear({ issues: [smokeIssue()] });
+  // UNASSIGNED at boot. `smokeIssue()` defaults to the bot, and boot's missed-work sweep
+  // (daemon step 7) lists exactly the bot-assigned open issues and enqueues them — so a
+  // fixture seeded already-assigned hands every case here a run it did not ask for, and
+  // "no run was written" cannot be told from "the sweep wrote one".
+  const linear = new RecordingLinear({ issues: [smokeIssue({ assigneeId: null })] });
   const daemon = await bootDaemon({
     configDir: workspace.dir,
     linear,
     tunnel: probingTunnel(),
   });
+  // Boot starts the scheduler (07-05). This file is about ingress REACHING persistence, and
+  // every assertion below reads `queued` or counts rows; leaving the driver running means
+  // racing it out of `queued` into a `preparing` that has no repository to work in. Plan
+  // 07-05's `07-lifecycle` and 07-04's `07-run-path` own what happens after `queued`.
+  daemon.scheduler.pause();
+  // NOW the human assigns. Every canonical fetch from here on sees the bot as assignee,
+  // which is what the router requires and what the sweep already declined to act on.
+  linear.putIssue(smokeIssue());
   try {
     await fn({ daemon, linear, allRuns: () => daemon.store.listByState(...ALL_STATES) });
   } finally {

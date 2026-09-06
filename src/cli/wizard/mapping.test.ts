@@ -1,16 +1,17 @@
 import assert from 'node:assert/strict';
-import { mock, test } from 'node:test';
-import * as prompts from '@inquirer/prompts';
+import { test } from 'node:test';
 import type { LinearClient } from '@linear/sdk';
 
 import { buildMappings, listMappingCandidates } from './mapping.js';
 import type { Mapping } from './mapping.js';
+import type { WizardPrompts } from './deps.js';
 import type { DiscoveredRepo } from './repo-discovery.js';
 
-// NOTE (RUSH MODE): this file is not executed during this milestone's parallel build — no
-// package.json / node_modules exist on this branch yet. Written complete and correct for
-// the single, milestone-end integration gate (`tsc --noEmit && node --test`) per
-// 01-CONTEXT.md D-13.
+// First executed by plan 07-06. Originally written against
+// `mock.method(prompts, 'select', …)`, which threw `Cannot redefine property: select` on all
+// six cases — an ESM namespace binding is non-configurable by specification. `buildMappings`
+// now takes the prompt bag as a default parameter (`deps.ts`), so a scripted operator is
+// just an argument.
 
 const DISCOVERED: DiscoveredRepo[] = [
   { path: '/repos/alpha', name: 'alpha' },
@@ -56,18 +57,41 @@ function fakeLinearClient(
 
 /** Pop the next queued value on each call; fails loudly (not silently `undefined`) once the
  *  queue is exhausted — an over-eager prompt call is a real bug, not a fixture gap. */
-function queueMock<T>(target: object, method: string, values: T[]) {
+function queue<T>(name: string, values: readonly T[]): () => Promise<T> {
   let i = 0;
-  return mock.method(target as never, method as never, async () => {
+  return () => {
     if (i >= values.length) {
-      throw new Error(`${method}() called more times than the test queued values for (call #${i + 1})`);
+      return Promise.reject(
+        new Error(`${name}() called more times than the test queued values for (call #${i + 1})`),
+      );
     }
-    return values[i++];
-  });
+    return Promise.resolve(values[i++] as T);
+  };
 }
 
-function restoreAll(mocks: { mock: { restore(): void } }[]) {
-  for (const m of mocks) m.mock.restore();
+/**
+ * A scripted operator. Anything the case did not queue REJECTS rather than returning
+ * `undefined` — a prompt sequence that drifts is the bug these cases exist to catch.
+ *
+ * The casts are structural, not escapes: each prompt is generic over its own value type and
+ * a single queue answers one call site with one concrete type.
+ */
+function scripted(script: {
+  select?: readonly unknown[];
+  checkbox?: readonly unknown[];
+  input?: readonly string[];
+  confirm?: readonly boolean[];
+}): WizardPrompts {
+  const select = queue('select', script.select ?? []);
+  const checkbox = queue('checkbox', script.checkbox ?? []);
+  const input = queue('input', script.input ?? []);
+  const confirm = queue('confirm', script.confirm ?? []);
+  return {
+    select: <T>() => select() as Promise<T>,
+    checkbox: <T>() => checkbox() as Promise<T[]>,
+    input: () => input(),
+    confirm: () => confirm(),
+  };
 }
 
 test('listMappingCandidates: pages teams/projects past the 50-item connection default (Pitfall 11)', async () => {
@@ -92,24 +116,25 @@ test('buildMappings: builds one mapping and stops when the operator declines ano
     [{ id: 'proj-1', name: 'Project One', teamId: 'team-1' }],
   );
 
-  const selectMock = queueMock(prompts, 'select', ['proj-1']);
-  const checkboxMock = queueMock(prompts, 'checkbox', [['/repos/alpha']]);
-  const inputMock = queueMock(prompts, 'input', ['']);
-  const confirmMock = queueMock(prompts, 'confirm', [false /* wantsOverrides */, false /* addAnother */]);
+  const result = await buildMappings(
+    client,
+    DISCOVERED,
+    undefined,
+    scripted({
+      select: ['proj-1'],
+      checkbox: [['/repos/alpha']],
+      input: [''],
+      confirm: [false /* wantsOverrides */, false /* addAnother */],
+    }),
+  );
 
-  try {
-    const result = await buildMappings(client, DISCOVERED);
-
-    assert.equal(result.length, 1);
-    assert.deepEqual(result[0], {
-      key: { kind: 'project', id: 'proj-1', name: 'Project One' },
-      repos: ['/repos/alpha'],
-      slackWebhookUrl: undefined,
-      toggles: undefined,
-    });
-  } finally {
-    restoreAll([selectMock, checkboxMock, inputMock, confirmMock]);
-  }
+  assert.equal(result.length, 1);
+  assert.deepEqual(result[0], {
+    key: { kind: 'project', id: 'proj-1', name: 'Project One' },
+    repos: ['/repos/alpha'],
+    slackWebhookUrl: undefined,
+    toggles: undefined,
+  });
 });
 
 test('buildMappings: builds two mappings when the operator opts to add another', async () => {
@@ -121,25 +146,26 @@ test('buildMappings: builds two mappings when the operator opts to add another',
     ],
   );
 
-  const selectMock = queueMock(prompts, 'select', ['proj-1', 'proj-2']);
-  const checkboxMock = queueMock(prompts, 'checkbox', [['/repos/alpha'], ['/repos/beta']]);
-  const inputMock = queueMock(prompts, 'input', ['', '']);
-  const confirmMock = queueMock(prompts, 'confirm', [
-    false /* wantsOverrides mapping 1 */,
-    true /* add another? */,
-    false /* wantsOverrides mapping 2 */,
-    false /* add another? */,
-  ]);
+  const result = await buildMappings(
+    client,
+    DISCOVERED,
+    undefined,
+    scripted({
+      select: ['proj-1', 'proj-2'],
+      checkbox: [['/repos/alpha'], ['/repos/beta']],
+      input: ['', ''],
+      confirm: [
+        false /* wantsOverrides mapping 1 */,
+        true /* add another? */,
+        false /* wantsOverrides mapping 2 */,
+        false /* add another? */,
+      ],
+    }),
+  );
 
-  try {
-    const result = await buildMappings(client, DISCOVERED);
-
-    assert.equal(result.length, 2);
-    assert.equal(result[0]?.key.id, 'proj-1');
-    assert.equal(result[1]?.key.id, 'proj-2');
-  } finally {
-    restoreAll([selectMock, checkboxMock, inputMock, confirmMock]);
-  }
+  assert.equal(result.length, 2);
+  assert.equal(result[0]?.key.id, 'proj-1');
+  assert.equal(result[1]?.key.id, 'proj-2');
 });
 
 test('buildMappings: re-run "keep as-is" leaves an existing mapping byte-identical (D-04, T-08-10)', async () => {
@@ -151,17 +177,15 @@ test('buildMappings: re-run "keep as-is" leaves an existing mapping byte-identic
     toggles: { draftPr: true },
   };
 
-  const selectMock = queueMock(prompts, 'select', ['keep']);
-  const confirmMock = queueMock(prompts, 'confirm', [false /* add another? */]);
+  const result = await buildMappings(
+    client,
+    DISCOVERED,
+    [existingMapping],
+    scripted({ select: ['keep'], confirm: [false /* add another? */] }),
+  );
 
-  try {
-    const result = await buildMappings(client, DISCOVERED, [existingMapping]);
-
-    assert.equal(result.length, 1);
-    assert.equal(result[0], existingMapping, 'must be the exact same object — no partial mutation');
-  } finally {
-    restoreAll([selectMock, confirmMock]);
-  }
+  assert.equal(result.length, 1);
+  assert.equal(result[0], existingMapping, 'must be the exact same object — no partial mutation');
 });
 
 test('buildMappings: re-run "edit repos" changes only that mapping\'s repos', async () => {
@@ -173,21 +197,22 @@ test('buildMappings: re-run "edit repos" changes only that mapping\'s repos', as
     toggles: { draftPr: true },
   };
 
-  const selectMock = queueMock(prompts, 'select', ['edit-repos']);
-  const checkboxMock = queueMock(prompts, 'checkbox', [['/repos/beta']]);
-  const confirmMock = queueMock(prompts, 'confirm', [false /* add another? */]);
+  const result = await buildMappings(
+    client,
+    DISCOVERED,
+    [existingMapping],
+    scripted({
+      select: ['edit-repos'],
+      checkbox: [['/repos/beta']],
+      confirm: [false /* add another? */],
+    }),
+  );
 
-  try {
-    const result = await buildMappings(client, DISCOVERED, [existingMapping]);
-
-    assert.equal(result.length, 1);
-    assert.deepEqual(result[0]?.repos, ['/repos/beta']);
-    assert.equal(result[0]?.key, existingMapping.key, 'key must be untouched');
-    assert.equal(result[0]?.slackWebhookUrl, existingMapping.slackWebhookUrl, 'slack must be untouched');
-    assert.deepEqual(result[0]?.toggles, existingMapping.toggles, 'toggles must be untouched');
-  } finally {
-    restoreAll([selectMock, checkboxMock, confirmMock]);
-  }
+  assert.equal(result.length, 1);
+  assert.deepEqual(result[0]?.repos, ['/repos/beta']);
+  assert.equal(result[0]?.key, existingMapping.key, 'key must be untouched');
+  assert.equal(result[0]?.slackWebhookUrl, existingMapping.slackWebhookUrl, 'slack must be untouched');
+  assert.deepEqual(result[0]?.toggles, existingMapping.toggles, 'toggles must be untouched');
 });
 
 test('buildMappings: a mapping with no toggle overrides selected has no override keys at all (sparse, not empty-valued)', async () => {
@@ -196,22 +221,23 @@ test('buildMappings: a mapping with no toggle overrides selected has no override
     [{ id: 'proj-1', name: 'Project One', teamId: 'team-1' }],
   );
 
-  const selectMock = queueMock(prompts, 'select', ['proj-1']);
-  const checkboxMock = queueMock(prompts, 'checkbox', [
-    ['/repos/alpha'] /* repo selection */,
-    [] /* toggle names: none chosen even though overrides were opted into */,
-  ]);
-  const inputMock = queueMock(prompts, 'input', ['']);
-  const confirmMock = queueMock(prompts, 'confirm', [true /* wantsOverrides */, false /* add another? */]);
+  const result = await buildMappings(
+    client,
+    DISCOVERED,
+    undefined,
+    scripted({
+      select: ['proj-1'],
+      checkbox: [
+        ['/repos/alpha'] /* repo selection */,
+        [] /* toggle names: none chosen even though overrides were opted into */,
+      ],
+      input: [''],
+      confirm: [true /* wantsOverrides */, false /* add another? */],
+    }),
+  );
 
-  try {
-    const result = await buildMappings(client, DISCOVERED);
-
-    assert.equal(result.length, 1);
-    assert.equal(result[0]?.toggles, undefined, 'no toggles object at all, not one with empty keys');
-  } finally {
-    restoreAll([selectMock, checkboxMock, inputMock, confirmMock]);
-  }
+  assert.equal(result.length, 1);
+  assert.equal(result[0]?.toggles, undefined, 'no toggles object at all, not one with empty keys');
 });
 
 test('buildMappings: selecting exactly one toggle overrides only that key, sparsely', async () => {
@@ -220,24 +246,25 @@ test('buildMappings: selecting exactly one toggle overrides only that key, spars
     [{ id: 'proj-1', name: 'Project One', teamId: 'team-1' }],
   );
 
-  const selectMock = queueMock(prompts, 'select', ['proj-1']);
-  const checkboxMock = queueMock(prompts, 'checkbox', [
-    ['/repos/alpha'] /* repo selection */,
-    ['draftPr'] /* toggle names: only draftPr */,
-  ]);
-  const inputMock = queueMock(prompts, 'input', ['']);
-  const confirmMock = queueMock(prompts, 'confirm', [
-    true /* wantsOverrides */,
-    true /* draftPr override value */,
-    false /* add another? */,
-  ]);
+  const result = await buildMappings(
+    client,
+    DISCOVERED,
+    undefined,
+    scripted({
+      select: ['proj-1'],
+      checkbox: [
+        ['/repos/alpha'] /* repo selection */,
+        ['draftPr'] /* toggle names: only draftPr */,
+      ],
+      input: [''],
+      confirm: [
+        true /* wantsOverrides */,
+        true /* draftPr override value */,
+        false /* add another? */,
+      ],
+    }),
+  );
 
-  try {
-    const result = await buildMappings(client, DISCOVERED);
-
-    assert.equal(result.length, 1);
-    assert.deepEqual(result[0]?.toggles, { draftPr: true }, 'exactly one override key, no others');
-  } finally {
-    restoreAll([selectMock, checkboxMock, inputMock, confirmMock]);
-  }
+  assert.equal(result.length, 1);
+  assert.deepEqual(result[0]?.toggles, { draftPr: true }, 'exactly one override key, no others');
 });

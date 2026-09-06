@@ -1,5 +1,10 @@
 # Phase 8 — Human UAT checklist (live, credential-gated)
 
+> **SUPERSEDED — do not run this file directly.**
+> Every item below is folded into the milestone's single consolidated checklist,
+> `.planning/phases/07-integration-daemon-lifecycle/07-HUMAN-UAT.md`, in the order an
+> operator should actually do them. Kept for its reasoning; run the consolidated one.
+
 **Why this file exists.** SETUP-09's real acceptance criterion is "an operator on a fresh
 machine runs one command and ends with a registered, delivering webhook." That cannot be
 proven by an automated test on this branch, and faking it into a passing task would produce
