@@ -7,7 +7,7 @@
 
 ### Setup
 
-- [ ] **SETUP-01**: Operator runs one command that preflights the local toolchain — Node version, git, git identity, `gh auth status`, `claude` on PATH, global GSD install — and reports each check with an actionable fix on failure
+- [x] **SETUP-01**: Operator runs one command that preflights the local toolchain — Node version, git, git identity, `gh auth status`, `claude` on PATH, global GSD install — and reports each check with an actionable fix on failure
 - [ ] **SETUP-02**: Wizard prompts for the Linear API key only when one is not already present, and validates it with a live API call before continuing
 - [ ] **SETUP-03**: Wizard probes that the Linear key has workspace-admin permission via a `webhooks()` read, and fails with a message naming the exact fix when it does not
 - [ ] **SETUP-04**: Wizard obtains the ngrok authtoken — reusing one found in `~/.config/ngrok/ngrok.yml` when present, otherwise prompting — and persists it
@@ -145,7 +145,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| SETUP-01 | Phase 8 — Setup Wizard & Safety Pass | Pending |
+| SETUP-01 | Phase 8 — Setup Wizard & Safety Pass | Complete |
 | SETUP-02 | Phase 8 — Setup Wizard & Safety Pass | Pending |
 | SETUP-03 | Phase 8 — Setup Wizard & Safety Pass | Pending |
 | SETUP-04 | Phase 8 — Setup Wizard & Safety Pass | Pending |
