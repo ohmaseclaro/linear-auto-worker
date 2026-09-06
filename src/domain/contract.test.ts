@@ -24,7 +24,7 @@ test('parseAgentResult narrows on status and refuses anything else (T-01-05)', (
   assert.throws(() => parseAgentResult({ status: 'complete', summary: 'done' }), /prTitle/);
   assert.throws(
     () => parseAgentResult({ status: 'needs_input', summary: 's', question: 'q' }),
-    /assumptionIfUnanswered/,
+    /assumption/,
   );
 
   assert.deepEqual(parseAgentResult({ status: 'cancelled' }), { status: 'cancelled' });
@@ -33,10 +33,10 @@ test('parseAgentResult narrows on status and refuses anything else (T-01-05)', (
       status: 'needs_input',
       summary: 's',
       question: 'q',
-      assumptionIfUnanswered: 'a',
+      assumption: 'a',
       extra: 'ignored',
     }),
-    { status: 'needs_input', summary: 's', question: 'q', assumptionIfUnanswered: 'a' },
+    { status: 'needs_input', summary: 's', question: 'q', assumption: 'a' },
   );
 });
 

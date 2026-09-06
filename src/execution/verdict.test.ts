@@ -149,7 +149,7 @@ test('a needs_input with a question but no assumption is reported malformed', ()
   assert.notEqual(c.verdict, 'needs_input');
   assert.equal(c.verdict, 'failed');
   assert.ok(c.schemaError, 'the validation failure is carried, not swallowed');
-  assert.match(c.schemaError ?? '', /assumptionIfUnanswered/);
+  assert.match(c.schemaError ?? '', /assumption/);
 });
 
 test('structured_output that fails the schema is rejected and the evidence decides', () => {

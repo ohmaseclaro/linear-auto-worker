@@ -141,6 +141,10 @@ export async function recoverAtBoot(deps: RecoveryDeps): Promise<BootReport> {
   const report: BootReport = { requeued: [], failed: [], left: [] };
 
   for (const run of store.listByState(...nonTerminal)) {
+    // A ticket-kind parent has no state of its own to recover — its status is derived
+    // from the children, each of which is swept individually (D-04). `listByState` should
+    // not return it either; this narrows the type and defends the invariant at once.
+    if (run.kind !== 'repo') continue;
     // The runtime backstop for a state the contract grew and this file did not.
     // Defaulting to `fail` rather than `requeue` is the safe direction: the
     // worst a wrong `fail` costs is a re-assignment, whereas a wrong `requeue`
@@ -289,7 +293,7 @@ export async function reconcile(deps: RecoveryDeps, now: number): Promise<Reconc
 
   // Advanced only after a clean pass, and only ever forward.
   if (newest > watermark) {
-    store.kvPut(POLL_WATERMARK_KEY, newest);
+    store.kvSet(POLL_WATERMARK_KEY, newest);
     report.watermark = newest;
     report.advanced = true;
   }

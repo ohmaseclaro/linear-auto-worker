@@ -2,54 +2,71 @@ import * as z from 'zod';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import type { Config } from '../domain/types.js';
-// ConfigError does not exist on this branch yet (src/domain/ is Phase 1's, being
-// written in parallel). If this export is missing at integration time, see
-// `Contract additions requested` in 02-01-SUMMARY.md for the exact signature assumed.
+import type { Config, MappingToggles, RepoMapping } from '../domain/types.js';
+import { resolveToggles } from '../domain/types.js';
 import { ConfigError } from '../domain/errors.js';
 
-/** CONF-02's six toggles. Used both as Config.defaults and, partial, as a
- * mapping's sparse overrides (D-09). */
+/**
+ * The zod schemas below spell the DOMAIN's field names, not this module's own. That is
+ * load-bearing rather than tidy: `loadConfig` used to end in `result.data as Config`, and
+ * that one cast collapsed a four-field name mismatch (`slackNotify`/`questionFlowEnabled`/
+ * `maxRunTimeMs`, and mappings as an array rather than a record) into a single diagnostic.
+ * `src/cli/wizard/config-writer.ts` writes the domain shape; this reads it. There is no
+ * cast left here, so the next drift is a compile error instead of a runtime surprise.
+ */
+
+/** CONF-02's toggles. Used both as `Config.defaults` and, partial, as a mapping's sparse
+ * overrides (D-09). */
 export const TogglesSchema = z.object({
   postLinearComments: z.boolean(),
-  slackNotify: z.boolean(),
+  notifySlack: z.boolean(),
   baseBranch: z.string().min(1).max(255),
   draftPr: z.boolean(),
-  questionFlowEnabled: z.boolean(),
-  maxRunTimeMs: z
+  questionsEnabled: z.boolean(),
+  maxRunMs: z
     .number()
     .int()
     .positive()
     .max(24 * 60 * 60 * 1000),
-});
+  questionTimeoutMs: z.number().int().positive(),
+}) satisfies z.ZodType<MappingToggles>;
 
-export type Toggles = z.infer<typeof TogglesSchema>;
-
-const RepoMappingEntrySchema = z.object({
+const RepoMappingSchema = z.object({
   repoDir: z.string().min(1),
   repoSlug: z.string().min(1),
-});
+  baseBranch: z.string().min(1),
+  enabled: z.boolean(),
+}) satisfies z.ZodType<RepoMapping>;
 
 /** Phase 1 D-07: project keying with a team-level fallback — exactly one of
- * linearProjectId/linearTeamId, never both, never neither. */
-const MappingSchema = z
+ * linearProjectId/linearTeamId is set, never both, never neither. */
+const ProjectMappingSchema = z
   .object({
-    linearProjectId: z.string().min(1).optional(),
-    linearTeamId: z.string().min(1).optional(),
-    repos: z.array(RepoMappingEntrySchema).min(1),
+    linearProjectId: z.string().min(1).nullable(),
+    linearTeamId: z.string().min(1).nullable(),
+    repos: z.array(RepoMappingSchema).min(1),
     slackWebhookUrl: z.url().optional(),
     overrides: TogglesSchema.partial().optional(),
   })
-  .refine((mapping) => Boolean(mapping.linearProjectId) !== Boolean(mapping.linearTeamId), {
+  .refine((m) => Boolean(m.linearProjectId) !== Boolean(m.linearTeamId), {
     message: 'exactly one of linearProjectId or linearTeamId must be set',
     path: ['linearProjectId'],
   });
 
-export type Mapping = z.infer<typeof MappingSchema>;
-
 export const ConfigSchema = z.object({
+  botUserId: z.string(),
+  teamId: z.string(),
+  /** Global cap on simultaneous spawned Claude sessions. Never per-mapping. */
+  concurrency: z.number().int().positive(),
+  maxQuestionRounds: z.number().int().nonnegative(),
+  maxTurns: z.number().int().positive(),
+  maxBudgetUsd: z.number().positive().optional(),
+  operatorUserId: z.string().min(1).optional(),
+  worktreeRoot: z.string().min(1),
+  dbPath: z.string().min(1),
   defaults: TogglesSchema,
-  mappings: z.array(MappingSchema),
+  /** Keyed by Linear project id first, then Linear team id (D-07). */
+  mappings: z.record(z.string(), ProjectMappingSchema),
 });
 
 /** D-01/D-06: config, secrets, database, and logs all resolve under here.
@@ -66,34 +83,29 @@ export function loadConfig(root: string = defaultRoot()): Config {
   if (!result.success) {
     throw new ConfigError(`Invalid config at ${configPath}:\n${z.prettifyError(result.error)}`);
   }
-  return result.data as Config;
+  return result.data;
 }
 
-export interface ResolvedMapping extends Toggles {
-  repos: { repoDir: string; repoSlug: string }[];
+export interface ResolvedMapping extends MappingToggles {
+  repos: RepoMapping[];
   slackWebhookUrl?: string;
 }
 
-/** Phase 1 D-07: an issue filed directly on a team with no project must not
- * be silently dropped — try a project match first, then fall back to team. */
+/** Phase 1 D-07: an issue filed directly on a team with no project must not be silently
+ * dropped — try the project key first, then fall back to the team key. */
 export function resolveMapping(
   config: Config,
-  issue: { projectId: string | null; teamId: string }
+  issue: { projectId: string | null; teamId: string | null },
 ): ResolvedMapping | undefined {
-  const mappings = (config as unknown as { mappings: Mapping[] }).mappings;
-  const defaults = (config as unknown as { defaults: Toggles }).defaults;
-
   const match =
-    (issue.projectId ? mappings.find((m) => m.linearProjectId === issue.projectId) : undefined) ??
-    mappings.find((m) => m.linearTeamId === issue.teamId);
-
+    (issue.projectId ? config.mappings[issue.projectId] : undefined) ??
+    (issue.teamId ? config.mappings[issue.teamId] : undefined);
   if (!match) return undefined;
 
   return {
-    ...defaults,
-    ...(match.overrides ?? {}),
+    ...resolveToggles(config.defaults, match),
     repos: match.repos,
-    slackWebhookUrl: match.slackWebhookUrl,
+    ...(match.slackWebhookUrl === undefined ? {} : { slackWebhookUrl: match.slackWebhookUrl }),
   };
 }
 

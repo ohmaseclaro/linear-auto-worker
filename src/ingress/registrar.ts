@@ -48,8 +48,8 @@ export async function reconcile(
   // idempotent across a URL that changes on every boot (D-01).
   const id = store.kvGet(KEY_ID) ?? crypto.randomUUID();
   const secret = store.kvGet(KEY_SECRET) ?? crypto.randomBytes(32).toString('hex');
-  store.kvPut(KEY_ID, id);
-  store.kvPut(KEY_SECRET, secret);
+  store.kvSet(KEY_ID, id);
+  store.kvSet(KEY_SECRET, secret);
 
   // T22: fetchNext() mutates and returns `this`, appending into page.nodes.
   // Collecting nodes per iteration therefore duplicates every earlier page, and
@@ -96,7 +96,9 @@ export async function reconcile(
   for (const w of all) {
     if (w.id === id) continue;
     if (w.label !== WEBHOOK_LABEL) continue;
-    if (!NGROK_URL.test(w.url)) continue;
+    // The SDK types `url` as nullable; a registration with no URL cannot be one of
+    // our tunnel registrations, so it is skipped rather than coerced.
+    if (!w.url || !NGROK_URL.test(w.url)) continue;
     log.warn({ webhookId: w.id, url: w.url }, 'pruning stale ngrok webhook');
     await client.deleteWebhook(w.id);
   }

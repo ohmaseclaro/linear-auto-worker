@@ -90,7 +90,11 @@ CREATE TABLE IF NOT EXISTS questions (
   asked_at          INTEGER NOT NULL,
   deadline_at       INTEGER NOT NULL,
   status            TEXT NOT NULL CHECK (status IN ('open', 'answered', 'timed_out', 'cancelled')),
-  answer            TEXT
+  answer            TEXT,
+  -- Display name of the human whose comment was correlated, NULL for a deadline
+  -- expiry. A column rather than a log line: it is the only durable record of who
+  -- changed a run's course mid-flight.
+  answered_by       TEXT
 );
 
 -- The deadline sweep.

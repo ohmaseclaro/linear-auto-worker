@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { InMemoryStore } from '../domain/fakes.js';
 import { RUN_STATE_TABLE, canTransition } from '../domain/state-machine.js';
-import type { PendingQuestion, Run, RunState } from '../domain/types.js';
+import type { PendingQuestion, RepoRun, Run, RunState } from '../domain/types.js';
 import type { Config, DomainEvent, Logger } from '../domain/ports.js';
 import { createScheduler } from './scheduler.js';
 import type { AnswerComment, Correlation } from './questions.js';
@@ -20,6 +20,13 @@ import {
 import type { RecoveryDeps } from './recovery.js';
 
 const BOT = 'bot-user-id';
+
+/** Narrow, don't assert-non-null: only a repo run carries `failureReason` (D-04). */
+function repoRunOf(store: InMemoryStore, id: string): RepoRun {
+  const run = store.getRun(id);
+  assert.ok(run && run.kind === 'repo', `expected a repo run at ${id}`);
+  return run;
+}
 
 const silent: Logger = {
   child: () => silent,
@@ -98,7 +105,10 @@ function harness(): Harness {
   const engine = {
     async transition(runId: string, to: RunState, detail?: string) {
       const run = store.getRun(runId)!;
-      assert.ok(canTransition(run.state, to), `illegal recovery transition ${run.state} -> ${to}`);
+      // Only a repo run has a state (D-04); a ticket parent has no transition to make.
+      assert.equal(run.kind, 'repo', `transition attempted on a ticket parent: ${runId}`);
+      const from = run.kind === 'repo' ? run.state : null;
+      assert.ok(from && canTransition(from, to), `illegal recovery transition ${from} -> ${to}`);
       transitions.push({ runId, to, detail });
       store.updateRun(runId, { state: to });
       return store.getRun(runId)!;
@@ -289,10 +299,10 @@ test('a failed-at-boot run gets exactly one diagnosis naming the state it was re
 
   await recoverAtBoot(h.deps);
 
-  const running = h.store.getRun('r-running')!;
+  const running = repoRunOf(h.store, 'r-running');
   assert.match(running.failureReason!, /running/);
   assert.match(running.failureReason!, /left in place/);
-  const delivering = h.store.getRun('r-delivering')!;
+  const delivering = repoRunOf(h.store, 'r-delivering');
   assert.match(delivering.failureReason!, /delivering/);
 
   // Exactly one, not one per pass and not one per state.
@@ -386,7 +396,7 @@ const FRESH = '2026-09-06T11:00:00.000Z';
 
 test('a bot-assigned issue with no non-terminal run is enqueued (INTK-07)', async () => {
   const h = harness();
-  h.store.kvPut(POLL_WATERMARK_KEY, OLD);
+  h.store.kvSet(POLL_WATERMARK_KEY, OLD);
   h.issues.push({ id: 'ISS-new', identifier: 'ENG-99', updatedAt: FRESH });
 
   const report = await reconcile(h.deps, NOW);
@@ -397,7 +407,7 @@ test('a bot-assigned issue with no non-terminal run is enqueued (INTK-07)', asyn
 
 test('an issue that already has a non-terminal run is not enqueued again — three passes, one run', async () => {
   const h = harness();
-  h.store.kvPut(POLL_WATERMARK_KEY, OLD);
+  h.store.kvSet(POLL_WATERMARK_KEY, OLD);
   h.issues.push({ id: 'ISS-running', identifier: 'ENG-1', updatedAt: FRESH });
   seedRun(h.store, { state: 'running' });
 
@@ -430,7 +440,7 @@ test('a reply posted while the daemon was down resumes its run on the first poll
   // this run sits in `awaiting_answer` for its full four hours despite the
   // operator having already answered in writing.
   const h = harness();
-  h.store.kvPut(POLL_WATERMARK_KEY, OLD);
+  h.store.kvSet(POLL_WATERMARK_KEY, OLD);
   seedRun(h.store, { state: 'awaiting_answer' });
   const q = seedQuestion(h.store, { deadlineAt: NOW + 3 * 60 * 60 * 1_000 });
   h.comments.set('ISS-awaiting_answer', [
@@ -458,7 +468,7 @@ test('a reply posted while the daemon was down resumes its run on the first poll
 
 test('every listed comment goes through the one correlator, never a second matcher here', async () => {
   const h = harness();
-  h.store.kvPut(POLL_WATERMARK_KEY, OLD);
+  h.store.kvSet(POLL_WATERMARK_KEY, OLD);
   seedRun(h.store, { state: 'awaiting_answer' });
   seedQuestion(h.store);
   h.comments.set('ISS-awaiting_answer', [
@@ -480,7 +490,7 @@ test('every listed comment goes through the one correlator, never a second match
 
 test('an issue with an open question but no new comments produces no correlation and no transition', async () => {
   const h = harness();
-  h.store.kvPut(POLL_WATERMARK_KEY, FRESH);
+  h.store.kvSet(POLL_WATERMARK_KEY, FRESH);
   seedRun(h.store, { state: 'awaiting_answer' });
   seedQuestion(h.store);
   // Older than the watermark: already covered by a previous clean pass.
@@ -502,7 +512,7 @@ test('a bot-authored comment found by the listing correlates to nothing (T-06-17
   // this second entry point inherits it -- the bot's own question comment is the
   // first thing this listing returns, and answering it is an infinite loop.
   const h = harness();
-  h.store.kvPut(POLL_WATERMARK_KEY, OLD);
+  h.store.kvSet(POLL_WATERMARK_KEY, OLD);
   seedRun(h.store, { state: 'awaiting_answer' });
   seedQuestion(h.store);
   h.comments.set('ISS-awaiting_answer', [
@@ -518,7 +528,7 @@ test('a bot-authored comment found by the listing correlates to nothing (T-06-17
 
 test('a Linear failure mid-poll is swallowed and leaves the watermark where it was', async () => {
   const h = harness();
-  h.store.kvPut(POLL_WATERMARK_KEY, OLD);
+  h.store.kvSet(POLL_WATERMARK_KEY, OLD);
   h.issues.push({ id: 'ISS-new', identifier: 'ENG-99', updatedAt: FRESH });
   h.failLinear.on = true;
 

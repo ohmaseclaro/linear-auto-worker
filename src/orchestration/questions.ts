@@ -20,7 +20,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import type { PendingQuestion, Run, RunId } from '../domain/types.js';
-import type { Config, DomainEvent, LinearClient, Logger, Store } from '../domain/ports.js';
+import type { Config, EngineEvent, LinearClient, Logger, Store } from '../domain/ports.js';
 // T32: the marker constants live in `src/domain/` and are reached through the
 // barrel. Never declared, re-exported or re-derived here -- a second copy is
 // exactly what makes the loop-prevention filter unmergeable.
@@ -140,7 +140,10 @@ export function createQuestions(deps: QuestionsDeps): Questions {
    * of a row that is still `open` and still overdue, which is the correct action
    * anyway. Move it into a claim column only if the daemon ever runs two sweepers.
    */
-  const resolutions = new Map<string, { status: 'answered' | 'expired'; answeredBy: string | null }>();
+  const resolutions = new Map<
+    string,
+    { status: 'answered' | 'timed_out'; answeredBy: string | null }
+  >();
 
   /** Every comment this module writes carries the marker: it is the loop guard. */
   function botBody(body: string): string {
@@ -169,12 +172,18 @@ export function createQuestions(deps: QuestionsDeps): Questions {
    * resume-prompt composition in Phase 4 owns delimiting it as untrusted and
    * stripping control and zero-width characters (AGNT criterion 6, T-06-11).
    */
-  async function resumeWith(run: Run, questionId: string | null, input: string): Promise<void> {
-    const event: DomainEvent =
+  async function resumeWith(
+    run: Run,
+    questionId: string | null,
+    input: string,
+    authorName: string | null,
+  ): Promise<void> {
+    const event: EngineEvent =
       questionId !== null
-        ? { kind: 'question.answered', questionId, answer: input }
-        : // CONTRACT ADDITION -- see 06-03-SUMMARY.md. The QA-07 branch has no
-          // question row by construction, so it cannot key off `question.answered`.
+        ? { kind: 'question.answered', questionId, answer: input, authorName }
+        : // QA-07's branch has no question row by construction, so it cannot key off
+          // `question.answered`, whose handler looks the row up and requires it `open`.
+          // Landed in the contract as `run.resumed` by 07-02.
           { kind: 'run.resumed', runId: run.id, input, reason: 'question_flow_disabled' };
     await engine.handle(event);
   }
@@ -188,15 +197,14 @@ export function createQuestions(deps: QuestionsDeps): Questions {
    * an array; this reads correctly against either.
    */
   function togglesFor(run: Run) {
-    const mappings = Object.values(config.mappings ?? {}) as Array<{
-      repos?: Array<{ repoDir: string }>;
-    }>;
-    const mapping = mappings.find((m) => m.repos?.some((r) => r.repoDir === run.repoDir));
+    const mapping = Object.values(config.mappings ?? {}).find((m) =>
+      m.repos?.some((r) => r.repoDir === run.repoDir),
+    );
     return mapping ? resolveToggles(config.defaults, mapping) : config.defaults;
   }
 
   async function expire(q: PendingQuestion, run: Run): Promise<void> {
-    resolutions.set(q.id, { status: 'expired', answeredBy: null });
+    resolutions.set(q.id, { status: 'timed_out', answeredBy: null });
     // T-06-15: the record has to show what was decided, not leave the operator
     // to infer it from the diff.
     await post(
@@ -205,7 +213,7 @@ export function createQuestions(deps: QuestionsDeps): Questions {
       q.linearCommentId,
     );
     log.warn({ runId: run.id, questionId: q.id, deadlineAt: q.deadlineAt }, 'question expired');
-    await resumeWith(run, q.id, q.assumption);
+    await resumeWith(run, q.id, q.assumption, null);
   }
 
   return {
@@ -225,13 +233,13 @@ export function createQuestions(deps: QuestionsDeps): Questions {
       // purpose: the difference between them is one `if`, not two subsystems.
       // No question row, no `awaiting_answer`, no wait. The run never blocked,
       // so it never released its slot and never has to re-acquire one.
-      if (toggles.questionFlow === false) {
+      if (toggles.questionsEnabled === false) {
         await post(
           run.issueId,
           `Question flow is off for this mapping — proceeding with the stated assumption:\n\n> ${assumption}`,
         );
         log.info({ runId, assumption }, 'question flow disabled; proceeding on the assumption');
-        await resumeWith(run, null, assumption);
+        await resumeWith(run, null, assumption, null);
         return null;
       }
 
@@ -321,7 +329,7 @@ export function createQuestions(deps: QuestionsDeps): Questions {
       }
       resolutions.set(q.id, { status: 'answered', answeredBy: comment.authorName });
       log.info({ runId: run.id, questionId: q.id, tier: result.tier }, 'answer correlated');
-      await resumeWith(run, q.id, comment.body);
+      await resumeWith(run, q.id, comment.body, comment.authorName);
       return result;
     },
 

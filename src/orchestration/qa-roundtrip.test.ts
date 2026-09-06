@@ -43,32 +43,40 @@ const ISSUE = {
   teamId: 'team-1',
   stateId: 'state-todo',
   stateType: 'unstarted',
+  updatedAt: '2026-01-01T00:00:00.000Z',
 };
 
-// Shaped against the ADDENDUM (`defaults` + `mappings`); cast because the exact
-// field set lands with Phase 1 and this test must not pin it.
-const CONFIG = {
+const CONFIG: Config = {
+  botUserId: 'bot',
+  teamId: 'team-1',
+  concurrency: 3,
+  maxQuestionRounds: 3,
+  maxTurns: 40,
+  worktreeRoot: '/tmp/wt',
+  dbPath: '/tmp/store.db',
   defaults: {
-    concurrency: 3,
     questionTimeoutMs: 4 * 60 * 60 * 1000,
     baseBranch: 'main',
     postLinearComments: false,
+    notifySlack: false,
     draftPr: true,
     questionsEnabled: true,
     maxRunMs: 60 * 60 * 1000,
   },
   mappings: {
     'proj-1': {
+      linearProjectId: 'proj-1',
+      linearTeamId: null,
       repos: [{ repoDir: '/repo/api', repoSlug: 'org/api', baseBranch: 'main', enabled: true }],
     },
   },
-} as unknown as Config;
+};
 
 const NEEDS_INPUT: AgentResult = {
   status: 'needs_input',
   summary: 'Blocked on a product judgement.',
   question: 'Should the health endpoint report database connectivity?',
-  assumptionIfUnanswered: 'Report process liveness only.',
+  assumption: 'Report process liveness only.',
 };
 
 const COMPLETE: AgentResult = {
@@ -100,7 +108,7 @@ function harness(script: AgentResult[], issues: Array<typeof ISSUE> = [ISSUE]) {
     log: silent,
     questions: () => questions,
   });
-  questions = createQuestions({ store, engine, config: CONFIG, log: silent });
+  questions = createQuestions({ store, engine, config: CONFIG, linear, log: silent });
 
   return { store, scheduler, agent, worktrees, deliverer, linear, engine };
 }
@@ -137,7 +145,7 @@ test('one run travels queued -> delivered through the Q&A detour, holding no slo
   const open = store.openQuestionsForIssue(ISSUE.id);
   assert.equal(open.length, 1, 'exactly one open question per blocked run');
   assert.equal(open[0].text, NEEDS_INPUT.question);
-  assert.equal(open[0].assumption, NEEDS_INPUT.assumptionIfUnanswered);
+  assert.equal(open[0].assumption, NEEDS_INPUT.assumption);
   assert.ok(open[0].deadlineAt > open[0].askedAt, 'deadline is absolute, in the row');
 
   // --- the human answers, the run resumes and ships ------------------------

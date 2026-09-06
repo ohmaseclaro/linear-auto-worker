@@ -101,7 +101,7 @@ export function buildAgentPrompt(o: AgentPromptInput): string {
     'When you are done, end your turn with the JSON result your schema requires. Always',
     'include "summary". Use status "complete" once the work is committed, and include',
     '"prTitle" and "prBody". Use "needs_input" if you need the human, and include both',
-    '"question" and "assumptionIfUnanswered" — the reasonable default you will proceed',
+    '"question" and "assumption" — the reasonable default you will proceed',
     'with if nobody answers. Use "failed" with "failureReason" if the task cannot be done.',
   ].join('\n');
 }

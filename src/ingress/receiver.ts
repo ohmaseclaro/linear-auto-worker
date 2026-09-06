@@ -198,7 +198,11 @@ export function createReceiver(deps: ReceiverDeps): http.RequestListener {
 
     // Synchronous by design: an awaited dedupe write inside the acknowledgement path
     // reintroduces exactly the latency this module exists to remove.
-    if (!store.tryInsertDelivery(deliveryId)) {
+    // T46/P2: `recordDelivery`, two arguments. This used to read `tryInsertDelivery(id)` —
+    // a method the real store does not have, called with one argument where the port takes
+    // two. It survived six phases because the in-memory fake carried an alias; against the
+    // production store it was a `TypeError` on the very first webhook delivery.
+    if (!store.recordDelivery(deliveryId, Date.now())) {
       // The counter bucket guards.ts reserved for layer 4; the log carries the D-09 guard
       // name. Two spellings of one event, because both names are load-bearing elsewhere.
       incSelfEventDrop('delivery:duplicate');

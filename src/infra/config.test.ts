@@ -15,16 +15,36 @@ function makeTempRoot(): string {
 
 const validDefaults = {
   postLinearComments: true,
-  slackNotify: false,
+  notifySlack: false,
   baseBranch: 'main',
   draftPr: true,
-  questionFlowEnabled: true,
-  maxRunTimeMs: 60 * 60 * 1000,
+  questionsEnabled: true,
+  maxRunMs: 60 * 60 * 1000,
+  questionTimeoutMs: 4 * 60 * 60 * 1000,
 };
+
+/** Everything `Config` requires beside `defaults`/`mappings`. */
+const validTop = {
+  botUserId: 'bot-1',
+  teamId: 'team-1',
+  concurrency: 3,
+  maxQuestionRounds: 3,
+  maxTurns: 40,
+  worktreeRoot: '/tmp/wt',
+  dbPath: '/tmp/store.db',
+};
+
+function repo(repoDir: string, repoSlug: string) {
+  return { repoDir, repoSlug, baseBranch: 'main', enabled: true };
+}
+
+function config(mappings: Config['mappings']): Config {
+  return { ...validTop, defaults: validDefaults, mappings };
+}
 
 test('missing defaults.baseBranch fails safeParse and prettifyError names the field', () => {
   const { baseBranch: _drop, ...rest } = validDefaults;
-  const result = ConfigSchema.safeParse({ defaults: rest, mappings: [] });
+  const result = ConfigSchema.safeParse({ ...validTop, defaults: rest, mappings: {} });
   assert.equal(result.success, false);
   if (!result.success) {
     const message = z.prettifyError(result.error);
@@ -34,14 +54,16 @@ test('missing defaults.baseBranch fails safeParse and prettifyError names the fi
 
 test('slackWebhookUrl uses the top-level z.url() validator', () => {
   const result = ConfigSchema.safeParse({
+    ...validTop,
     defaults: validDefaults,
-    mappings: [
-      {
+    mappings: {
+      'proj-1': {
         linearProjectId: 'proj-1',
-        repos: [{ repoDir: '/repo', repoSlug: 'org/repo' }],
+        linearTeamId: null,
+        repos: [repo('/repo', 'org/repo')],
         slackWebhookUrl: 'not-a-url',
       },
-    ],
+    },
   });
   assert.equal(result.success, false);
   if (!result.success) {
@@ -51,88 +73,92 @@ test('slackWebhookUrl uses the top-level z.url() validator', () => {
 
 test('a mapping with both linearProjectId and linearTeamId fails', () => {
   const result = ConfigSchema.safeParse({
+    ...validTop,
     defaults: validDefaults,
-    mappings: [
-      {
+    mappings: {
+      'proj-1': {
         linearProjectId: 'proj-1',
         linearTeamId: 'team-1',
-        repos: [{ repoDir: '/repo', repoSlug: 'org/repo' }],
+        repos: [repo('/repo', 'org/repo')],
       },
-    ],
+    },
   });
   assert.equal(result.success, false);
 });
 
 test('a mapping with neither linearProjectId nor linearTeamId fails', () => {
   const result = ConfigSchema.safeParse({
+    ...validTop,
     defaults: validDefaults,
-    mappings: [{ repos: [{ repoDir: '/repo', repoSlug: 'org/repo' }] }],
+    mappings: {
+      'proj-1': { linearProjectId: null, linearTeamId: null, repos: [repo('/repo', 'org/repo')] },
+    },
   });
   assert.equal(result.success, false);
 });
 
 test('a mapping with exactly one of linearProjectId/linearTeamId passes', () => {
   const result = ConfigSchema.safeParse({
+    ...validTop,
     defaults: validDefaults,
-    mappings: [{ linearProjectId: 'proj-1', repos: [{ repoDir: '/repo', repoSlug: 'org/repo' }] }],
+    mappings: {
+      'proj-1': {
+        linearProjectId: 'proj-1',
+        linearTeamId: null,
+        repos: [repo('/repo', 'org/repo')],
+      },
+    },
   });
   assert.equal(result.success, true);
 });
 
 test('resolveMapping finds a project-keyed mapping when one matches', () => {
-  const config = {
-    defaults: validDefaults,
-    mappings: [
-      { linearProjectId: 'proj-1', repos: [{ repoDir: '/repo-a', repoSlug: 'org/a' }] },
-      { linearTeamId: 'team-1', repos: [{ repoDir: '/repo-b', repoSlug: 'org/b' }] },
-    ],
-  } as unknown as Config;
+  const cfg = config({
+    'proj-1': { linearProjectId: 'proj-1', linearTeamId: null, repos: [repo('/repo-a', 'org/a')] },
+    'team-1': { linearProjectId: null, linearTeamId: 'team-1', repos: [repo('/repo-b', 'org/b')] },
+  });
 
-  const resolved = resolveMapping(config, { projectId: 'proj-1', teamId: 'team-1' });
+  const resolved = resolveMapping(cfg, { projectId: 'proj-1', teamId: 'team-1' });
   assert.ok(resolved);
   assert.equal(resolved?.repos[0].repoSlug, 'org/a');
 });
 
 test('resolveMapping falls back to a team-keyed mapping when no project match exists (Phase 1 D-07)', () => {
-  const config = {
-    defaults: validDefaults,
-    mappings: [{ linearTeamId: 'team-1', repos: [{ repoDir: '/repo-b', repoSlug: 'org/b' }] }],
-  } as unknown as Config;
+  const cfg = config({
+    'team-1': { linearProjectId: null, linearTeamId: 'team-1', repos: [repo('/repo-b', 'org/b')] },
+  });
 
-  const resolved = resolveMapping(config, { projectId: 'proj-missing', teamId: 'team-1' });
+  const resolved = resolveMapping(cfg, { projectId: 'proj-missing', teamId: 'team-1' });
   assert.ok(resolved);
   assert.equal(resolved?.repos[0].repoSlug, 'org/b');
 });
 
 test('resolveMapping returns undefined when neither project nor team matches', () => {
-  const config = {
-    defaults: validDefaults,
-    mappings: [{ linearTeamId: 'team-1', repos: [{ repoDir: '/repo-b', repoSlug: 'org/b' }] }],
-  } as unknown as Config;
+  const cfg = config({
+    'team-1': { linearProjectId: null, linearTeamId: 'team-1', repos: [repo('/repo-b', 'org/b')] },
+  });
 
-  const resolved = resolveMapping(config, { projectId: null, teamId: 'team-missing' });
+  const resolved = resolveMapping(cfg, { projectId: null, teamId: 'team-missing' });
   assert.equal(resolved, undefined);
 });
 
 test("a mapping's sparse overrides merge over defaults for only the named toggles (Phase 1 D-09)", () => {
-  const config = {
-    defaults: validDefaults,
-    mappings: [
-      {
-        linearProjectId: 'proj-1',
-        repos: [{ repoDir: '/repo-a', repoSlug: 'org/a' }],
-        overrides: { draftPr: false },
-      },
-    ],
-  } as unknown as Config;
+  const cfg = config({
+    'proj-1': {
+      linearProjectId: 'proj-1',
+      linearTeamId: null,
+      repos: [repo('/repo-a', 'org/a')],
+      overrides: { draftPr: false },
+    },
+  });
 
-  const resolved = resolveMapping(config, { projectId: 'proj-1', teamId: 'team-1' });
+  const resolved = resolveMapping(cfg, { projectId: 'proj-1', teamId: 'team-1' });
   assert.equal(resolved?.draftPr, false);
   assert.equal(resolved?.postLinearComments, validDefaults.postLinearComments);
-  assert.equal(resolved?.slackNotify, validDefaults.slackNotify);
+  assert.equal(resolved?.notifySlack, validDefaults.notifySlack);
   assert.equal(resolved?.baseBranch, validDefaults.baseBranch);
-  assert.equal(resolved?.questionFlowEnabled, validDefaults.questionFlowEnabled);
-  assert.equal(resolved?.maxRunTimeMs, validDefaults.maxRunTimeMs);
+  assert.equal(resolved?.questionsEnabled, validDefaults.questionsEnabled);
+  assert.equal(resolved?.maxRunMs, validDefaults.maxRunMs);
 });
 
 test('loadSecrets throws when the .env file mode is not 0600 (D-01, Phase 1 D-08)', () => {
