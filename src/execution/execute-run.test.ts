@@ -112,6 +112,11 @@ function harness(o: { commitLog: string; branchName?: string; prUrl?: string }):
       order.push('gh');
       return ok(`Creating pull request\n${o.prUrl ?? 'https://github.com/acme/api/pull/7'}\n`);
     }
+    // `git show-ref --verify --quiet refs/heads/<b>` is a PROBE, not a command: exit 0 means
+    // the branch ALREADY EXISTS. The blanket `ok('')` fallthrough below therefore answered
+    // "yes" to every candidate, so `resolveBranchName` burned all 50 suffixes and
+    // `prepareWorktree` threw before a single assertion in this file could run.
+    if (joined.includes('show-ref')) return { exitCode: 1, stdout: '', stderr: '' };
     if (joined.includes('push')) order.push('push');
     if (joined.includes('log --oneline')) return ok(o.commitLog);
     if (joined.includes('status --porcelain')) return ok('');
