@@ -309,6 +309,79 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
     );
   }
 
+  // --- cancellation (D-11, INTK-08) -----------------------------------------
+
+  function isCancelRequested(runId: RunId): boolean {
+    return store.kvGet(cancelKey(runId)) !== undefined;
+  }
+
+  /**
+   * The supervisor checkpoint D-11 names. Called between the awaits of the work
+   * path: a cancel arriving while a child is live is honored HERE, not at
+   * request time.
+   */
+  function checkpoint(runId: RunId): void {
+    if (isCancelRequested(runId)) throw new CancelledSignal();
+    if (store.getRun(runId)?.state === 'cancelled') throw new CancelledSignal();
+  }
+
+  async function finishCancel(runId: RunId, reason: string): Promise<void> {
+    const run = store.getRun(runId);
+    // Idempotent: a run cancelled while parked reaches here a second time when
+    // its turn in the queue finally comes up.
+    if (!run || RUN_STATE_TABLE[run.state].terminal) return;
+    for (const q of store.openQuestionsForIssue(run.issueId)) {
+      if (q.runId === runId) store.updateQuestion(q.id, { status: 'cancelled' });
+    }
+    await transition(runId, 'cancelled', reason);
+    // An `awaiting_answer` run has no driver in flight -- it exited and is
+    // waiting on a human -- so there is no `finally` to report its terminal
+    // state. Report it here. The emission is kv-guarded, so the driver's
+    // `finally` on the other cancel paths does not double it (invariant 11).
+    await announceTerminal(runId);
+  }
+
+  /**
+   * D-11 / INTK-08 / Phase 1 D-05. Two tiers, split on the state table's own
+   * `hasLiveChild` rather than on a hand-written list of state names — the list
+   * is the thing that goes stale when a tenth state lands.
+   */
+  async function cancel(runId: RunId, reason = 'bot unassigned'): Promise<void> {
+    const run = store.getRun(runId);
+    if (!run) return;
+    const info = RUN_STATE_TABLE[run.state];
+
+    // Terminal is terminal (T-06-09). No transition, no throw: a replayed
+    // unassignment must not disturb a run that already shipped.
+    if (info.terminal) {
+      log.info({ runId, state: run.state }, 'cancel ignored; run is already terminal');
+      return;
+    }
+
+    if (info.hasLiveChild) {
+      // Setting the flag is idempotent, so cancelling twice leaves one flag and
+      // produces one eventual transition.
+      if (isCancelRequested(runId)) return;
+      store.kvSet(cancelKey(runId), String(now()));
+      // T-06-10: the request and the eventual transition are both rows, so a
+      // cancel that was asked for and never honored is visible after the fact.
+      store.appendRunEvent({
+        runId,
+        from: run.state,
+        to: run.state,
+        at: now(),
+        detail: `cancel requested: ${reason}`,
+      });
+      aborts.get(runId)?.abort();
+      log.info({ runId, state: run.state }, 'cancel requested; honored at the next checkpoint');
+      return;
+    }
+
+    // No live child: nothing has been pushed, so stopping now claims nothing
+    // that did not happen.
+    await finishCancel(runId, reason);
+  }
+
   async function fail(runId: RunId, reason: string, raw?: unknown): Promise<void> {
     // T17 / D-13 / OPS-04: a failed run is attempted exactly once. No retry
     // loop, no requeue, no threshold. The branch and worktree are deliberately
@@ -343,6 +416,14 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
         store.updateRun(runId, { prUrl: pr.url, updatedAt: now() });
         await transition(runId, 'delivered', pr.url);
         release();
+        return;
+      }
+      case 'cancelled': {
+        // The child honored the abort. This is a cancellation, not a failure --
+        // routing it to `failed` would post a diagnosis for work the operator
+        // deliberately stopped.
+        release();
+        await finishCancel(runId, 'agent reported cancelled');
         return;
       }
       default:
@@ -406,17 +487,24 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
     const ac = new AbortController();
     aborts.set(runId, ac);
     try {
+      // Cancelled while parked: the run took its turn in the queue only to
+      // find it had already stopped.
+      checkpoint(runId);
       await transition(runId, 'preparing', ackCommentId ?? 'slot acquired');
       const queued = store.getRun(runId)!;
       const wt = await worktrees.create(runId, repoOf(queued), queued.branch!);
       store.updateRun(runId, { worktreePath: wt.path, updatedAt: now() });
+      checkpoint(runId);
       const prepared = await transition(runId, 'running', wt.path);
       // ponytail: the real brief (issue body, acceptance criteria, repo list)
       // is composed in execution/prompt.ts -- Phase 4 owns it.
       const result = await agent.run(spawnRequest(prepared, prepared.issueTitle, false), ac.signal);
+      // The supervisor checkpoint a `running` cancel waits for.
+      checkpoint(runId);
       await dispatch(runId, result, release);
     } catch (err) {
-      await fail(runId, classify(err), err);
+      if (err instanceof CancelledSignal) await finishCancel(runId, 'cancel requested');
+      else await fail(runId, classify(err), err);
     } finally {
       aborts.delete(runId);
       release();
@@ -437,9 +525,11 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
       await deps.questions().applyAnswer(questionId, answer);
       const run = store.getRun(runId)!;
       const result = await agent.run(spawnRequest(run, answer, true), ac.signal);
+      checkpoint(runId);
       await dispatch(runId, result, release);
     } catch (err) {
-      await fail(runId, classify(err), err);
+      if (err instanceof CancelledSignal) await finishCancel(runId, 'cancel requested');
+      else await fail(runId, classify(err), err);
     } finally {
       aborts.delete(runId);
       release();
@@ -451,6 +541,8 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
   return {
     transition,
     refreshQueuePositions,
+    cancel,
+    isCancelRequested,
 
     async handle(event: DomainEvent): Promise<void> {
       switch (event.kind) {
@@ -473,6 +565,17 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
           // insert at `queued` (above), acknowledge, In Progress, subscribe.
           const ackCommentId = await acknowledge(run);
           track(drive(run.id, ackCommentId, slot));
+          return;
+        }
+        case 'run.cancelled': {
+          // Unassignment is an issue-level event. A multi-repo ticket has one
+          // child run per repo (D-03/D-12) and all of them stop.
+          const active = store.findActiveRunByIssue(event.issueId);
+          if (active.length === 0) {
+            log.info({ issueId: event.issueId }, 'cancel for an issue with no active run');
+            return;
+          }
+          for (const run of active) await cancel(run.id, event.reason);
           return;
         }
         case 'question.answered': {
