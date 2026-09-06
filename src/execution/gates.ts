@@ -119,8 +119,10 @@ export function findSecrets(diff: string): SecretHit[] {
       const match = SECRET_PATTERNS.find((p) => p.re.test(content));
       if (match) hits.push({ file, line: newLine, pattern: match.name });
       newLine += 1;
-    } else if (raw.startsWith('-')) {
-      // Removed line: consumes an old-side line number, not a new-side one.
+    } else if (raw.startsWith('-') || raw.startsWith('\\')) {
+      // A removed line consumes an old-side number, not a new-side one; `\ No newline at
+      // end of file` is a marker, not a line. Counting either shifts every subsequent
+      // report by one, which makes a located hit point at the wrong line.
     } else {
       newLine += 1;
     }

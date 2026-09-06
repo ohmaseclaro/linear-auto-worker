@@ -1,9 +1,14 @@
 /**
- * The worker opens the PR — never the agent. DELV-01, DELV-02, DELV-03, D-12, D-13.
+ * The worker opens the PR — never the agent. DELV-01, DELV-02, DELV-03, DELV-04, DELV-08,
+ * DELV-09, D-12, D-13.
  *
- * Delivery must not depend on the agent remembering a final step, and it must not happen
- * before the gates. Plan 06 owns the templated body and retry idempotency; the tracer
- * writes a minimal body and calls this same function.
+ * This is the only code in the milestone that writes to a remote the operator owns.
+ * Everything irreversible in the product happens here, which is why all three gates sit
+ * UPSTREAM of the push rather than beside it.
+ *
+ * Nothing in the agent's prompt or the agent's behaviour is required for delivery to
+ * happen. Delivery that depends on the agent remembering a final step is delivery that
+ * silently does not happen on the runs where it matters most.
  */
 import { randomUUID } from 'node:crypto';
 import { writeFile } from 'node:fs/promises';
@@ -11,7 +16,9 @@ import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { DeliveryError } from '../domain/errors.js';
 import type { RunCommand } from './execute-run.js';
-import { assertPushAllowed, touchesCiPaths } from './gates.js';
+import { runPrePushGates } from './gates.js';
+import { renderPrBody, type PrBodyInput } from './pr-body.js';
+import { sanitizeUntrustedText } from './prompt.js';
 
 export interface DeliverInput {
   runCommand: RunCommand;
@@ -24,51 +31,87 @@ export interface DeliverInput {
   defaultBranch: string;
   remote?: string;
   title: string;
-  body: string;
+  /**
+   * A pre-rendered body. The tracer's (04-01) call shape, kept so `execute-run.ts` compiles
+   * unchanged. Superseded by `prBody`: a body rendered by the CALLER cannot carry the CI
+   * flag, because the gates that produce it have not run yet at that point.
+   */
+  body?: string;
+  /** Preferred. The worker templates the body here, after the gates (DELV-03, DELV-08). */
+  prBody?: Omit<PrBodyInput, 'ciPaths'>;
   draft: boolean;
+  /** A `partial` run is always a draft, whatever the mapping toggle says. */
+  verdict?: 'delivered' | 'partial';
 }
 
 export interface DeliveryResult {
   prUrl: string;
+  ciPaths: string[];
+  /** Convenience mirror of `ciPaths.length > 0`. */
   ciTouched: boolean;
+  draft: boolean;
+  /** True when an open PR for this branch already existed and none was created. */
+  alreadyExisted: boolean;
 }
 
 export async function deliver(o: DeliverInput): Promise<DeliveryResult> {
-  // 1. The gate, first. Everything below this line assumes it passed.
-  assertPushAllowed({ branch: o.branch, defaultBranch: o.defaultBranch });
-
-  const changed = await o.runCommand('git', [
-    '-C',
-    o.worktreePath,
-    'diff',
-    '--name-only',
-    `${o.base}..HEAD`,
-  ]);
-  const ciTouched = touchesCiPaths(
-    changed.stdout
-      .split('\n')
-      .map((line) => line.trim())
-      .filter((line) => line.length > 0)
-  );
-
-  // 2. Push explicitly, one named ref, and never the forcing variant of this command
-  //    (D-13). The explicit push also stops `gh` hanging: `gh` prompts for where to push
-  //    when the branch is not fully pushed, and it has no TTY here to prompt into.
   const remote = o.remote ?? 'origin';
-  await o.runCommand('git', [
-    '-C',
-    o.worktreePath,
-    'push',
-    '-u',
-    remote,
-    `refs/heads/${o.branch}`,
-  ]);
+  const range = `${o.base}..HEAD`;
 
-  // 3. `--body-file` needs a real path, so the body has to land on disk first.
+  // 1. Collect the text the gates need. These are the only two commands upstream of the
+  //    gates, and both are read-only.
+  const changed = await o.runCommand('git', ['-C', o.worktreePath, 'diff', '--name-only', range]);
+  const files = splitLines(changed.stdout);
+  const diff = await o.runCommand('git', ['-C', o.worktreePath, 'diff', range]);
+
+  // 2. The gates, before a single push argument is constructed. A refusal or a block ends
+  //    the run here — no push, no PR — and the reason goes out to the caller so Phase 5 can
+  //    report it on the ticket.
+  const gates = runPrePushGates({
+    branch: o.branch,
+    defaultBranch: o.defaultBranch,
+    diff: diff.stdout,
+    files,
+  });
+  if (gates.refusal) throw new DeliveryError(gates.refusal);
+  if (gates.block) throw new DeliveryError(gates.block);
+
+  // 3. Push explicitly, one FULLY QUALIFIED named ref: an ambiguous ref can resolve to a
+  //    tag of the same name and push the wrong object. The forcing variants of this command
+  //    do not appear anywhere in this file, in any spelling (D-13) — a rewrite of a remote
+  //    branch is exactly the irreversible act the gates above exist to prevent.
+  //
+  //    The push comes before `gh` and not after: `gh` prompts for where to push when the
+  //    branch is not fully pushed, and it has no TTY here to prompt into, so the prompt is
+  //    a hang (Pitfall 7).
+  await o.runCommand('git', ['-C', o.worktreePath, 'push', '-u', remote, `refs/heads/${o.branch}`]);
+
+  const draft = o.draft || o.verdict === 'partial';
+
+  // 4. Idempotency. Delivery is retried after transient failures, and a second PR for one
+  //    branch is noise the operator cleans up by hand.
+  const existing = await findOpenPrUrl(o);
+  if (existing) {
+    return {
+      prUrl: existing,
+      ciPaths: gates.ciPaths,
+      ciTouched: gates.ciPaths.length > 0,
+      draft,
+      alreadyExisted: true,
+    };
+  }
+
+  // 5. `--body-file` needs a real path, so the body lands on disk first.
+  const body = renderPrBody({ ...(o.prBody ?? { summary: o.body }), ciPaths: gates.ciPaths });
   const bodyPath = path.join(tmpdir(), `law-pr-body-${randomUUID()}.md`);
-  await writeFile(bodyPath, o.body, 'utf8');
+  await writeFile(bodyPath, body, 'utf8');
 
-  const args = [
+  // The title crosses into a subprocess argv AND into a GitHub page heading. It is the same
+  // untrusted ticket text the prompt sanitizes, and it deserves the same treatment; the
+  // runner takes an argv array, so there is no shell to interpolate into either.
+  const title = sanitizeUntrustedText(o.title);
+
+  const createArgs = [
     'pr',
     'create',
     '-R',
@@ -78,21 +121,21 @@ export async function deliver(o: DeliverInput): Promise<DeliveryResult> {
     '--head',
     o.branch,
     '--title',
-    o.title,
+    title,
     '--body-file',
     bodyPath,
-    ...(o.draft ? ['--draft'] : []),
+    // DELV-02: draft is the DEFAULT, with a per-mapping toggle for ready. Shipping
+    // incomplete work as ready-for-review wastes a reviewer's time on the run that already
+    // went least well.
+    ...(draft ? ['--draft'] : []),
   ];
-  const created = await o.runCommand('gh', args);
+  const created = await o.runCommand('gh', createArgs);
 
-  // 4. T13 / D-12: `gh pr create` on 2.98.0 has no flag for machine-readable output —
-  //    asking for one errors out with `unknown flag`. It prints the PR URL on stdout.
-  const prUrl = created.stdout
-    .split('\n')
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0)
-    .pop();
-
+  // 6. T13 / D-12: `gh pr create` on 2.98.0 has NO machine-readable output flag — asking
+  //    for one errors out with `unknown flag`, which is the obvious thing to reach for and
+  //    the reason this is written down. It prints the PR URL on stdout, and stdout may
+  //    carry a leading warning line, so take the last non-empty one.
+  const prUrl = splitLines(created.stdout).pop();
   if (!prUrl) {
     throw new DeliveryError(
       `the push succeeded but gh printed no PR URL for ${o.branch}. The branch is on the ` +
@@ -100,5 +143,37 @@ export async function deliver(o: DeliverInput): Promise<DeliveryResult> {
     );
   }
 
-  return { prUrl, ciTouched };
+  return {
+    prUrl,
+    ciPaths: gates.ciPaths,
+    ciTouched: gates.ciPaths.length > 0,
+    draft,
+    alreadyExisted: false,
+  };
+}
+
+/**
+ * The open PR for this branch, or undefined.
+ *
+ * ponytail: the URL is CONSTRUCTED from `owner/repo` and the PR number rather than read
+ * back, because the only flag that returns a URL here is the same machine-readable flag
+ * T13 forbids elsewhere in this file, and one spelling of `gh` invocation across the file
+ * is worth more than a URL round-trip. Ceiling: this assumes github.com. A GitHub
+ * Enterprise host needs the real field read back instead.
+ */
+async function findOpenPrUrl(o: DeliverInput): Promise<string | undefined> {
+  const listArgs = ['pr', 'list', '--head', o.branch, '-R', o.ownerRepo, '--state', 'open'];
+  const listed = await o.runCommand('gh', listArgs, { reject: false });
+  if (listed.exitCode !== 0) return undefined;
+
+  const first = splitLines(listed.stdout)[0];
+  const number = first ? /^(\d+)/.exec(first)?.[1] : undefined;
+  return number ? `https://github.com/${o.ownerRepo}/pull/${number}` : undefined;
+}
+
+function splitLines(s: string): string[] {
+  return s
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
 }
