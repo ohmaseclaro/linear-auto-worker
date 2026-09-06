@@ -1,0 +1,9 @@
+# Type-escape baseline captured before 07-02 drove 68 errors to zero.
+# Purpose: a fix that silences rather than reconciles shows up here, not in the error count.
+: any = 7
+as any = 10
+@ts-ignore = 0
+@ts-expect-error = 0
+as unknown as = 56
+non-null = 81
+optional = 305
