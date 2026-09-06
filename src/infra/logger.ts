@@ -27,8 +27,14 @@ function redact(value: unknown): unknown {
 }
 
 class SecretScrubbingStream extends Writable {
-  constructor(private readonly secrets: Set<string>) {
+  // Explicit field, not a constructor parameter property: `erasableSyntaxOnly` is on
+  // (tsconfig), and Node's type stripping only accepts the erasable subset. A parameter
+  // property compiles under some settings and then fails to load at runtime.
+  private readonly secrets: Set<string>;
+
+  constructor(secrets: Set<string>) {
     super();
+    this.secrets = secrets;
   }
 
   override _write(
