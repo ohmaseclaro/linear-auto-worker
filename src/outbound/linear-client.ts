@@ -53,6 +53,8 @@ export interface LinearIssue {
   teamId: string;
   stateId: string;
   stateType: string;
+  /** ISO 8601 UTC. The reconciliation poll's watermark compares against it (06-04). */
+  updatedAt: string;
 }
 
 /**
@@ -62,6 +64,24 @@ export interface LinearIssue {
  */
 export type WorkflowStateType = 'started' | 'completed' | 'canceled';
 
+/**
+ * OPEN AT THE 07-04 SEAM — this interface is NOT `src/domain/ports.ts`'s `LinearClient`,
+ * and passing `LinearClientImpl` where the port is expected will not compile. That is
+ * deliberate: five differences below are design decisions this plan does not own, and a
+ * facade quietly widened to fit would be the `tryInsertDelivery` mistake again.
+ *
+ *  1. `setIssueState(issueId, teamId, 'started'|'completed'|'canceled')` here; the port
+ *     says `(id, 'started'|'review')`. "In Review" is not a Linear state TYPE, so the
+ *     mapping is a real decision (05-CONTEXT D-06 / INTK-04), not a rename.
+ *  2. `updateComment` / `addSubscriber` / `listComments` are on the port (D-10, INTK-03,
+ *     06-04's poll) and are NOT implemented here.
+ *  3. `createWebhook` takes a caller-supplied `secret` and returns only `{ id }`; the port
+ *     claims Linear returns the secret. This facade is right — landmine #3 — and the port
+ *     is what needs to move. Nothing consumes either today: `registrar.ts` talks to the
+ *     raw SDK client and bypasses both.
+ *  4. `teamId` is non-null here, nullable on the port.
+ *  5. `LinearIssue` is declared twice, here and on the port.
+ */
 export interface LinearClient {
   /** Preflight: who does this API key authenticate as? */
   viewer(): Promise<{ id: string; name: string }>;
@@ -173,6 +193,7 @@ async function toLinearIssue(issue: Issue): Promise<LinearIssue> {
     teamId: team.id,
     stateId: state.id,
     stateType: state.type,
+    updatedAt: issue.updatedAt.toISOString(),
   };
 }
 
