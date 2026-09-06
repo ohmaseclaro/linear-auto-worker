@@ -26,3 +26,28 @@ export type RunState =
   | 'partial'
   | 'failed'
   | 'cancelled';
+
+/**
+ * Terminal states. Nothing leaves them, with exactly one documented exception:
+ * `failed` accepts an explicit operator `requeue`.
+ */
+export const TERMINAL: ReadonlyArray<RunState> = ['delivered', 'partial', 'failed', 'cancelled'];
+
+/**
+ * States that occupy one of the daemon's concurrency slots (D-02).
+ *
+ * The parked state is deliberately absent, and that absence is load-bearing for the whole
+ * scheduler: a run waiting on a human answer takes minutes to hours, so if it held a slot
+ * three open questions would deadlock a three-slot laptop. Because it holds nothing, an
+ * hours-long human wait costs the daemon nothing.
+ */
+export const HOLDS_SLOT: ReadonlyArray<RunState> = ['preparing', 'running', 'delivering'];
+
+/**
+ * States with a live `claude` child process (D-02).
+ *
+ * Only one qualifies. The Q&A design is exit-and-resume: the agent ends its turn to ask,
+ * so the child process is already gone by the time the run parks. A parked run has no live
+ * process any more than it has a slot.
+ */
+export const HAS_CHILD: ReadonlyArray<RunState> = ['running'];
