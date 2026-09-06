@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 1
 current_phase_name: Domain Contract, State Machine & Schema
 status: planning
-stopped_at: Completed 02-01-PLAN.md
-last_updated: "2026-09-06T16:44:11.937Z"
+stopped_at: Completed 02-02-PLAN.md
+last_updated: "2026-09-06T16:55:54.936Z"
 last_activity: 2026-09-06
 last_activity_desc: Roadmap created; 70/70 v1 requirements mapped across 8 phases
 progress:
   total_phases: 8
-  completed_phases: 0
-  total_plans: 24
-  completed_plans: 1
+  completed_phases: 1
+  total_plans: 31
+  completed_plans: 3
 ---
 
 # Project State
@@ -32,7 +32,7 @@ Plan: 0 of TBD in current phase
 Status: Ready to plan
 Last activity: 2026-09-06 — Roadmap created; 70/70 v1 requirements mapped across 8 phases
 
-Progress: [░░░░░░░░░░] 4%
+Progress: [█░░░░░░░░░] 10%
 
 ## Performance Metrics
 
@@ -59,6 +59,7 @@ Progress: [░░░░░░░░░░] 4%
 | Plan | Duration | Tasks | Files |
 |------|----------|-------|-------|
 | Phase 02 P01 | 25min | 2 tasks | 7 files |
+| Phase 02 P02 | 8min | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -72,6 +73,7 @@ Recent decisions affecting current work:
 - Roadmap: within Phase 7, router→engine is wired before engine→execution, so ingress bugs do not cost a Claude session each to reproduce
 - Roadmap: the wizard ships last (Phase 8) but the config shape it writes is fixed in Phases 1-2, because four layers read it
 - [Phase ?]: Split config.ts into a tracer-minimal Task 1 version and a fully-validated Task 2 version (02-01)
+- [Phase ?]: 02-02: SqliteStore CRUD is a generic patch-based repository with zero transition validation; findActiveRunByIssue treats delivered/partial/failed/cancelled as terminal (plan text omitted partial, corrected as Rule 1 fix)
 
 ### Pending Todos
 
@@ -99,6 +101,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-09-06T16:44:11.930Z
-Stopped at: Completed 02-01-PLAN.md
+Last session: 2026-09-06T16:55:38.681Z
+Stopped at: Completed 02-02-PLAN.md
 Resume file: None

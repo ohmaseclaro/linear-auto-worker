@@ -95,7 +95,7 @@
 ### Operations
 
 - [ ] **OPS-01**: Run state survives a restart — runs interrupted mid-flight are detected at boot and explicitly failed or requeued, never left as zombies with a stuck In Progress ticket
-- [ ] **OPS-02**: The SQLite store runs in WAL mode with a busy timeout and does not block the event loop under concurrent runs
+- [x] **OPS-02**: The SQLite store runs in WAL mode with a busy timeout and does not block the event loop under concurrent runs
 - [ ] **OPS-03**: Linear rate limiting is detected by its error extension code rather than an HTTP status, and backed off according to the reset header
 - [ ] **OPS-04**: A failed run is attempted once — failure posts a diagnosis with the error and log path, and leaves the branch and worktree for the operator, rather than retrying
 - [ ] **OPS-05**: The worker shuts down cleanly on interrupt and terminate — killing spawned children, closing the tunnel, and marking in-flight runs
@@ -209,7 +209,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | NOTF-05 | Phase 5 — Outbound | Pending |
 | NOTF-06 | Phase 5 — Outbound | Pending |
 | OPS-01 | Phase 6 — Orchestration | Pending |
-| OPS-02 | Phase 2 — Foundation | Pending |
+| OPS-02 | Phase 2 — Foundation | Complete |
 | OPS-03 | Phase 5 — Outbound | Pending |
 | OPS-04 | Phase 6 — Orchestration | Pending |
 | OPS-05 | Phase 7 — Integration & Daemon Lifecycle | Pending |
