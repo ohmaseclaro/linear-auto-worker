@@ -193,6 +193,23 @@ the unit suite now fails at boot with a precise stack trace.
 **This is T71 applied to the orchestrator's own work**, not just the agents': an instrument that
 has never been shown to fail is not known to work.
 
+## PASS — OPS-02 / 02-CONTEXT D-05: no secret reaches the log
+
+Executed against `createLogger([LINEAR_API_KEY, NGROK_AUTHTOKEN])` with stdout captured:
+
+| case | result |
+|---|---|
+| key as a field value | redacted |
+| the same key **inline in the message string** | redacted |
+| ngrok authtoken | redacted |
+| **webhook secret registered after boot** (`registerSecret`) | redacted |
+| child logger — `runId` retained, key still redacted | pass |
+
+The post-boot case is the one that matters: Phase 3 generates the webhook signing secret at
+runtime, so it does not exist when the logger is constructed. Redaction as a **global serializer
+at the sink** catches it; per-call-site redaction structurally could not, and would be forgotten
+exactly once — which is all it takes.
+
 ## RESOLVED — T53: fixed by the orchestrator after 07-02 reached tsc exit 0
 
 **The decisive result of this milestone.** After 07-02 drove the typecheck from 68 errors to
