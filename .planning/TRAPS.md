@@ -38,4 +38,10 @@ verified against live tools/registries during project research, not recalled fro
 
 ## Discovered during execution
 
+| # | Trap | Failure mode | Correct move | Phase |
+|---|------|--------------|--------------|-------|
+| T16 | **`research/ARCHITECTURE.md`'s transition table predates the binding contract and uses STALE state names** — `claimed`, `worktree_ready`, `agent_running`, `done`, `abandoned`. None are in the locked nine. | Code written against them compiles in isolation and fails only at the final integration gate, with no attribution to a phase. Under rush mode nothing catches it earlier. | The binding nine in `01-CONTEXT.md`'s ADDENDUM win, always. Translation: `claimed`→`queued`, `worktree_ready`→`preparing`, `agent_running`→`running`, `done`→`delivered`\|`partial`, `abandoned`→`cancelled`\|`failed`. | all |
+| T17 | **The same table encodes a bounded `failed → queued` auto-retry.** | Directly contradicts OPS-04 and 06-CONTEXT D-13 — a failed run is attempted exactly once. Building the retry produces duplicate PRs and burns API budget. | No retry machinery anywhere. Failure posts a diagnosis and leaves the branch and worktree for the operator. | 6 |
+| T18 | **`research/SUMMARY.md` Invariant 7 says requeue every `running` row found at boot; 06-CONTEXT D-07 says fail it.** | Requeueing blind re-runs a ticket whose push status is unknowable, producing a second PR for work already pushed. | D-07 wins. Phase 7's clean shutdown marks children `queued` before exit, so a `running` row surviving to boot means an *unclean* exit — exactly the case that must not be replayed. | 6, 7 |
+
 *(appended as waves hit them)*
