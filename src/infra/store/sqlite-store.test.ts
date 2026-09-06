@@ -71,7 +71,7 @@ test('recordDelivery() is dedupe-safe: true once, false on repeat, one row total
   const { db, store } = freshStore();
   assert.equal(store.recordDelivery('delivery-1', Date.now()), true);
   assert.equal(store.recordDelivery('delivery-1', Date.now()), false);
-  const count = db.prepare('SELECT COUNT(*) AS n FROM deliveries WHERE id = ?').get('delivery-1') as {
+  const count = db.prepare('SELECT COUNT(*) AS n FROM deliveries WHERE delivery_id = ?').get('delivery-1') as {
     n: number;
   };
   assert.equal(count.n, 1);
@@ -166,14 +166,14 @@ test('kvSet()/kvGet() round-trips a string value', () => {
   assert.equal(store.kvGet('webhook-secret'), 'def456');
 });
 
-test('idx_runs_state and idx_questions_deadline_at exist', () => {
+test('idx_runs_state and idx_questions_status_deadline exist', () => {
   const { db } = freshStore();
   const names = db
     .prepare("SELECT name FROM sqlite_master WHERE type = 'index'")
     .all()
     .map((row) => (row as { name: string }).name);
   assert.ok(names.includes('idx_runs_state'));
-  assert.ok(names.includes('idx_questions_deadline_at'));
+  assert.ok(names.includes('idx_questions_status_deadline'));
 });
 
 test('three sequential writers against one WAL/busy-timeout handle complete without a locking exception (OPS-02)', () => {
