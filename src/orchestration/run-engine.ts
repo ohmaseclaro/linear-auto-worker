@@ -544,6 +544,35 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
         release();
         return;
       }
+      case 'partial': {
+        // TRAPS T73. The agent claimed `complete`; the worktree said otherwise -- commits
+        // exist but the turn was truncated. This ships, because discarding real work is
+        // the worse error, but it ships as a DRAFT and says so, so the operator is never
+        // handed a truncated branch described as finished (Phase 1 D-01, Pitfall 3).
+        //
+        // Reaching `default` here instead would have posted a failure diagnosis over work
+        // that is on disk and pushable -- which is exactly what happened for the whole of
+        // this milestone, because nothing ever produced a `partial`.
+        await transition(runId, 'delivering', result.summary);
+        const run = repoRun(runId);
+        const uncommitted = result.uncommittedPaths?.length
+          ? `\n\n> **Uncommitted when the turn ended:** ${result.uncommittedPaths.join(', ')}`
+          : '';
+        const pr = await deliverer.deliver(worktreeOf(run), repoOf(run), {
+          title: result.prTitle,
+          body:
+            `> ⚠️ **Partial run.** The agent's turn ended before it reported completion, ` +
+            `but it left commits behind. Review before merging.${uncommitted}\n\n` +
+            result.prBody,
+          // Forced, never the mapping's toggle: a truncated branch is not something the
+          // operator opted into shipping ready-for-review.
+          draft: true,
+        });
+        store.updateRun(runId, { prUrl: pr.url, updatedAt: now() });
+        await transition(runId, 'partial', pr.url);
+        release();
+        return;
+      }
       case 'cancelled': {
         // The child honored the abort. This is a cancellation, not a failure --
         // routing it to `failed` would post a diagnosis for work the operator

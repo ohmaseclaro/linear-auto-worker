@@ -23,6 +23,7 @@ import { deliver as deliverPullRequest } from '../execution/deliver.js';
 import { defaultRunCommand, type RunCommand } from '../execution/execute-run.js';
 import type { ProgressUpdate } from '../execution/event-router.js';
 import { runAgent, type AgentRunOutcome, type AgentSpawn } from '../execution/supervisor.js';
+import { classifyOutcome, type WorktreeEvidence } from '../execution/verdict.js';
 import { prepareWorktree, reconcileWorktrees, removeWorktree } from '../execution/worktree.js';
 import type {
   AgentResult,
@@ -221,15 +222,81 @@ function denialPhrase(outcome: AgentRunOutcome): string {
  * transcript summary. The interesting cases are the ones with no result object at all,
  * because they are the ones a naive mapping turns into a silent success.
  */
-function toAgentResult(outcome: AgentRunOutcome): AgentResult {
+/**
+ * What the worktree actually contains, read with the same two commands `execute-run.ts`
+ * uses. `baseBranch` comes from the repo's own mapping, so the commit count is "commits
+ * this run added", not "commits on the branch".
+ *
+ * Failure here is not fatal and must not be: if `git` cannot answer, the caller falls back
+ * to trusting the agent, which is exactly the old behaviour and strictly no worse.
+ */
+async function gatherEvidence(
+  deps: AgentRunnerDeps,
+  worktreePath: string,
+  repoSlug: string | null,
+): Promise<WorktreeEvidence | undefined> {
+  const runCommand = deps.runCommand ?? defaultRunCommand;
+  const mappingId = repoSlug === null ? undefined : deps.index.get(repoSlug);
+  const mapping = mappingId ? deps.config.mappings[mappingId] : undefined;
+  const base = mapping?.repos.find((r) => r.repoSlug === repoSlug)?.baseBranch;
+  if (!base) return undefined;
+  try {
+    const committed = await runCommand('git', [
+      '-C',
+      worktreePath,
+      'log',
+      '--oneline',
+      `${base}..HEAD`,
+    ]);
+    const dirty = await runCommand('git', ['-C', worktreePath, 'status', '--porcelain']);
+    const paths = dirty.stdout
+      .split('\n')
+      .map((line) => line.slice(3).trim())
+      .filter((p) => p.length > 0);
+    return {
+      commitCount: committed.stdout.split('\n').filter((l) => l.trim().length > 0).length,
+      dirty: paths.length > 0,
+      ...(paths.length > 0 ? { uncommittedPaths: paths } : {}),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+/** Exported for `adapters.verdict.test.ts`: the timeout branch is only reachable
+ *  through a real 15s escalation ladder, which is not worth paying on every gate run. */
+export function toAgentResult(
+  outcome: AgentRunOutcome,
+  evidence?: WorktreeEvidence,
+): AgentResult {
   if (outcome.timedOut) {
+    const reaped =
+      `killed at the configured maxRunMs deadline` +
+      (outcome.killedBy ? ` (reaped by ${outcome.killedBy})` : '');
+
+    // T73, and the subtle half. A reap is the ONLY way `classifyOutcome` produces
+    // `partial`, so returning `failed` here unconditionally — as this did — left `partial`
+    // unreachable no matter what the classifier decided downstream. A timed-out run that
+    // left commits behind has real, pushable work; discarding it because the clock ran out
+    // is the same error as trusting a barren `complete`, pointed the other way.
+    if (evidence && evidence.commitCount > 0) {
+      return {
+        status: 'partial',
+        summary: `${reaped}; ${evidence.commitCount} commit(s) were left on the branch`,
+        prTitle: 'WIP: agent run reached its deadline',
+        prBody:
+          `The agent's session was ${reaped}. The commits below are what it finished ` +
+          `before the deadline; the work is incomplete by definition.`,
+        ...(evidence.uncommittedPaths
+          ? { uncommittedPaths: evidence.uncommittedPaths }
+          : {}),
+      };
+    }
+
     return {
       status: 'failed',
       summary: 'the session was still running when its deadline expired',
-      failureReason:
-        `killed at the configured maxRunMs deadline` +
-        (outcome.killedBy ? ` (reaped by ${outcome.killedBy})` : '') +
-        `; the worktree is left in place${denialPhrase(outcome)}`,
+      failureReason: `${reaped}; the worktree is left in place${denialPhrase(outcome)}`,
     };
   }
   const event = outcome.resultEvent;
@@ -240,9 +307,11 @@ function toAgentResult(outcome: AgentRunOutcome): AgentResult {
       stderrTail: `the agent produced no result event${denialPhrase(outcome)}`,
     };
   }
+
+  // T31: the PARSED object beside the JSON string, never the string.
+  let claimed: AgentResult;
   try {
-    // T31: the PARSED object beside the JSON string, never the string.
-    return parseAgentResult(event.structured_output);
+    claimed = parseAgentResult(event.structured_output);
   } catch (err) {
     return {
       status: 'failed',
@@ -251,6 +320,48 @@ function toAgentResult(outcome: AgentRunOutcome): AgentResult {
         (err instanceof Error ? err.message : String(err)) + denialPhrase(outcome),
     };
   }
+
+  // A question is a claim about the turn, not about the tree — evidence cannot contradict
+  // it, and second-guessing it would strand the Q&A round trip. Same for an agent that
+  // reports its own failure: it is already telling the truth.
+  if (claimed.status !== 'complete') return claimed;
+
+  // Without evidence, the old behaviour: trust the claim. Strictly no worse than before.
+  if (!evidence) return claimed;
+
+  // TRAPS T73 / research Pitfall 3. `classifyOutcome` is the Phase 4 verdict that judges
+  // by what is on disk. `delivered` confirms the claim; `partial` means the turn was
+  // truncated but real work exists, so it ships as a DRAFT rather than being rounded away;
+  // `failed` is the barren case — the agent said `complete` and produced nothing, which is
+  // precisely what `claude -p` does when it is denied every edit and still exits 0.
+  const classification = classifyOutcome({
+    evidence,
+    result: event,
+    timedOut: outcome.timedOut,
+  });
+
+  if (classification.verdict === 'delivered') return claimed;
+
+  if (classification.verdict === 'partial') {
+    return {
+      status: 'partial',
+      summary: classification.summary ?? claimed.summary,
+      prTitle: claimed.prTitle,
+      prBody: claimed.prBody,
+      ...(classification.uncommittedPaths
+        ? { uncommittedPaths: classification.uncommittedPaths }
+        : {}),
+    };
+  }
+
+  return {
+    status: 'failed',
+    summary: claimed.summary,
+    failureReason:
+      `the agent reported "complete" but the worktree contains no commits` +
+      `${classification.denialCause ? ` — ${classification.denialCause}` : ''}` +
+      denialPhrase(outcome),
+  };
 }
 
 export function createAgentRunner(deps: AgentRunnerDeps): AgentRunner {
@@ -298,7 +409,15 @@ export function createAgentRunner(deps: AgentRunnerDeps): AgentRunner {
       // The abort may have won the race inside `runAgent`, which reports the reap rather
       // than a verdict. A cancelled run is not a failed one.
       if (signal.aborted) return { status: 'cancelled' };
-      return toAgentResult(outcome);
+
+      // TRAPS T73. `toAgentResult` alone trusts `result.structured_output` verbatim, so an
+      // agent that says `complete` having written nothing IS complete as far as the engine
+      // can tell — the single silent failure research is most emphatic about (Pitfall 3:
+      // judge by evidence in the worktree, never by exit code or self-report). The
+      // evidence-based classifier existed in `verdict.ts` from Phase 4 and nothing on the
+      // live path called it. Gather the worktree facts and let it decide.
+      const evidence = await gatherEvidence(deps, req.cwd, repoSlug);
+      return toAgentResult(outcome, evidence);
     },
   };
 }
@@ -315,7 +434,7 @@ export function createDeliverer(deps: ExecutionAdapterDeps): Deliverer {
     async deliver(
       wt: Worktree,
       repo: RepoMapping,
-      pr: { title: string; body: string },
+      pr: { title: string; body: string; draft?: boolean },
     ): Promise<PullRequest> {
       const toggles = togglesFor(deps.config, deps.index, repo.repoSlug);
       const result = await deliverPullRequest({
@@ -327,7 +446,9 @@ export function createDeliverer(deps: ExecutionAdapterDeps): Deliverer {
         defaultBranch: repo.baseBranch,
         title: pr.title,
         body: pr.body,
-        draft: toggles.draftPr,
+        // A caller-forced draft wins over the mapping's toggle; it is only ever set to
+        // `true`, for a `partial` run (T73). Normal deliveries omit it and get the toggle.
+        draft: pr.draft ?? toggles.draftPr,
       });
       return { url: result.prUrl, number: prNumberOf(result.prUrl) };
     },

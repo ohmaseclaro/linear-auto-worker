@@ -261,7 +261,17 @@ export interface Deliverer {
   deliver(
     wt: Worktree,
     repo: RepoMapping,
-    pr: { title: string; body: string },
+    pr: {
+      title: string;
+      body: string;
+      /**
+       * Forces a draft regardless of the mapping's `draftPr` toggle. Set only for a
+       * `partial` run (TRAPS T73): the operator opted into ready-for-review PRs for work
+       * the agent finished, not for a branch whose turn was truncated. Omitted means "use
+       * the mapping's toggle", which is every normal delivery.
+       */
+      draft?: boolean;
+    },
   ): Promise<PullRequest>;
 }
 

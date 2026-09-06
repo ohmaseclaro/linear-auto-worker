@@ -10,11 +10,27 @@
 import { AgentResultParseError } from './errors.js';
 
 /**
- * Five outcomes. The agent itself can only produce the first three; `crashed` and
- * `cancelled` are synthesised by the runner when there is no result to parse at all.
+ * Six outcomes. The agent itself can only produce the first three; `partial`, `crashed`
+ * and `cancelled` are synthesised by the runner.
+ *
+ * `partial` is the one that matters and it is deliberately NOT in the wire schema below.
+ * The agent cannot self-report it, because the whole point is that the agent's own claim
+ * is not trusted: `claude -p` exits 0 having been denied every edit and will happily say
+ * `complete` (TRAPS T1/T27). The runner decides `partial` from the WORKTREE — commits
+ * present but the turn truncated — and a `partial` run still ships, as a DRAFT PR
+ * (Phase 1 D-01, research Pitfall 3). Rounding it to `failed` would discard real work;
+ * rounding it to `complete` would describe a truncated branch as finished.
  */
 export type AgentResult =
   | { status: 'complete'; summary: string; prTitle: string; prBody: string }
+  | {
+      status: 'partial';
+      summary: string;
+      prTitle: string;
+      prBody: string;
+      /** Work the agent left on disk but never committed. Named, never silently dropped. */
+      uncommittedPaths?: string[];
+    }
   | { status: 'needs_input'; summary: string; question: string; assumption: string }
   | { status: 'failed'; summary: string; failureReason: string }
   | { status: 'crashed'; exitCode: number; stderrTail: string }
