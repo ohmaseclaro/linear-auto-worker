@@ -1,0 +1,29 @@
+{
+  // erasableSyntaxOnly is load-bearing, not stylistic. The canonical gate (D-13) is
+  // `tsc --noEmit && node --test`, and `node --test` runs .ts files through Node's type
+  // stripping, which only accepts the erasable subset (no enums, no namespaces, no
+  // constructor parameter properties). With this flag `tsc` rejects that syntax at the
+  // gate; without it, `node --test` silently refuses to load the test file instead.
+  //
+  // verbatimModuleSyntax is its companion: it keeps `import type` from becoming a runtime
+  // import, which is what type stripping assumes.
+  //
+  // noUncheckedIndexedAccess and exactOptionalPropertyTypes are deliberately OFF — they
+  // add friction across seven parallel branches for no defect this project is exposed to.
+  "compilerOptions": {
+    "strict": true,
+    "target": "ES2023",
+    "lib": ["ES2023"],
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "rootDir": "src",
+    "outDir": "dist",
+    "types": ["node"],
+    "skipLibCheck": true,
+    "sourceMap": true,
+    "declaration": false,
+    "verbatimModuleSyntax": true,
+    "erasableSyntaxOnly": true
+  },
+  "include": ["src"]
+}
