@@ -304,6 +304,17 @@ export interface LinearComment {
   createdAt: string;
 }
 
+/**
+ * The workflow-state TYPES Linear fixes. Only the human-facing `name` is renameable, which
+ * is why nothing in this project ever matches a state by name (05-CONTEXT D-06 / INTK-04).
+ *
+ * 07-04 corrected this from `'started' | 'review'`. **"In Review" is not a Linear state
+ * type** — a stock workspace has both "In Progress" and "In Review" typed `started` — so
+ * the old union named one value that cannot exist and omitted two that do. The facade in
+ * `src/outbound/linear-client.ts` had it right; the port was the side that had to move.
+ */
+export type WorkflowStateType = 'started' | 'completed' | 'canceled';
+
 export interface LinearClient {
   /** Preflight. */
   viewer(): Promise<{ id: string; name: string }>;
@@ -311,7 +322,16 @@ export interface LinearClient {
   getIssue(id: IssueId): Promise<LinearIssue>;
   /** Boot sweep. */
   listAssignedOpenIssues(botUserId: string): Promise<LinearIssue[]>;
-  setIssueState(id: IssueId, stateType: 'started' | 'review'): Promise<void>;
+  /**
+   * Resolve a team's state of a given TYPE to its id, lowest workflow position first.
+   *
+   * Separate from `setIssueState` so the composition root can resolve — and therefore
+   * cache — the In Progress state for every configured team once at boot rather than on
+   * the first ticket. A workspace whose team has no `started` state is a configuration
+   * fault that should surface at `law start`, not thirty seconds into the first run.
+   */
+  resolveWorkflowStateId(teamId: string, stateType: WorkflowStateType): Promise<string>;
+  setIssueState(id: IssueId, stateType: WorkflowStateType): Promise<void>;
   createComment(issueId: IssueId, body: string, parentId?: string): Promise<{ id: string }>;
   /**
    * D-10 / INTK-06: the queue-position comment is EDITED, never re-posted. A queue
@@ -333,12 +353,25 @@ export interface LinearClient {
   listWebhooks(): Promise<
     Array<{ id: string; label: string | null; url: string; enabled: boolean; resourceTypes: string[] }>
   >;
+  /**
+   * The secret is the CALLER's and is returned by nobody.
+   *
+   * 07-04 corrected this too, and against Linear's own documentation rather than in spite
+   * of it: the docs say the secret is not returned at creation and must be copied out of
+   * the settings UI, while the shipped GraphQL schema selects `secret` on
+   * `WebhookFragment` and documents it as "automatically generated if not provided"
+   * (research landmine #3). Rather than pick a side, this daemon generates the secret
+   * locally, persists it to `kv` BEFORE the remote call, and passes it in — so the
+   * contradiction never has to be resolved and a failed create cannot leave a receiver
+   * verifying against a secret nobody registered.
+   */
   createWebhook(i: {
     label: string;
     url: string;
     teamId: string;
+    secret: string;
     resourceTypes: string[];
-  }): Promise<{ id: string; secret: string }>;
+  }): Promise<{ id: string }>;
   updateWebhook(
     id: string,
     i: { url?: string; enabled?: boolean; resourceTypes?: string[] },

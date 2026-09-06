@@ -43,6 +43,7 @@ import * as http from 'node:http';
 import { randomBytes } from 'node:crypto';
 
 import { loadFoundation } from '../infra/index.js';
+import { LinearClientImpl } from '../outbound/linear-client.js';
 import { defaultRoot } from '../infra/config.js';
 import { createSqliteStore } from '../infra/store/sqlite-store.js';
 import { asDomainStore } from '../infra/store/domain-store.js';
@@ -97,6 +98,14 @@ export interface BootOptions {
 export interface DaemonHandle {
   /** The ephemeral loopback port the receiver bound. */
   port: number;
+  /**
+   * The bot's Linear user id as the API KEY reports it, not as `config.json` claims it.
+   * Loop guard L1 compares every delivery's actor against this; an unresolved or stale
+   * value disables the guard silently rather than failing.
+   */
+  botUserId: string;
+  /** `teamId -> the id of that team's In Progress state`, resolved once, here. */
+  startedStateIds: ReadonlyMap<string, string>;
   /** The tunnel's public URL, or null if the tunnel returned none. */
   publicUrl: string;
   config: Config;
@@ -176,27 +185,104 @@ function isIngressEvent(e: DomainEvent): e is IngressEvent {
   );
 }
 
+/**
+ * The bot's own user id, from the key that will do the writing.
+ *
+ * Taken from `viewer()` rather than from `config.botUserId` because the config value is
+ * whatever the wizard wrote once, and the key is what actually authenticates today. A
+ * disagreement between them means the operator swapped `LINEAR_API_KEY` without re-running
+ * setup: loop guard L1 would then compare every actor against an id the bot no longer has,
+ * and the daemon's own first comment would come back in as a human event and start a loop.
+ * That is why an empty id is fatal here rather than warned about downstream.
+ */
+async function resolveBotUserId(
+  linear: LinearClient,
+  config: Config,
+  log: Logger,
+): Promise<string> {
+  const me = await linear.viewer();
+  if (!me.id) {
+    throw new Error(
+      'bootDaemon: Linear viewer() returned no user id. Loop guard L1 compares every ' +
+        'delivery actor against it, so binding ingress without it would let the bot ' +
+        "answer its own comments. Check LINEAR_API_KEY in the config root's .env.",
+    );
+  }
+  if (config.botUserId && config.botUserId !== me.id) {
+    log.warn(
+      { configured: config.botUserId, authenticated: me.id },
+      'config.botUserId disagrees with the authenticated user; using the authenticated one',
+    );
+  }
+  return me.id;
+}
+
+/**
+ * Every configured team's In Progress state, resolved by TYPE and cached before ingress
+ * binds (05-CONTEXT D-06 / INTK-04).
+ *
+ * Never by name — teams rename "In Progress" to "Doing" freely — and never a hardcoded id,
+ * because state ids are per-team. Doing it here rather than on the first ticket means a
+ * team with no `started` state fails `law start` with the team named, instead of failing
+ * the acknowledgement of the first real run thirty seconds in.
+ */
+async function resolveStartedStates(
+  linear: LinearClient,
+  config: Config,
+  log: Logger,
+): Promise<ReadonlyMap<string, string>> {
+  const teamIds = new Set<string>();
+  if (config.teamId) teamIds.add(config.teamId);
+  for (const mapping of Object.values(config.mappings)) {
+    if (mapping.linearTeamId) teamIds.add(mapping.linearTeamId);
+  }
+
+  const resolved = new Map<string, string>();
+  for (const teamId of teamIds) {
+    const stateId = await linear.resolveWorkflowStateId(teamId, 'started');
+    if (!stateId) {
+      throw new Error(
+        `bootDaemon: Linear team ${teamId} resolved no "started" workflow state. Every ` +
+          `run moves its ticket to In Progress at pickup, so this would fail every run.`,
+      );
+    }
+    resolved.set(teamId, stateId);
+  }
+  log.info({ teams: resolved.size }, 'resolved the In Progress state for every mapped team');
+  return resolved;
+}
+
 export async function bootDaemon(opts: BootOptions = {}): Promise<DaemonHandle> {
   const root = opts.configDir ?? defaultRoot();
 
   // ── 1. config, secrets, logger, migrated database ──────────────────────────
-  const { config, logger, db } = loadFoundation(root);
+  const { config, secrets, logger, db } = loadFoundation(root);
   const log = logger.child({ component: 'daemon' });
 
   // ── 2. the store ───────────────────────────────────────────────────────────
   const store = asDomainStore(createSqliteStore(db));
 
-  // 07-04 owns the outbound facade seam: `outbound/linear-client.ts` declares its own
-  // `LinearClient` that does not match the port (three unimplemented methods, a different
-  // `setIssueState` arity). Failing loudly here beats booting a daemon that cannot talk to
-  // Linear and reports healthy.
-  const linear = opts.linear;
-  if (!linear) {
-    throw new Error(
-      'bootDaemon: no LinearClient. The real outbound facade does not yet satisfy the ' +
-        'domain port — 07-04 owns that seam. Pass `opts.linear` until it lands.',
-    );
-  }
+  // The seam 07-03 left throwing is closed: `LinearClientImpl` now `implements` the domain
+  // port rather than declaring a rival of it, so the five divergences 07-02 listed are
+  // compile errors if any of them comes back.
+  //
+  // The `log` argument is hard deliverable #4 and not optional in practice: it defaults to
+  // a no-op, and with a no-op every `linear.ratelimited` and every complexity-budget line
+  // is silently dropped. With no dashboard the log IS the UI (D-04).
+  const linear =
+    opts.linear ??
+    new LinearClientImpl({
+      apiKey: secrets.linearApiKey,
+      log: (fields, msg) => log.info(fields, msg),
+    });
+
+  // ── 2b. the two identities the rest of boot assumes are already resolved ───
+  // Both go through the substitutable client, so the smoke exercises this path offline
+  // against its seeded fake. Both are wrong to do per-event: the viewer id never changes
+  // within a process, and a per-event workflow-state lookup is a Linear round-trip on the
+  // acknowledgement's 10-second budget.
+  const botUserId = await resolveBotUserId(linear, config, log);
+  const startedStateIds = await resolveStartedStates(linear, config, log);
 
   const scheduler = createScheduler({ config, log });
   // D-01: no run may leave `queued` in this plan, and nothing may spawn a child process.
@@ -270,7 +356,7 @@ export async function bootDaemon(opts: BootOptions = {}): Promise<DaemonHandle> 
   const toEngineEvent = createIngressMapper({ store, linear });
   const router: Router = createRouter({
     log,
-    botUserId: config.botUserId,
+    botUserId,
     // The router asks Linear for the canonical issue; the port speaks `assigneeId`, the
     // router wants an `assignee` object. This projection is that seam and nothing more.
     client: {
@@ -296,7 +382,7 @@ export async function bootDaemon(opts: BootOptions = {}): Promise<DaemonHandle> 
 
   // ── 4. bind the loopback socket ────────────────────────────────────────────
   const server = http.createServer(
-    createReceiver({ secret, store, log, botUserId: config.botUserId, router }),
+    createReceiver({ secret, store, log, botUserId, router }),
   );
   const port = await new Promise<number>((resolve, reject) => {
     server.once('error', reject);
@@ -318,6 +404,8 @@ export async function bootDaemon(opts: BootOptions = {}): Promise<DaemonHandle> 
 
   return {
     port,
+    botUserId,
+    startedStateIds,
     publicUrl,
     config,
     store,

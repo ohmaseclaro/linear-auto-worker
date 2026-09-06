@@ -5,6 +5,7 @@ import type { LinearClient as SdkLinearClient } from '@linear/sdk';
 
 import { LinearClientImpl, type LogFn } from './linear-client.js';
 import { RateLimitedError } from './rate-limit.js';
+import { selfEventGuards } from '../ingress/guards.js';
 
 /**
  * These tests drive LinearClientImpl against a hand-rolled stand-in for `@linear/sdk`,
@@ -100,6 +101,9 @@ describe('setIssueState', () => {
         calls.updates.push({ issueId, stateId: input.stateId });
         return { success: true };
       },
+      // `setIssueState` takes no teamId — the run engine has none — so it reads the team
+      // back off the issue. That is what makes this stub necessary.
+      issue: async () => fakeIssue(),
     };
     return { calls, sdk };
   }
@@ -108,7 +112,7 @@ describe('setIssueState', () => {
     const { calls, sdk } = stubTeam();
     const client = new LinearClientImpl({ apiKey: API_KEY, sdk: asSdk(sdk) });
 
-    await client.setIssueState('issue-1', 'team-1', 'started');
+    await client.setIssueState('issue-1', 'started');
 
     assert.deepEqual(calls.updates, [{ issueId: 'issue-1', stateId: 'state-doing' }]);
   });
@@ -119,7 +123,7 @@ describe('setIssueState', () => {
     const { calls, sdk } = stubTeam();
     const client = new LinearClientImpl({ apiKey: API_KEY, sdk: asSdk(sdk) });
 
-    await client.setIssueState('issue-1', 'team-1', 'started');
+    await client.setIssueState('issue-1', 'started');
 
     assert.equal(calls.updates[0]?.stateId, 'state-doing');
   });
@@ -128,8 +132,8 @@ describe('setIssueState', () => {
     const { calls, sdk } = stubTeam();
     const client = new LinearClientImpl({ apiKey: API_KEY, sdk: asSdk(sdk) });
 
-    await client.setIssueState('issue-1', 'team-1', 'started');
-    await client.setIssueState('issue-2', 'team-1', 'completed');
+    await client.setIssueState('issue-1', 'started');
+    await client.setIssueState('issue-2', 'completed');
 
     assert.equal(calls.team, 1);
     assert.equal(calls.states, 1);
@@ -139,11 +143,27 @@ describe('setIssueState', () => {
     ]);
   });
 
+  it('registers the write with loop guard 3 so the bot does not answer its own transition (T49)', async () => {
+    const { sdk } = stubTeam();
+    const client = new LinearClientImpl({ apiKey: API_KEY, sdk: asSdk(sdk) });
+    const payload = { actor: { id: 'a-human', type: 'user' }, type: 'Issue', data: { id: 'issue-1' } };
+
+    // Falsification first (T71): with no self-write recorded, the guard must PASS the
+    // event. A check that cannot be shown to go red proves nothing about the green.
+    assert.equal(selfEventGuards(payload, 'user-bot').drop, false);
+
+    await client.setIssueState('issue-1', 'started');
+
+    const after = selfEventGuards(payload, 'user-bot');
+    assert.equal(after.drop, true);
+    assert.equal(after.guard, 'suppression:self-write');
+  });
+
   it('throws naming the team when it has no state of the requested type', async () => {
     const { sdk } = stubTeam();
     const client = new LinearClientImpl({ apiKey: API_KEY, sdk: asSdk(sdk) });
 
-    await assert.rejects(() => client.setIssueState('issue-1', 'team-1', 'canceled'), (err: Error) => {
+    await assert.rejects(() => client.setIssueState('issue-1', 'canceled'), (err: Error) => {
       assert.match(err.message, /team-1/);
       assert.match(err.message, /canceled/);
       return true;

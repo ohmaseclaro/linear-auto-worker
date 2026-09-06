@@ -13,9 +13,19 @@
 
 import {
   LinearClient as SdkLinearClient,
+  type Comment as SdkComment,
   type Issue,
   type Webhook as SdkWebhook,
 } from '@linear/sdk';
+
+import { noteSelfWrite } from '../ingress/guards.js';
+import type {
+  IssueId,
+  LinearClient,
+  LinearComment,
+  LinearIssue,
+  WorkflowStateType,
+} from '../domain/ports.js';
 
 import {
   RateLimitedError,
@@ -41,62 +51,13 @@ const DEFAULT_BACKOFF_MS = 60_000;
 /** Minimal structured-log sink. Phase 2 owns the real pino logger; default is a no-op. */
 export type LogFn = (fields: Record<string, unknown>, msg: string) => void;
 
-export interface LinearIssue {
-  id: string;
-  identifier: string;
-  title: string;
-  description: string | null;
-  url: string;
-  branchName: string;
-  assigneeId: string | null;
-  projectId: string | null;
-  teamId: string;
-  stateId: string;
-  stateType: string;
-  /** ISO 8601 UTC. The reconciliation poll's watermark compares against it (06-04). */
-  updatedAt: string;
-}
-
 /**
- * The workflow-state *types* this daemon transitions issues into. Linear fixes these
- * strings; only the human-facing `name` is renameable, which is why nothing here ever
- * matches on a name (05-CONTEXT D-06 / INTK-04).
+ * There is ONE `LinearIssue`, ONE `LinearComment` and ONE `LinearClient` in this project
+ * and they live in `src/domain/ports.ts`. This module used to declare rivals of all three
+ * (07-02 recorded five divergences); re-exporting is what makes "the facade satisfies the
+ * port" a compile error to break rather than a comment to trust.
  */
-export type WorkflowStateType = 'started' | 'completed' | 'canceled';
-
-/**
- * OPEN AT THE 07-04 SEAM — this interface is NOT `src/domain/ports.ts`'s `LinearClient`,
- * and passing `LinearClientImpl` where the port is expected will not compile. That is
- * deliberate: five differences below are design decisions this plan does not own, and a
- * facade quietly widened to fit would be the `tryInsertDelivery` mistake again.
- *
- *  1. `setIssueState(issueId, teamId, 'started'|'completed'|'canceled')` here; the port
- *     says `(id, 'started'|'review')`. "In Review" is not a Linear state TYPE, so the
- *     mapping is a real decision (05-CONTEXT D-06 / INTK-04), not a rename.
- *  2. `updateComment` / `addSubscriber` / `listComments` are on the port (D-10, INTK-03,
- *     06-04's poll) and are NOT implemented here.
- *  3. `createWebhook` takes a caller-supplied `secret` and returns only `{ id }`; the port
- *     claims Linear returns the secret. This facade is right — landmine #3 — and the port
- *     is what needs to move. Nothing consumes either today: `registrar.ts` talks to the
- *     raw SDK client and bypasses both.
- *  4. `teamId` is non-null here, nullable on the port.
- *  5. `LinearIssue` is declared twice, here and on the port.
- */
-export interface LinearClient {
-  /** Preflight: who does this API key authenticate as? */
-  viewer(): Promise<{ id: string; name: string }>;
-  getIssue(issueId: string): Promise<LinearIssue>;
-  /** Boot sweep: everything still open and assigned to the bot. */
-  listAssignedOpenIssues(botUserId: string): Promise<LinearIssue[]>;
-  setIssueState(issueId: string, teamId: string, stateType: WorkflowStateType): Promise<void>;
-  createComment(issueId: string, body: string, parentId?: string): Promise<{ id: string }>;
-
-  // Webhook CRUD, consumed only by Phase 3's registrar.
-  listWebhooks(): Promise<LinearWebhookSummary[]>;
-  createWebhook(input: CreateWebhookInput): Promise<{ id: string }>;
-  updateWebhook(id: string, input: UpdateWebhookInput): Promise<void>;
-  deleteWebhook(id: string): Promise<void>;
-}
+export type { IssueId, LinearClient, LinearComment, LinearIssue, WorkflowStateType };
 
 /**
  * A webhook, projected down to the fields the registrar reconciles against.
@@ -197,6 +158,27 @@ async function toLinearIssue(issue: Issue): Promise<LinearIssue> {
   };
 }
 
+/**
+ * The facade, and — since 07-04 — the port's only production implementation.
+ *
+ * `implements LinearClient` is load-bearing: the three methods that used to be missing
+ * (`updateComment`, `addSubscriber`, `listComments`) were consumed by the queue-position
+ * edit (D-10), the INTK-03 subscribe and the answer-correlation re-fetch respectively, and
+ * every one of them would have been a `TypeError` on first use. A rival interface hid that
+ * behind a green typecheck; this clause cannot.
+ */
+async function toLinearComment(comment: SdkComment): Promise<LinearComment> {
+  const [parent, user] = await Promise.all([comment.parent, comment.user]);
+  return {
+    id: comment.id,
+    parentId: parent?.id ?? null,
+    body: comment.body,
+    authorId: user?.id ?? null,
+    authorName: user?.name ?? null,
+    createdAt: comment.createdAt.toISOString(),
+  };
+}
+
 export class LinearClientImpl implements LinearClient {
   private readonly sdk: SdkLinearClient;
   private readonly log: LogFn;
@@ -271,30 +253,46 @@ export class LinearClientImpl implements LinearClient {
     });
   }
 
-  async setIssueState(
-    issueId: string,
-    teamId: string,
-    stateType: WorkflowStateType,
-  ): Promise<void> {
-    await this.call('setIssueState', async () => {
+  /**
+   * 05-CONTEXT D-06 / INTK-04: matched on `type`, NEVER on `name` — operators rename "In
+   * Progress" to "Doing"/"Active" freely — and never a hardcoded UUID, since state ids are
+   * per-team and one would break the moment a ticket arrives from a second team. Where a
+   * team has several states of one type (the stock Linear workspace has both "In Progress"
+   * and "In Review" typed `started`) the lowest `position` wins: the one earliest in the
+   * workflow.
+   *
+   * Public because the composition root resolves it once per configured team at boot: an
+   * unresolvable In Progress state should fail `law start`, not the first real ticket.
+   */
+  async resolveWorkflowStateId(teamId: string, stateType: WorkflowStateType): Promise<string> {
+    return this.call('resolveWorkflowStateId', async () => {
       const states = await this.resolveTeamStates(teamId);
-      // 05-CONTEXT D-06 / INTK-04: matched on `type`, NEVER on `name` — operators rename
-      // "In Progress" to "Doing"/"Active" freely — and never a hardcoded UUID, since state
-      // ids are per-team and one would break the moment a ticket arrives from a second
-      // team. Where a team has several states of one type (the stock Linear workspace has
-      // both "In Progress" and "In Review" typed `started`) the lowest `position` wins:
-      // the one earliest in the workflow.
       const [state] = states
         .filter((s) => s.type === stateType)
         .sort((a, b) => a.position - b.position);
       if (!state) {
-        throw new Error(
-          `Linear team ${teamId} has no workflow state of type "${stateType}"; ` +
-            `cannot move issue ${issueId}`,
-        );
+        throw new Error(`Linear team ${teamId} has no workflow state of type "${stateType}"`);
       }
-      await this.sdk.updateIssue(issueId, { stateId: state.id });
+      return state.id;
     });
+  }
+
+  /**
+   * The port takes no `teamId` because the run engine has none: a `RepoRun` records its
+   * repository, not the Linear team the issue came from. The team is read back off the
+   * issue here. That is one extra `issue` query per PICKUP — once per run, not per event —
+   * and the workflow-state lookup it feeds is memoized per team for the process lifetime.
+   */
+  async setIssueState(issueId: IssueId, stateType: WorkflowStateType): Promise<void> {
+    const issue = await this.getIssue(issueId);
+    const stateId = await this.resolveWorkflowStateId(issue.teamId ?? '', stateType);
+    await this.call('setIssueState', () => this.sdk.updateIssue(issueId, { stateId }));
+    // T49, and the reason this call lives HERE rather than at the engine's call site: this
+    // is the only place in the daemon that writes an issue's state, so loop guard 3's
+    // self-write window cannot be bypassed by a second caller appearing later. The other
+    // three guards would still catch the bot's own transition event — which is exactly why
+    // its absence stayed invisible.
+    noteSelfWrite('Issue', issueId);
   }
 
   /** A team's workflow states, fetched once per team and memoized for the process lifetime. */
@@ -322,6 +320,47 @@ export class LinearClientImpl implements LinearClient {
       const comment = await payload.comment;
       if (!comment) throw new Error(`Linear returned no comment for issue ${issueId}`);
       return { id: comment.id };
+    });
+  }
+
+  /** D-10 / INTK-06: the queue-position comment is EDITED, never re-posted. */
+  async updateComment(commentId: string, body: string): Promise<void> {
+    await this.call('updateComment', () => this.sdk.updateComment(commentId, { body }));
+  }
+
+  /**
+   * INTK-03. Idempotent by read-then-write: Linear's `subscriberIds` is a REPLACEMENT list,
+   * so sending `[userId]` alone would unsubscribe everyone already watching the ticket.
+   */
+  async addSubscriber(issueId: IssueId, userId: string): Promise<void> {
+    await this.call('addSubscriber', async () => {
+      const issue = await this.sdk.issue(issueId);
+      const existing = (await issue.subscribers()).nodes.map((u) => u.id);
+      if (existing.includes(userId)) return;
+      await this.sdk.updateIssue(issueId, { subscriberIds: [...existing, userId] });
+    });
+  }
+
+  /**
+   * D-05's comment half. `since` is the reconciliation poll's watermark: comments at or
+   * before it were covered by a previous clean pass.
+   *
+   * ponytail: `parentId` is resolved by awaiting the SDK's lazy `parent` relation, which is
+   * one extra request per comment that HAS a parent. The id is already on the wire — the
+   * SDK keeps it in a private field this module will not reach into with a cast. Ceiling:
+   * a ticket with dozens of threaded replies polls expensively. Upgrade path if that ever
+   * bites: one `rawRequest` selecting `comments { nodes { id parent { id } } }`.
+   */
+  async listComments(issueId: IssueId, since?: string): Promise<LinearComment[]> {
+    return this.call('listComments', async () => {
+      const filter = {
+        issue: { id: { eq: issueId } },
+        ...(since ? { createdAt: { gt: new Date(since) } } : {}),
+      };
+      const comments = await pageAll<SdkComment>((after) =>
+        this.sdk.comments({ first: PAGE_SIZE, after, filter }),
+      );
+      return Promise.all(comments.map((c) => toLinearComment(c)));
     });
   }
 

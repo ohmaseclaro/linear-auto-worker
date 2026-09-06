@@ -127,6 +127,19 @@ export async function makeWorkspace(secret: string): Promise<Workspace> {
 export class RecordingLinear extends FakeLinearClient {
   readonly fetched: IssueId[] = [];
 
+  /**
+   * Seeds the bot user to `BOT_USER_ID` by default.
+   *
+   * This is not cosmetic. Since 07-04 the composition root takes the bot's identity from
+   * `viewer()` rather than from `config.json`, so a fixture whose fake viewer reports a
+   * DIFFERENT id than the one the fixture's issue is assigned to makes the router refuse
+   * every delivery — which is exactly what it should do, and exactly what the smoke caught
+   * the first time this ran.
+   */
+  constructor(seed?: { issues?: LinearIssue[]; botUser?: { id: string; name: string } }) {
+    super({ botUser: { id: BOT_USER_ID, name: 'Smoke Bot' }, ...seed });
+  }
+
   override getIssue(id: IssueId): Promise<LinearIssue> {
     this.fetched.push(id);
     return super.getIssue(id);
