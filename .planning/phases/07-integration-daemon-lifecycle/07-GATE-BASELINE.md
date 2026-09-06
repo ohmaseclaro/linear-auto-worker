@@ -71,3 +71,17 @@ unchanged apart from `dist/`.
 anti-starvation property, all four loop guards, prompt-injection containment, rate-limit
 detection, notifier fan-out, answer correlation across every tier, and secret redaction including
 post-boot registration.
+
+## Every cluster root-caused (orchestrator, measured)
+
+| cluster | n | cause | fix |
+|---|---|---|---|
+| wizard preflight/repo-safety/mapping | 22 | `Cannot redefine property: execa` — monkey-patching a non-configurable ESM named export | Default-parameter injection, as `03-01` already does for the ngrok SDK |
+| `outbound/linear-client` | 8 | `Cannot read properties of undefined (reading 'toISOString')` — 07-04 added `updatedAt`; the doubles do not supply it | Add the field to the test doubles |
+| `orchestration/scheduler` | 7 | Fixture `({id, state}) as unknown as Run` has **no `kind`**, so `syncFromStore` skips every run; `configWith` still nests `concurrency` under `defaults` | Give fixtures `kind: 'repo'` and move `concurrency` to top level. **Implementation is correct.** |
+| `infra/store/sqlite-store` | 4 | `no such column: id` — the test still uses pre-T53 column names | Update the test to `delivery_id` / `k` / `v` |
+| `infra/logger` | 1 | T48 redact cycle guard | Pre-declared; fix or delete deliberately |
+| remainder | ~17 | contract renames from 07-02/07-04 | Same shape — triage by cause |
+
+**Nothing here indicates a broken subsystem.** Every diagnosed cluster is a stale test or a stale
+fixture, against implementations that twelve executed probes found correct (`07-RUNTIME-EVIDENCE.md`).
