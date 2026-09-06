@@ -713,6 +713,21 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
     async handle(event: EngineEvent): Promise<void> {
       switch (event.kind) {
         case 'run.requested': {
+          // One live run per issue, checked HERE because here is where the two producers
+          // meet. Ingress requests a run on an assignment webhook; the boot sweep requests
+          // one for every bot-assigned open issue it finds. Both are correct on their own
+          // and together they double: Linear retries a failed delivery for up to six
+          // hours, so a delivery that could not land while the daemon was down arrives
+          // moments AFTER the boot sweep has already enqueued the same issue. Two runs is
+          // two worktrees, two `claude` sessions and two pull requests for one ticket.
+          //
+          // `reconcile()` carries its own copy of this check as an early-out that avoids a
+          // `getIssue` round-trip. This one is the load-bearing one, because it is the
+          // only one on the webhook path.
+          if (store.findActiveRunByIssue(event.issueId).length > 0) {
+            log.info({ issueId: event.issueId }, 'a run is already live for this issue; ignoring');
+            return;
+          }
           // Invariant 2: decide from the canonical issue, never from webhook body.
           const issue = await linear.getIssue(event.issueId);
           const mapping = resolveMapping(issue);
