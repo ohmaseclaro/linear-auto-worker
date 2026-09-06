@@ -136,5 +136,9 @@ in the gate will surface them. Phase 7 must do each one explicitly.
 6. **Rename the three `kvPut` call sites to `kvSet`** and `tryInsertDelivery` to
    `recordDelivery`, matching the implementation (T46).
 7. **Decide `maxQuestionRounds`** (T44) — currently unbounded; an agent can ask forever.
+9. **Rewrite `sqlite-store.ts`'s column references against `001-init.ts`** (T53) — four
+   divergences that `tsc` structurally cannot detect, because TypeScript does not know SQL
+   column names. A green typecheck proves nothing here; the gate must execute a real store
+   round-trip.
 8. **Expect `logger.test.ts`'s cycle-guard test to FAIL** on the first gate run (T48). It is a
    known gap, not a regression — fix `redact()` or delete the test deliberately.
