@@ -13,6 +13,7 @@
 
 import ngrokSdk, { type Listener } from '@ngrok/ngrok';
 import { TunnelError } from '../domain/errors.js';
+import type { Logger, TunnelManager } from '../domain/ports.js';
 
 /**
  * The slice of the ngrok SDK this module uses. Injectable so the tests can drive all
@@ -26,6 +27,10 @@ export interface NgrokApi {
 }
 
 const ENV_HINT = 'Set it in ~/.linear-auto-worker/.env or re-run the setup wizard.';
+
+/** Between the one attempt and the one retry. Exported nowhere; the test drives the retry
+ *  through a failing-then-succeeding fake, not through the clock. */
+const RETRY_DELAY_MS = 2_000;
 
 /**
  * Open the process's one and only tunnel and return its non-null public URL.
@@ -84,6 +89,63 @@ export async function openTunnel(
 /** Graceful close of a single tunnel. */
 export function closeTunnel(listener: Listener): Promise<void> {
   return listener.close();
+}
+
+/**
+ * The real ngrok tunnel, expressed as the `TunnelManager` port.
+ *
+ * Moved here from `cli/daemon.ts` when `law setup` needed the same composition: two
+ * compositions of one tunnel is how this repo keeps growing a second, untested copy of a
+ * thing that already works (T72/T73/T92/T96/T99). One factory, two callers.
+ *
+ * ## The authtoken (T10)
+ *
+ * `@ngrok/ngrok` reads NEITHER the bare `NGROK_AUTHTOKEN` environment variable NOR the
+ * macOS agent's YAML on its own — `authtoken_from_env: true` is what makes it look, and
+ * `openTunnel` passes it. But this daemon's authtoken lives in the config root's `.env`,
+ * which `loadSecrets` reads into memory and does NOT export, so with the operator's shell
+ * clean the SDK finds nothing and fails `ERR_NGROK_4018` — which is byte-identical to a
+ * revoked account. Publishing the loaded secret into the environment here is the explicit
+ * pass the SDK's only supported channel accepts.
+ *
+ * It does not overwrite an authtoken the operator already exported: theirs is the more
+ * specific intent, and silently substituting a stale one from `.env` is a failure they
+ * cannot see.
+ *
+ * ## The retry
+ *
+ * One retry, then out. A tunnel is the daemon's only ingress, so failing to open one is
+ * fatal by definition; retrying forever would leave a process that looks alive, logs
+ * hopefully and can never receive anything.
+ */
+export function createTunnelManager(
+  authtoken: string,
+  log: Logger,
+  ngrok: NgrokApi = ngrokSdk,
+): TunnelManager {
+  let open: Awaited<ReturnType<typeof openTunnel>> | null = null;
+  return {
+    async open(port: number): Promise<string> {
+      process.env.NGROK_AUTHTOKEN ??= authtoken;
+      for (let attempt = 1; ; attempt += 1) {
+        try {
+          open = await openTunnel(port, ngrok);
+          return open.url;
+        } catch (err) {
+          // T24: the ngrok failure message can ECHO the operator's authtoken. `openTunnel`
+          // already extracts the code and drops the rest; nothing here may re-widen that.
+          if (attempt >= 2) throw err;
+          log.warn({ attempt }, 'tunnel failed to open; retrying once');
+          await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
+        }
+      }
+    },
+    url: () => open?.url ?? null,
+    async close(): Promise<void> {
+      if (open) await closeTunnel(open.listener);
+      open = null;
+    },
+  };
 }
 
 /**

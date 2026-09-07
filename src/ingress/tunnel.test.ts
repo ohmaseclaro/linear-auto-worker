@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 
 import type { Listener } from '@ngrok/ngrok';
 import { TunnelError } from '../domain/errors.js';
-import { closeTunnel, openTunnel, type NgrokApi } from './tunnel.js';
+import { closeTunnel, createTunnelManager, openTunnel, type NgrokApi } from './tunnel.js';
 
 const TOKEN = '2fAkEaUtHtOkEn_do_not_leak';
 
@@ -194,3 +194,72 @@ test('closeTunnel delegates to listener.close()', async () => {
 // `process.exit(0)`, which would have raced `daemon.ts`'s ordered shutdown and abandoned
 // the in-flight run marking. The test had to detach them again in a `finally` to avoid
 // killing the test runner, which was the clue. `daemon.test.ts` owns signal handling now.
+
+// ---------------------------------------------------------------------------
+// createTunnelManager — the composition that moved here out of `cli/daemon.ts`
+// ---------------------------------------------------------------------------
+
+const silentLog = {
+  child: () => silentLog,
+  info: () => {},
+  warn: () => {},
+  error: () => {},
+  debug: () => {},
+};
+
+test('createTunnelManager returns the listener url and closing it clears url()', async () => {
+  await withToken(async () => {
+    const listener = fakeListener('https://abc123.ngrok.app');
+    const ngrok = fakeNgrok({ connect: async () => listener.handle, listeners: [listener.handle] });
+
+    const tunnel = createTunnelManager(TOKEN, silentLog, ngrok);
+    assert.equal(tunnel.url(), null, 'no url before open()');
+    assert.equal(await tunnel.open(4000), 'https://abc123.ngrok.app');
+    assert.equal(tunnel.url(), 'https://abc123.ngrok.app');
+
+    await tunnel.close();
+    assert.equal(listener.closes, 1, 'close() closed the listener');
+    assert.equal(tunnel.url(), null, 'url() goes null again after close()');
+  });
+});
+
+test('createTunnelManager retries a failed open exactly once, then succeeds', async () => {
+  await withToken(async () => {
+    const listener = fakeListener('https://retry.ngrok.app');
+    let calls = 0;
+    const ngrok = fakeNgrok({
+      connect: async () => {
+        calls += 1;
+        if (calls === 1) throw new Error('ERR_NGROK_108 tunnel session failed');
+        return listener.handle;
+      },
+      listeners: [listener.handle],
+    });
+
+    const url = await createTunnelManager(TOKEN, silentLog, ngrok).open(4000);
+
+    assert.equal(url, 'https://retry.ngrok.app');
+    assert.equal(ngrok.connectCalls.length, 2, 'exactly two connect attempts: one, then one retry');
+  });
+});
+
+test('createTunnelManager gives up after the retry and never leaks the authtoken (T24)', async () => {
+  await withToken(async () => {
+    const ngrok = fakeNgrok({
+      connect: async () => {
+        throw new Error(`ERR_NGROK_105 invalid authtoken: ${TOKEN}`);
+      },
+    });
+
+    await assert.rejects(
+      () => createTunnelManager(TOKEN, silentLog, ngrok).open(4000),
+      (error: unknown) => {
+        assert.ok(error instanceof TunnelError);
+        assert.match(error.message, /ERR_NGROK_105/);
+        assert.doesNotMatch(error.message, new RegExp(TOKEN));
+        return true;
+      },
+    );
+    assert.equal(ngrok.connectCalls.length, 2, 'one attempt plus one retry, then out');
+  });
+});

@@ -112,6 +112,31 @@ export function resolveMapping(
   };
 }
 
+/**
+ * The team `webhookCreate` is registered against.
+ *
+ * Lives here, beside `resolveMapping`, because it is derived from `Config` and nothing
+ * else — `law start` and `law setup` both need it, and the wizard must not have to pull in
+ * the daemon's whole module graph to ask a question about a config file.
+ *
+ * Resolved up front rather than inside the registrar so the failure is one actionable line
+ * before any network call instead of a GraphQL validation error from inside reconciliation.
+ */
+export function webhookTeamId(config: Config): string {
+  const teamId =
+    config.teamId ||
+    Object.values(config.mappings)
+      .map((m) => m.linearTeamId)
+      .find((t): t is string => Boolean(t));
+  if (!teamId) {
+    throw new Error(
+      'no Linear team is configured. Linear requires a team on webhook creation. ' +
+        'Set `teamId`, or give at least one mapping a `linearTeamId`, in config.json.',
+    );
+  }
+  return teamId;
+}
+
 export interface Secrets {
   linearApiKey: string;
   ngrokAuthtoken: string;

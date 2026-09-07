@@ -40,20 +40,19 @@
  * nothing can spawn a child process. Plan 05 owns starting it, signal handling and drain.
  */
 import * as http from 'node:http';
-import { randomBytes } from 'node:crypto';
 
 import { loadFoundation } from '../infra/index.js';
 import { LinearClientImpl } from '../outbound/linear-client.js';
 import { Notifier, type RunEvent as NotifyEvent } from '../outbound/notify/notifier.js';
 import { SlackChannel } from '../outbound/notify/slack-channel.js';
-import { defaultRoot } from '../infra/config.js';
+import { defaultRoot, webhookTeamId } from '../infra/config.js';
 import { resolveToggles } from '../domain/types.js';
 import { createSqliteStore } from '../infra/store/sqlite-store.js';
 import { asDomainStore } from '../infra/store/domain-store.js';
 import { createReceiver } from '../ingress/receiver.js';
 import { createRouter, type Router } from '../ingress/router.js';
-import { disable as disableWebhook, KEY_SECRET, reconcile } from '../ingress/registrar.js';
-import { closeTunnel, openTunnel } from '../ingress/tunnel.js';
+import { createWebhookRegistrar, ensureWebhookSecret } from '../ingress/registrar.js';
+import { createTunnelManager } from '../ingress/tunnel.js';
 import { createScheduler, type Scheduler } from '../orchestration/scheduler.js';
 import { createQuestions, type Questions } from '../orchestration/questions.js';
 import { createRunEngine, type RunEngine } from '../orchestration/run-engine.js';
@@ -186,55 +185,6 @@ async function within(p: Promise<unknown>, ms: number, what: string, log: Logger
 }
 
 /**
- * The real ngrok tunnel, expressed as the `TunnelManager` port.
- *
- * ## The authtoken (T10)
- *
- * `@ngrok/ngrok` reads NEITHER the bare `NGROK_AUTHTOKEN` environment variable NOR the
- * macOS agent's YAML on its own — `authtoken_from_env: true` is what makes it look, and
- * `openTunnel` passes it. But this daemon's authtoken lives in the config root's `.env`,
- * which `loadSecrets` reads into memory and does NOT export, so with the operator's shell
- * clean the SDK finds nothing and fails `ERR_NGROK_4018` — which is byte-identical to a
- * revoked account. Publishing the loaded secret into the environment here is the explicit
- * pass the SDK's only supported channel accepts.
- *
- * It does not overwrite an authtoken the operator already exported: theirs is the more
- * specific intent, and silently substituting a stale one from `.env` is a failure they
- * cannot see.
- *
- * ## The retry
- *
- * One retry, then out. A tunnel is the daemon's only ingress, so failing to open one is
- * fatal by definition; retrying forever would leave a process that looks alive, logs
- * hopefully and can never receive anything.
- */
-function ngrokTunnel(authtoken: string, log: Logger): TunnelManager {
-  let open: Awaited<ReturnType<typeof openTunnel>> | null = null;
-  return {
-    async open(port: number): Promise<string> {
-      process.env.NGROK_AUTHTOKEN ??= authtoken;
-      for (let attempt = 1; ; attempt += 1) {
-        try {
-          open = await openTunnel(port);
-          return open.url;
-        } catch (err) {
-          // T24: the ngrok failure message can ECHO the operator's authtoken. `openTunnel`
-          // already extracts the code and drops the rest; nothing here may re-widen that.
-          if (attempt >= 2) throw err;
-          log.warn({ attempt }, 'tunnel failed to open; retrying once');
-          await new Promise((r) => setTimeout(r, 2_000));
-        }
-      }
-    },
-    url: () => open?.url ?? null,
-    async close(): Promise<void> {
-      if (open) await closeTunnel(open.listener);
-      open = null;
-    },
-  };
-}
-
-/**
  * The tools this daemon shells out to, checked BEFORE the socket binds.
  *
  * Every message names the fix rather than the failure. This is `law start` on a machine
@@ -287,28 +237,6 @@ async function preflight(run: RunCommand, log: Logger): Promise<void> {
     }
     log.info({ tool: check.what }, 'preflight ok');
   }
-}
-
-/**
- * The team `webhookCreate` is registered against.
- *
- * Resolved here rather than inside the registrar so the failure is one actionable line at
- * boot instead of a GraphQL validation error from inside reconciliation.
- */
-function webhookTeamId(config: Config): string {
-  const teamId =
-    config.teamId ||
-    Object.values(config.mappings)
-      .map((m) => m.linearTeamId)
-      .find((t): t is string => Boolean(t));
-  if (!teamId) {
-    throw new Error(
-      'law start: no Linear team is configured. Linear requires a team on webhook ' +
-        'creation. Set `teamId`, or give at least one mapping a `linearTeamId`, in ' +
-        'config.json — or re-run `law setup`.',
-    );
-  }
-  return teamId;
 }
 
 /**
@@ -665,10 +593,8 @@ export async function bootDaemon(opts: BootOptions = {}): Promise<DaemonHandle> 
   // before any remote call, and never read back from Linear. Generating-and-persisting here
   // under the registrar's own key means plan 05's `reconcile()` reuses this one rather than
   // minting a second that the receiver would then reject every delivery against.
-  let secret = store.kvGet(KEY_SECRET);
-  if (!secret) {
-    secret = randomBytes(32).toString('hex');
-    store.kvSet(KEY_SECRET, secret);
+  const { secret, generated } = ensureWebhookSecret(store);
+  if (generated) {
     log.info({}, 'generated a webhook signing secret; it will be registered on reconcile');
   }
   // OPS-02 / 02-CONTEXT D-05. The logger was constructed with the two secrets that exist
@@ -730,7 +656,7 @@ export async function bootDaemon(opts: BootOptions = {}): Promise<DaemonHandle> 
   // delivery, Linear allows three, and the fourth disables the webhook. The boot smoke's
   // tunnel stub TCP-connects to the port it is handed and fails on ECONNREFUSED, so this
   // ordering is asserted from both sides rather than described in a comment.
-  const tunnel = opts.tunnel ?? ngrokTunnel(secrets.ngrokAuthtoken, log);
+  const tunnel = opts.tunnel ?? createTunnelManager(secrets.ngrokAuthtoken, log);
   // Asserted from THIS side too, not only from the stub's. The stub proves the socket
   // answers; this proves the daemon believes it does, and it holds for the real ngrok
   // tunnel as well — where nothing probes anything and a reorder would otherwise be
@@ -749,11 +675,11 @@ export async function bootDaemon(opts: BootOptions = {}): Promise<DaemonHandle> 
   // existing registration is updated AND re-enabled in one call. With an ephemeral domain
   // every restart guarantees failed deliveries, so finding our webhook auto-disabled is
   // the normal case here (03-CONTEXT D-02).
-  const registration = await reconcile(linear, store, log, {
-    tunnelUrl: publicUrl,
+  const registrar = createWebhookRegistrar(linear, store, log, {
     teamId: webhookTeamId(config),
     secret,
   });
+  const registration = await registrar.reconcile(publicUrl);
 
   // ── 7. the missed-work sweep ───────────────────────────────────────────────
   // This is what makes an ephemeral URL safe. While the daemon was down, Linear delivered
@@ -781,7 +707,7 @@ export async function bootDaemon(opts: BootOptions = {}): Promise<DaemonHandle> 
   const tickMs = opts.tickMs ?? TICK_INTERVAL_MS;
   let ticking = false;
   const ticker = setInterval(() => void tick(), tickMs);
-  log.info({ port, publicUrl, webhookId: registration.id, tickMs }, 'daemon ready');
+  log.info({ port, publicUrl, webhookId: registration.webhookId, tickMs }, 'daemon ready');
 
   return {
     port,
@@ -843,12 +769,7 @@ export async function bootDaemon(opts: BootOptions = {}): Promise<DaemonHandle> 
       // 3. Politeness, time-boxed (T-07-23). The URL is about to stop answering; leaving
       //    the webhook enabled spends Linear's three retries on deliveries that cannot
       //    land. Never fatal — `disable` returns false rather than throwing.
-      await within(
-        disableWebhook(linear, store, log),
-        WEBHOOK_DISABLE_BUDGET_MS,
-        'disable webhook',
-        log,
-      );
+      await within(registrar.disable(), WEBHOOK_DISABLE_BUDGET_MS, 'disable webhook', log);
 
       // 4. The tunnel, then 5. the server — in that order, so the public URL stops
       //    resolving before the thing behind it stops answering. Reversed, the last

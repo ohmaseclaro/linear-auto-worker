@@ -28,7 +28,9 @@
  * registration while the prune below refuses to touch the first (it is matched by
  * id, and the id is now the live one). The label is the field that survives both.
  */
-import type { LinearClient, Logger, Store } from '../domain/ports.js';
+import { randomBytes } from 'node:crypto';
+
+import type { LinearClient, Logger, Store, WebhookRegistrar } from '../domain/ports.js';
 
 /**
  * Only a registration carrying this label is ours. HOOK-09's prune is gated on it
@@ -175,4 +177,56 @@ export async function disable(client: LinearClient, store: Store, log: Logger): 
     log.warn({ webhookId: id, err: String(err) }, 'could not disable the webhook; continuing');
     return false;
   }
+}
+
+/**
+ * Read the persisted signing secret, or mint and persist one.
+ *
+ * Moved out of `cli/daemon.ts` so `law setup` reads and writes the SAME kv key the daemon
+ * does. That is the whole point: a wizard that generated its own secret would register a
+ * webhook the daemon's receiver then rejects on every delivery, which is this project's
+ * worst failure shape (boots clean, reports healthy, receives nothing).
+ *
+ * The secret is OURS (HOOK-03 / 03-02 D-03) and is persisted BEFORE any remote call
+ * (T-07-22) — `reconcile` above documents why that ordering is the only safe one.
+ *
+ * `generated` is returned rather than logged here so the caller can keep its own log line
+ * and its own `logger.registerSecret()` at the call site, where the sink is.
+ */
+export function ensureWebhookSecret(store: Store): { secret: string; generated: boolean } {
+  const existing = store.kvGet(KEY_SECRET);
+  if (existing) return { secret: existing, generated: false };
+  const secret = randomBytes(32).toString('hex');
+  store.kvSet(KEY_SECRET, secret);
+  return { secret, generated: true };
+}
+
+/**
+ * The `WebhookRegistrar` port over this module's own `reconcile`/`disable`.
+ *
+ * One implementation, two shapes. The port is the narrow thing `law setup` and the daemon's
+ * shutdown both want (`reconcile(url)` / `disable()`); the functions above are the wide
+ * thing that carries the team id, the secret and the full registration back. Binding the
+ * two here means there is exactly one call path into `reconcile`, so a second composition
+ * cannot drift from the one the boot smoke exercises.
+ */
+export function createWebhookRegistrar(
+  client: LinearClient,
+  store: Store,
+  log: Logger,
+  o: { teamId: string; secret: string },
+): WebhookRegistrar {
+  return {
+    async reconcile(publicUrl: string): Promise<{ webhookId: string; secret: string }> {
+      const r = await reconcile(client, store, log, {
+        tunnelUrl: publicUrl,
+        teamId: o.teamId,
+        secret: o.secret,
+      });
+      return { webhookId: r.id, secret: r.secret };
+    },
+    async disable(): Promise<void> {
+      await disable(client, store, log);
+    },
+  };
 }

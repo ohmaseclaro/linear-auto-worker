@@ -25,7 +25,15 @@ import assert from 'node:assert/strict';
 
 import { FakeLinearClient } from '../domain/fakes.js';
 import type { Logger, Store } from '../domain/ports.js';
-import { disable, KEY_ID, KEY_SECRET, reconcile, WEBHOOK_LABEL } from './registrar.js';
+import {
+  createWebhookRegistrar,
+  disable,
+  ensureWebhookSecret,
+  KEY_ID,
+  KEY_SECRET,
+  reconcile,
+  WEBHOOK_LABEL,
+} from './registrar.js';
 
 const TUNNEL = 'https://abc123.ngrok-free.app';
 const DESIRED = `${TUNNEL}/linear/webhook`;
@@ -273,4 +281,49 @@ test('no logged value contains the signing secret (T23, residual)', async () => 
 
   assert.ok(lines.length > 0, 'the reconciler must log something, or this test is vacuous');
   assert.ok(!JSON.stringify(lines).includes(SECRET), 'the caller secret reached the logger');
+});
+
+// ---------------------------------------------------------------------------
+// ensureWebhookSecret / createWebhookRegistrar — moved out of `cli/daemon.ts`
+// ---------------------------------------------------------------------------
+
+test('ensureWebhookSecret mints a 64-char hex secret once and reuses it thereafter', () => {
+  const calls: string[] = [];
+  const { store, kv } = makeStore(calls);
+
+  const first = ensureWebhookSecret(store);
+  assert.equal(first.generated, true);
+  assert.match(first.secret, /^[0-9a-f]{64}$/, '32 random bytes as hex');
+  assert.equal(kv.get(KEY_SECRET), first.secret, 'persisted BEFORE any remote call (T-07-22)');
+
+  const second = ensureWebhookSecret(store);
+  assert.equal(second.generated, false, 'a second call must not mint a second secret');
+  assert.equal(second.secret, first.secret);
+});
+
+test('createWebhookRegistrar passes the caller teamId and secret straight through', async () => {
+  const calls: string[] = [];
+  const client = new RecordingWebhookClient([]);
+  const { store } = makeStore(calls);
+  const { log } = makeLogger();
+
+  const registrar = createWebhookRegistrar(client, store, log, { teamId: 'T', secret: 's' });
+  const out = await registrar.reconcile('https://x.ngrok.app');
+
+  assert.deepEqual(out, { webhookId: 'created-id', secret: 's' });
+  assert.equal(client.created.length, 1);
+  assert.equal(client.created[0]?.teamId, 'T', 'the team id came from the caller, not a constant');
+  assert.equal(client.created[0]?.secret, 's');
+  assert.equal(client.created[0]?.url, 'https://x.ngrok.app/linear/webhook');
+});
+
+test('createWebhookRegistrar.disable() disables the persisted registration', async () => {
+  const calls: string[] = [];
+  const client = new RecordingWebhookClient([summary('wh-1', DESIRED)]);
+  const { store } = makeStore(calls, { [KEY_ID]: 'wh-1' });
+  const { log } = makeLogger();
+
+  await createWebhookRegistrar(client, store, log, { teamId: TEAM, secret: SECRET }).disable();
+
+  assert.deepEqual(client.updated, [{ id: 'wh-1', input: { enabled: false } }]);
 });
