@@ -1,13 +1,16 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import type { TunnelManager, WebhookRegistrar } from '../../domain/index.js';
+import type { Config, TunnelManager, WebhookRegistrar } from '../../domain/index.js';
 import {
   WEBHOOK_LABEL,
   type DoctorClient,
   type DoctorFinding,
+  type MakeSetupAdapters,
+  type SetupContext,
   doctorWebhooks,
   reconcileWebhook,
+  registerAtSetup,
 } from './register.js';
 
 // NOTE (RUSH MODE): written complete, not executed on this branch — no node_modules here.
@@ -219,4 +222,104 @@ test('no doctor finding ever carries a signing secret', async () => {
 
   // T23: the port's listWebhooks() projection has no `secret`, and nothing here adds one.
   assert.equal(JSON.stringify(findings).includes('secret'), false);
+});
+
+// ---------------------------------------------------------------------------
+// registerAtSetup — the composition `law setup` was missing entirely
+// ---------------------------------------------------------------------------
+
+const SETUP_CTX: SetupContext = {
+  // Only `dbPath` and `mappings`/`teamId` are ever read, and only by `realSetupAdapters`,
+  // which every case below replaces. Cast rather than construct a whole valid Config: an
+  // exhaustive fixture here would assert nothing and rot on the next field.
+  config: { teamId: 'team-abc', dbPath: '/nope/store.db', mappings: {} } as unknown as Config,
+  linearApiKey: 'lin_api_fake',
+  ngrokAuthtoken: 'ngrok_fake_token',
+};
+
+function fakeAdapters(overrides: {
+  tunnel?: TunnelManager;
+  registrar?: WebhookRegistrar;
+}): { make: MakeSetupAdapters; closes: () => number; seen: string[] } {
+  let closes = 0;
+  const seen: string[] = [];
+  const state = { webhooks: new Map<string, { id: string; url: string; secret: string }>() };
+  const registrar = overrides.registrar ?? fakeRegistrar(state);
+  const make: MakeSetupAdapters = async () => ({
+    tunnel: overrides.tunnel ?? fakeTunnel('https://setup.ngrok.app'),
+    registrar: {
+      async reconcile(url: string) {
+        seen.push(url);
+        return registrar.reconcile(url);
+      },
+      disable: () => registrar.disable(),
+    },
+    port: 4321,
+    async close() {
+      closes += 1;
+    },
+  });
+  return { make, closes: () => closes, seen };
+}
+
+test('registerAtSetup registers against the url the tunnel returned and closes once', async () => {
+  const { make, closes, seen } = fakeAdapters({});
+
+  const result = await registerAtSetup(SETUP_CTX, make);
+
+  assert.equal(result.ok, true);
+  assert.ok(result.ok);
+  assert.equal(result.publicUrl, 'https://setup.ngrok.app');
+  assert.equal(result.webhookId, 'wh-1');
+  assert.deepEqual(seen, ['https://setup.ngrok.app'], 'the registrar saw the tunnel url');
+  assert.equal(closes(), 1, 'close() runs exactly once on the happy path');
+});
+
+test('a tunnel failure still closes the adapters — finally, not the happy path', async () => {
+  // The point of the assertion: a tunnel left open by a FAILED setup outlives the command
+  // and holds the operator's one free ngrok session.
+  const { make, closes } = fakeAdapters({
+    tunnel: fakeTunnel(new Error('ERR_NGROK_105 the authtoken you specified is invalid')),
+  });
+
+  const result = await registerAtSetup(SETUP_CTX, make);
+
+  assert.equal(result.ok, false);
+  assert.ok(!result.ok);
+  assert.match(result.fix, /authtoken was rejected/);
+  assert.match(result.fix, /NGROK_AUTHTOKEN/);
+  assert.equal(closes(), 1, 'close() ran even though nothing was registered');
+});
+
+test('a throw from `make` surfaces that error message, never the admin fix or a stack', async () => {
+  // This is the `webhookTeamId` case: telling an operator with no configured team to go
+  // check their workspace-admin grant sends them to the wrong place entirely.
+  const make: MakeSetupAdapters = async () => {
+    throw new Error('no Linear team is configured. Linear requires a team on webhook creation.');
+  };
+
+  const result = await registerAtSetup(SETUP_CTX, make);
+
+  assert.ok(!result.ok);
+  assert.match(result.fix, /no Linear team is configured/);
+  assert.doesNotMatch(result.fix, /WORKSPACE ADMIN/);
+  assert.doesNotMatch(result.fix, /\bat Object\.|\bat async\b/, 'never a stack trace (D-08)');
+});
+
+test('the signing secret never appears in a failure fix string', async () => {
+  const secret = 'deadbeef'.repeat(8);
+  const state = { webhooks: new Map([[WEBHOOK_LABEL, { id: 'wh-9', url: 'x', secret }]]) };
+  const failing: WebhookRegistrar = {
+    async reconcile() {
+      throw new Error(`GraphQL error while registering with secret=${secret}`);
+    },
+    async disable() {},
+  };
+  const { make } = fakeAdapters({ registrar: failing });
+  void state;
+
+  const result = await registerAtSetup(SETUP_CTX, make);
+
+  assert.ok(!result.ok);
+  assert.doesNotMatch(result.fix, new RegExp(secret));
 });

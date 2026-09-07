@@ -24,9 +24,26 @@
  *    no raw error object or message ever reaches the operator's terminal or a log file.
  */
 import { confirm } from '@inquirer/prompts';
+import * as net from 'node:net';
 
-import type { LinearClient, TunnelManager, WebhookRegistrar } from '../../domain/index.js';
-import { WEBHOOK_LABEL } from '../../ingress/registrar.js';
+import type {
+  Config,
+  LinearClient,
+  Logger,
+  TunnelManager,
+  WebhookRegistrar,
+} from '../../domain/index.js';
+import { webhookTeamId } from '../../infra/config.js';
+import { asDomainStore } from '../../infra/store/domain-store.js';
+import { openStore } from '../../infra/store/db.js';
+import { createSqliteStore } from '../../infra/store/sqlite-store.js';
+import {
+  createWebhookRegistrar,
+  ensureWebhookSecret,
+  WEBHOOK_LABEL,
+} from '../../ingress/registrar.js';
+import { createTunnelManager } from '../../ingress/tunnel.js';
+import { LinearClientImpl } from '../../outbound/linear-client.js';
 
 /** One definition, owned by Phase 3's registrar; re-exported so wizard callers need one import. */
 export { WEBHOOK_LABEL };
@@ -112,6 +129,145 @@ export async function reconcileWebhook(
     // The raw error is dropped: a GraphQL error body can carry the request text, and it is
     // unactionable next to the named fix.
     return { ok: false, fix: REGISTRAR_FIX };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The composition `law setup` was missing
+// ---------------------------------------------------------------------------
+
+/**
+ * What `registerAtSetup` needs in order to prove a registration works, and how to put it
+ * all down again.
+ *
+ * This interface exists so the wizard's end-to-end test can drive step 7 without a Linear
+ * workspace or an ngrok account — `make` is a default parameter, never a mocked module
+ * (T88: an ESM namespace binding is non-configurable by specification).
+ */
+export interface SetupAdapters {
+  tunnel: TunnelManager;
+  registrar: WebhookRegistrar;
+  /** The loopback port the tunnel forwards to. */
+  port: number;
+  /** Closes the tunnel, the throwaway socket and the database, in that order. */
+  close(): Promise<void>;
+}
+
+export type MakeSetupAdapters = (ctx: SetupContext) => Promise<SetupAdapters>;
+
+export interface SetupContext {
+  config: Config;
+  /**
+   * The already-validated Linear key, NOT the `@linear/sdk` client the wizard holds.
+   *
+   * `createWebhookRegistrar` speaks `src/domain/ports.ts`'s `LinearClient`, and
+   * `LinearClientImpl` is the only bridge from the SDK to that port — it takes the key.
+   * Passing the key rather than re-wrapping the SDK object keeps one construction path.
+   */
+  linearApiKey: string;
+  ngrokAuthtoken: string;
+}
+
+/**
+ * A logger that writes nowhere.
+ *
+ * `createLogger()` writes pino JSON to **stdout** (`infra/logger.ts`'s
+ * `SecretScrubbingStream`), so handing it to the registrar would interleave machine log
+ * lines through a wizard whose entire output contract is "a named, actionable line per
+ * step" (D-08). Every failure on this path already comes back as a `fix` string, so there
+ * is nothing here a log line would add that the operator does not already get.
+ *
+ * ponytail: five lines beat a second sink. Give it a real file sink the day `law setup`
+ * needs a post-mortem trail.
+ */
+const silentLog: Logger = {
+  child: () => silentLog,
+  info: () => {},
+  warn: () => {},
+  error: () => {},
+  debug: () => {},
+};
+
+/**
+ * The real tunnel, the real registrar, and the loopback socket the tunnel forwards to.
+ *
+ * Ordering is HOOK-01's, deliberately: the socket BINDS BEFORE the tunnel opens. The
+ * daemon does exactly this and for exactly this reason (a live public URL backed by
+ * nothing burns Linear's three-delivery retry budget), so the wizard must not model the
+ * opposite — and `addr: 0` would forward ngrok at port 0, while guessing a fixed port is
+ * worse than binding one.
+ *
+ * The store is here because the registrar's contract requires the SIGNING SECRET to be
+ * persisted before the remote call (T-07-22), and `ensureWebhookSecret` writes it under
+ * the same kv key `law start` reads — so the daemon reuses this registration rather than
+ * minting a second secret its own receiver would then reject.
+ */
+async function realSetupAdapters(ctx: SetupContext): Promise<SetupAdapters> {
+  // Throws with the named "no Linear team is configured" line when there is no team
+  // anywhere. `registerAtSetup` turns that into the fix the operator reads.
+  const teamId = webhookTeamId(ctx.config);
+
+  const db = openStore(ctx.config.dbPath);
+  const store = asDomainStore(createSqliteStore(db));
+  const { secret } = ensureWebhookSecret(store);
+
+  const server = net.createServer();
+  const port = await new Promise<number>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      const addr = server.address();
+      if (addr === null || typeof addr === 'string') {
+        reject(new Error('setup bound to a non-TCP address'));
+        return;
+      }
+      resolve(addr.port);
+    });
+  });
+
+  const linear = new LinearClientImpl({ apiKey: ctx.linearApiKey });
+  const tunnel = createTunnelManager(ctx.ngrokAuthtoken, silentLog);
+
+  return {
+    tunnel,
+    registrar: createWebhookRegistrar(linear, store, silentLog, { teamId, secret }),
+    port,
+    async close(): Promise<void> {
+      await tunnel.close().catch(() => {});
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      db.close();
+    },
+  };
+}
+
+/**
+ * `law setup`'s last step, and the only thing that proves the setup actually works.
+ *
+ * Registration is not a formality here: `webhookCreate` is the WORKSPACE-ADMIN-gated call,
+ * and opening a tunnel is the only proof the ngrok authtoken is live. Listing webhooks
+ * would prove neither. So this fails at setup rather than at the operator's first
+ * `law start` three days later.
+ *
+ * `close()` runs in a `finally` — a tunnel left open by a failed registration outlives the
+ * command and holds the operator's single free ngrok session.
+ */
+export async function registerAtSetup(
+  ctx: SetupContext,
+  make: MakeSetupAdapters = realSetupAdapters,
+): Promise<RegisterResult> {
+  let adapters: SetupAdapters;
+  try {
+    adapters = await make(ctx);
+  } catch (err) {
+    // The only expected throw is `webhookTeamId`'s, whose message names the real fix.
+    // Surfacing REGISTRAR_FIX here instead would send the operator to check an admin
+    // grant that is not the problem. Message only — never a stack trace (D-08).
+    return { ok: false, fix: err instanceof Error ? err.message : String(err) };
+  }
+
+  try {
+    return await reconcileWebhook(adapters.tunnel, adapters.registrar, adapters.port);
+  } finally {
+    await adapters.close();
   }
 }
 
