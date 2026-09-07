@@ -1,6 +1,6 @@
 # Traps
 
-One hundred and two footguns found while building this daemon, kept as a running ledger so no two
+One hundred and three footguns found while building this daemon, kept as a running ledger so no two
 parallel work streams had to rediscover the same one.
 
 **Every entry here was measured, not recalled.** Versions come from the npm registry, API
@@ -15,7 +15,7 @@ spawn processes, several of them will cost you an afternoon each.
 Measured against: `@linear/sdk@93.0.1`, `@ngrok/ngrok@1.7.0`, `better-sqlite3@13.0.3`,
 `execa@10.0.1`, Claude Code CLI `2.1.259`, `gh` `2.98.0`, Node `22.23.1`, macOS.
 
-The complete internal ledger — all 102 rows with per-phase attribution and the evidence for
+The complete internal ledger — all 103 rows with per-phase attribution and the evidence for
 each — is in [`.planning/TRAPS.md`](../.planning/TRAPS.md). This page is the subset that
 generalises.
 
@@ -123,6 +123,22 @@ on name with a documented fallback, or you will move tickets to the wrong one.
 
 **Issue `branchName` is server-supplied text that reaches your filesystem.** It becomes a
 git worktree directory name here, so it is validated as a path component before use.
+
+**Linear "Agents" are not assignees, and cannot create webhooks.** If your integration
+picks up work by watching `assigneeId`, Linear's native bot accounts — Agents, a.k.a. app
+users — will not trigger it. They are genuinely attractive: real workspace identities that
+can be mentioned and commented as, and explicitly *not* billable seats. But assigning an
+issue to an agent **delegates** it: the human stays the primary assignee and the agent lands
+in a separate field, so an `assigneeId` watcher never fires. Agents also "cannot access
+admin functionality", and webhook creation requires admin — so an agent cannot own its own
+webhook either. Supporting them means routing on the delegate field and shipping an OAuth
+app; it is a feature, not a configuration choice.
+
+**There is no non-personal Linear API key.** Keys are always personal to a user; they can be
+*restricted* (Read / Write / Admin / Create issues / Create comments, and to specific teams)
+but never elevated beyond what that user can already do. A "bot account" is therefore a
+second human-shaped member — with a seat cost — and it must be a workspace **admin** if your
+integration registers its own webhook.
 
 ## ngrok
 
