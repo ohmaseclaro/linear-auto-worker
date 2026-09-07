@@ -131,7 +131,10 @@ Honest list:
   a run's progress *within* the current agent turn is only in the logs.
 - **Questions rely on Linear comment webhooks arriving.** If one is missed, the run resumes
   at its deadline with a stated assumption rather than hanging — best effort by design, not
-  guaranteed delivery.
+  guaranteed delivery. Deadlines and the missed-work re-poll run on a one-minute tick.
+- **`maxTurns` and `maxBudgetUsd` are config keys nothing reads.** A run is bounded by
+  `maxRunMs` alone. Recorded rather than wired because "what happens at the limit" is a
+  design question, not a missing line.
 - **macOS-first.** CI runs Ubuntu and macOS on Node 22 and 24, but the ngrok config path and
   the SIGINT process-group behaviour were both measured on macOS only.
 
@@ -148,7 +151,7 @@ and what is explicitly out of scope.
 
 ## The traps ledger
 
-[`docs/TRAPS.md`](docs/TRAPS.md) holds the **91 verified footguns** found building this —
+[`docs/TRAPS.md`](docs/TRAPS.md) holds the **94 verified footguns** found building this —
 each one measured against the real tool, not recalled. A sample:
 
 - `claude -p --permission-mode dontAsk` alone **denies every edit and exits 0** with

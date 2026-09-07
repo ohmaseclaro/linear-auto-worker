@@ -1,6 +1,6 @@
 # Traps
 
-Ninety-one footguns found while building this daemon, kept as a running ledger so no two
+Ninety-four footguns found while building this daemon, kept as a running ledger so no two
 parallel work streams had to rediscover the same one.
 
 **Every entry here was measured, not recalled.** Versions come from the npm registry, API
@@ -15,7 +15,7 @@ spawn processes, several of them will cost you an afternoon each.
 Measured against: `@linear/sdk@93.0.1`, `@ngrok/ngrok@1.7.0`, `better-sqlite3@13.0.3`,
 `execa@10.0.1`, Claude Code CLI `2.1.259`, `gh` `2.98.0`, Node `22.23.1`, macOS.
 
-The complete internal ledger — all 91 rows with per-phase attribution and the evidence for
+The complete internal ledger — all 94 rows with per-phase attribution and the evidence for
 each — is in [`.planning/TRAPS.md`](../.planning/TRAPS.md). This page is the subset that
 generalises.
 
@@ -250,6 +250,40 @@ does.** A grep for high-entropy patterns over the working tree is not enough —
 exposes every commit, and the offending blob here was 262 commits back. Rewriting one blob
 out of history with `git filter-repo --replace-text` costs minutes before the first push and
 is unpleasant afterwards.
+
+## Schema and logging
+
+**Two migration runners, and the dead one had all the tests.** This project carried a
+well-written runner — strictly-ascending version assertions, an explicit BEGIN/COMMIT per
+migration, a report of what it applied, seven tests — that nothing in production called.
+`openStore` used a duplicate hidden in the connection module with its own hardcoded
+one-element list. Adding a second migration to the tested list applied *nothing*: the
+compiler passed, every test passed, and the column simply did not exist until a `SELECT`
+failed at runtime. If your project has a migration list, check which one the code that
+opens the database actually reads, and assert it: one test that opens a real database and
+compares `PRAGMA user_version` against the newest migration in the list closes this
+permanently.
+
+**Test the upgrade, not just the fresh install.** A migration that drops and recreates a
+table passes every "empty database migrates to the latest version" test and destroys a
+live operator's history. Write the case that seeds a v1 database, migrates it, and asserts
+the old row is still there with a sane default in the new column.
+
+**A substring-matching log redactor eats innocent fields.** A key pattern of
+`/(token|secret|key|authorization)/i` also matches `tokensUsed` — a token *count* — so
+every terminal log line here printed `"tokensUsed":"[REDACTED]"`. It went unnoticed for a
+whole milestone because the field was hardcoded to `0`, and surfaced the instant it carried
+a real number. Resist narrowing the pattern: over-redaction is the safe error for a log
+sink, and under-redaction leaks a credential. Add an explicit exception list instead, so
+anything new still fails closed — and write the test that goes red if someone later
+"fixes" it by loosening the pattern.
+
+**Config keys that nothing reads are worse than missing features.** Three were found here
+by grepping for consumers rather than definitions: `maxQuestionRounds` was validated by the
+schema, prompted for by the setup wizard, written to disk — and its counter was set to `0`
+at creation and never read, incremented or compared anywhere. The operator was told they
+had a limit. `maxTurns` and `maxBudgetUsd` are the same shape. For every knob you expose,
+grep for its *consumer*, not its declaration.
 
 ## The one that is really about process
 

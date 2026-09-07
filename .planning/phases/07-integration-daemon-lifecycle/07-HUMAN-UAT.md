@@ -351,18 +351,28 @@ Neither can be reproduced offline. They are the reason this file exists at all.
 
 Do not report these as bugs. They are deliberate, and each has its reasoning written down.
 
+**Six entries that used to be here are now closed** and are listed at the bottom so this
+table is not read against a daemon that no longer behaves that way.
+
 | # | What you will see | Why it is this way |
 |---|---|---|
-| **T72** | Milestone comments come from the run engine only. The notifier's Linear channel exists in the codebase and is **not** constructed. | The engine already posts every Linear comment, and does it better — edit-in-place queue positions, threaded question ids, multi-repo rollups. Wiring both would **double-post every milestone**, and every bot comment is then an event the four loop guards must filter. Accepted for v1: the notifier is two channels, not three. The **log** channel — the half the engine does not do — is wired and structurally cannot be removed. |
-| **T73** | A run that is killed at its deadline with real commits in its worktree is reported **`failed`**, not `partial`, and ships no draft PR. `partial` is unreachable from a live run. | Two verdict designs were built. The run engine trusts the agent's self-reported `status`; `execute-run.ts` judges by **commits present in the worktree**. Only the engine's is on the live path — and research is emphatic that trusting a self-report is this project's most likely silent failure, because `claude -p` exits 0 having been denied every edit. Reconciling needs `partial` on `AgentResult` plus a draft flag on the `Deliverer` port. **Architectural: recorded, not fixed. Highest-value follow-up after this milestone.** |
-| **D4** | A question's deadline is only enforced at the **next boot**, and missed work is only swept at boot. | Nothing drives a periodic `questions.sweep()` or reconciliation poll — no plan owned a timer. Both functions are written and ready to be called on an interval. In practice: if you never answer a question, the assumption is posted at the next restart rather than at the deadline. |
-| **D5** | `maxQuestionRounds` is not enforced. | A pathological agent could ask more rounds than configured. |
-| **D6** | Terminal notifications report `costUsd: 0` and `tokensUsed: 0`. | The values are never threaded from the agent result to the notifier. |
-| **D7** | After an **unclean** exit there is no recorded pid to inspect. | Shutdown reaps through the in-process abort map, so the `runs.pid` column is never written. A clean stop does not need it; a crash leaves you without it. |
+| **`maxBudgetUsd`** | The config key exists and nothing reads it. | Dead knob, same class as D5 was. `maxTurns` beside it is also never passed to `claude` — the run is bounded by `maxRunMs` alone. Both are recorded rather than fixed because bounding a run by spend or by turns is a design question (what happens at the limit?), not a wiring one. |
+| **`operatorUserId`** | Unset, so the INTK-03 subscribe step is skipped and logs a warning. | No wizard step writes it. The daemon authenticates as the BOT, so it cannot infer which human to subscribe. |
 | — | A project-keyed mapping does not record its Linear team id. | Harmless while the registrar registers with `allPublicTeams: true`. Revisit only if webhook scoping ever narrows to one team. |
 | — | A re-run's review prompt labels each existing mapping by id rather than by project/team name. | `Config.mappings` stores no human-readable name. |
+| — | End-to-end has never been run against a live Linear workspace. | That is what this document is for. |
 
----
+### Closed since this table was written
+
+| # | Was | Now |
+|---|---|---|
+| **T72** | The notifier's Linear channel existed and was not constructed, so wiring it would double-post every milestone. | The dead channel and `createNotifier` are **deleted**. The run engine posts every Linear comment; the notifier is log + Slack. |
+| **T73** | A run reaped at its deadline with real commits reported `failed` and shipped nothing — `partial` was unreachable from a live run. | The live path judges by **evidence in the worktree**, not the agent's self-report. A barren `complete` is `failed`; a reaped run with commits is `partial` and ships a draft PR naming its uncommitted paths. |
+| **D4** | Question deadlines and the missed-work sweep ran **only at boot**, so a four-hour deadline did nothing on a daemon that stays up. | A one-minute tick drives both. Non-overlapping — measured at 11 concurrent sweeps without the guard. |
+| **D5** | `maxQuestionRounds` was unenforced. It was worse than that: `questionRound` was written `0` and never read, incremented or compared anywhere. | Enforced. Past the cap the run resumes on the agent's stated assumption, and says so on the ticket, with its own `question_round_cap` reason in the log. |
+| **D6** | Terminal notifications reported `costUsd: 0` and `tokensUsed: 0` on every run. | Migration 002 added the columns; the runner writes them. Also fixed the log redactor, which was printing `tokensUsed` as `"[REDACTED]"`. |
+| **D7** | `runs.pid` was never written, so an unclean exit left no pid to inspect. | Written the moment the child exists, before any await. |
+| — | `law status` printed `not yet implemented`. | Reads the store directly, and works whether or not the daemon is running. |
 
 ## Record the outcome
 
