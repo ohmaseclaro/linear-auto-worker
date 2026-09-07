@@ -1,6 +1,6 @@
 # Traps
 
-One hundred and six footguns found while building this daemon, kept as a running ledger so no two
+One hundred and nine footguns found while building this daemon, kept as a running ledger so no two
 parallel work streams had to rediscover the same one.
 
 **Every entry here was measured, not recalled.** Versions come from the npm registry, API
@@ -15,7 +15,7 @@ spawn processes, several of them will cost you an afternoon each.
 Measured against: `@linear/sdk@93.0.1`, `@ngrok/ngrok@1.7.0`, `better-sqlite3@13.0.3`,
 `execa@10.0.1`, Claude Code CLI `2.1.259`, `gh` `2.98.0`, Node `22.23.1`, macOS.
 
-The complete internal ledger — all 106 rows with per-phase attribution and the evidence for
+The complete internal ledger — all 109 rows with per-phase attribution and the evidence for
 each — is in [`.planning/TRAPS.md`](../.planning/TRAPS.md). This page is the subset that
 generalises.
 
@@ -369,6 +369,45 @@ The reason it survived a whole packaging pass here: `--help` had been "tested" b
 `node dist/src/cli/index.js --help`, which needs no executable bit at all. **Test a CLI by
 invoking it the way the operator will** — through the name on their PATH — or you are
 testing a different program than the one you shipped.
+
+## What only a live run finds
+
+Everything below was found by pointing this at a real Linear workspace for the first time,
+after 594 passing tests and a green boot smoke. Each had been latent through eight phases.
+
+**A poll that re-derives work from state re-runs everything the bot already finished.** The
+reconciliation poll enqueued any assigned open issue with no *active* run. A delivered run
+is terminal, so it did not block — and the watermark could not help, because **the bot's own
+writes bump the issue's `updatedAt`**: moving it to In Progress and posting "Done" both push
+it past the watermark. Sixty seconds after the first ticket delivered its pull request, a
+second agent was working the same ticket. Left alone it opens a PR a minute, forever, at
+real cost.
+
+The fix that generalises: key the guard on the **producer's evidence class**, not on run
+state. A webhook is an *act with an actor* — block it only if a run is live, or you break a
+legitimate reassignment. A poll is *state the bot's own writes keep refreshing* — block it
+if any run exists at all. If a code path derives work from state rather than from an event,
+ask what your own writes do to that state.
+
+**Two functions wrote a value for a next process that never read it.** Shutdown moved
+in-flight runs to `queued`; boot recovery moved `preparing` to `queued`. Nothing ever
+dispatched a queued row the current process had not created — the scheduler drained an
+in-memory array, and the store query that would have found those rows was dead code. So
+every Ctrl-C silently abandoned its work while the status command reported the run as
+active. The comment above the shutdown write said it existed precisely to stop that.
+
+Two traps hid inside that fix, and one of them no test could have caught: a requeued run's
+session id is **spent**, and reusing it is a hard CLI error — but fakes never see the argv,
+so the whole suite stays green while production fails every time. The other is timing:
+starting the scheduler resolves parked slots as a *microtask*, so a drain on the next
+synchronous line re-reads those rows as queued and drives them twice.
+
+**A test that only fails in its own module has not proven the wiring.** After the
+prompt-injection control turned out to be unit-tested and never called, this became a
+procedure: delete the call site and check that the unit tests stay green while the
+integration check goes red. Both red means the test targets the module; neither red means it
+targets nothing. Running it here also caught a vacuous first attempt — the assertion passed
+against unfixed code because the setup already manufactured the same event history.
 
 ## The one that cost the most
 
