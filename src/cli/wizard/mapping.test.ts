@@ -76,22 +76,56 @@ function queue<T>(name: string, values: readonly T[]): () => Promise<T> {
  * The casts are structural, not escapes: each prompt is generic over its own value type and
  * a single queue answers one call site with one concrete type.
  */
-function scripted(script: {
-  select?: readonly unknown[];
-  checkbox?: readonly unknown[];
-  input?: readonly string[];
-  confirm?: readonly boolean[];
-}): WizardPrompts {
+function scripted(
+  script: {
+    select?: readonly unknown[];
+    checkbox?: readonly unknown[];
+    input?: readonly string[];
+    confirm?: readonly boolean[];
+  },
+  seen?: SeenPrompts,
+): WizardPrompts {
   const select = queue('select', script.select ?? []);
   const checkbox = queue('checkbox', script.checkbox ?? []);
   const input = queue('input', script.input ?? []);
   const confirm = queue('confirm', script.confirm ?? []);
   return {
-    select: <T>() => select() as Promise<T>,
-    checkbox: <T>() => checkbox() as Promise<T[]>,
-    input: () => input(),
-    confirm: () => confirm(),
+    select: <T>(config: ChoiceConfig<T>) => {
+      seen?.select.push(config as ChoiceConfig<unknown>);
+      return select() as Promise<T>;
+    },
+    checkbox: <T>(config: ChoiceConfig<T>) => {
+      seen?.checkbox.push(config as ChoiceConfig<unknown>);
+      return checkbox() as Promise<T[]>;
+    },
+    input: (config: { message: string }) => {
+      seen?.input.push(config);
+      return input();
+    },
+    confirm: (config: { message: string; default?: boolean }) => {
+      seen?.confirm.push(config);
+      return confirm();
+    },
   };
+}
+
+/** What was *offered*, not what came back. Asserting on the returned value alone cannot
+ *  distinguish "the filter narrowed the list" from "the whole list was rendered and the
+ *  operator happened to pick these" — the entire defect n7b is about. */
+interface ChoiceConfig<T> {
+  message: string;
+  choices: ReadonlyArray<{ name: string; value: T }>;
+}
+
+interface SeenPrompts {
+  select: ChoiceConfig<unknown>[];
+  checkbox: ChoiceConfig<unknown>[];
+  input: { message: string }[];
+  confirm: { message: string; default?: boolean }[];
+}
+
+function collector(): SeenPrompts {
+  return { select: [], checkbox: [], input: [], confirm: [] };
 }
 
 test('listMappingCandidates: pages teams/projects past the 50-item connection default (Pitfall 11)', async () => {
@@ -270,4 +304,56 @@ test('buildMappings: selecting exactly one toggle overrides only that key, spars
 
   assert.equal(result.length, 1);
   assert.deepEqual(result[0]?.toggles, { draftPr: true }, 'exactly one override key, no others');
+});
+
+test('buildMappings: the repo trust disclosure is reported once per newly selected repo (T-08-21)', async () => {
+  const client = fakeLinearClient(
+    [{ id: 'team-1', name: 'Team One' }],
+    [{ id: 'proj-1', name: 'Project One', teamId: 'team-1' }],
+  );
+  const reported: string[] = [];
+
+  await buildMappings(
+    client,
+    DISCOVERED,
+    undefined,
+    scripted({
+      select: ['proj-1'],
+      checkbox: [['/repos/alpha', '/repos/beta']],
+      input: [''],
+      confirm: [false /* wantsOverrides */, false /* add another? */],
+    }),
+    (message) => reported.push(message),
+  );
+
+  const disclosures = reported.filter((line) => line.includes('--bare'));
+  assert.equal(disclosures.length, 2, 'one disclosure per newly mapped repo, no more, no less');
+  assert.ok(disclosures.some((line) => line.includes('/repos/alpha')));
+  assert.ok(disclosures.some((line) => line.includes('/repos/beta')));
+});
+
+test('buildMappings: re-run review prints the existing mapping through the sink, not console', async () => {
+  const client = fakeLinearClient([], []);
+  const existingMapping: Mapping = {
+    key: { kind: 'project', id: 'proj-1', name: 'Project One' },
+    repos: ['/repos/alpha'],
+    slackWebhookUrl: 'https://hooks.slack.com/services/abc',
+    toggles: { draftPr: true },
+  };
+  const reported: string[] = [];
+
+  await buildMappings(
+    client,
+    DISCOVERED,
+    [existingMapping],
+    scripted({ select: ['keep'], confirm: [false /* add another? */] }),
+    (message) => reported.push(message),
+  );
+
+  assert.ok(reported.some((line) => line.includes('Project One')), 'mapping header went to the sink');
+  assert.ok(reported.some((line) => line.includes('repos: /repos/alpha')));
+  assert.ok(
+    reported.some((line) => line.includes('hooks.slack.com/…')),
+    'the webhook URL is still masked to host-only on the sink path',
+  );
 });

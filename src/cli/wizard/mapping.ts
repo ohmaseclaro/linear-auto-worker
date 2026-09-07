@@ -163,6 +163,20 @@ export type ToggleOverrides = Partial<Record<ToggleName, boolean | string | numb
 
 const NO_PROJECT_VALUE = '__no_project__';
 
+/**
+ * Where this module's operator-facing lines go.
+ *
+ * Same seam, and the same reason, as `repo-safety.ts`'s `report` (see its comment): a
+ * library function that writes to `console` directly cannot be called from a test without
+ * leaking output into `node --test`'s worker channel, which desynchronises the parent-side
+ * V8 frame parser and surfaces as "Unable to deserialize cloned data" with no failing
+ * assertion to point at. `index.ts` keeps the console default — there the terminal IS the
+ * interface; here it is a library call the wizard happens to make.
+ */
+type Report = (message: string) => void;
+
+const consoleReport: Report = (message) => console.log(message);
+
 async function promptMappingKey(
   candidates: {
     teams: TeamCandidate[];
@@ -206,8 +220,8 @@ async function promptMappingKey(
  * connects its `.mcp.json` servers with NO trust prompt. Printed once per newly-mapped repo
  * as disclosure, not a second gate — the operator already consented by selecting it above.
  */
-function printRepoTrustDisclosure(repoPath: string): void {
-  console.log(
+function printRepoTrustDisclosure(repoPath: string, report: Report): void {
+  report(
     `⚠ "${repoPath}": mapping this repo means fully trusting it. Without --bare, a spawned ` +
       `claude -p session runs its .claude/settings.json hooks and connects its .mcp.json ` +
       `servers with no trust prompt.`,
@@ -217,13 +231,14 @@ function printRepoTrustDisclosure(repoPath: string): void {
 async function promptRepoSelection(
   discovered: DiscoveredRepo[],
   p: WizardPrompts,
+  report: Report,
 ): Promise<string[]> {
   const selected = await p.checkbox({
     message: 'Which local repos attach to this mapping?',
     choices: discovered.map((r) => ({ name: `${r.name} (${r.path})`, value: r.path })),
   });
   for (const repoPath of selected) {
-    printRepoTrustDisclosure(repoPath);
+    printRepoTrustDisclosure(repoPath, report);
   }
   return selected;
 }
@@ -298,9 +313,10 @@ async function promptOneMapping(
   candidates: { teams: TeamCandidate[]; projects: ProjectCandidate[] },
   discovered: DiscoveredRepo[],
   p: WizardPrompts,
+  report: Report,
 ): Promise<Mapping> {
   const key = await promptMappingKey(candidates, p);
-  const repos = await promptRepoSelection(discovered, p);
+  const repos = await promptRepoSelection(discovered, p, report);
   const { slackWebhookUrl, toggles } = await promptSlackAndToggles(p);
   return { key, repos, slackWebhookUrl, toggles };
 }
@@ -319,13 +335,11 @@ function maskSlackUrl(url: string): string {
   }
 }
 
-function printExistingMapping(mapping: Mapping): void {
-  console.log(`- ${mapping.key.kind}: ${mapping.key.name}`);
-  console.log(`  repos: ${mapping.repos.join(', ') || '(none)'}`);
-  console.log(
-    `  slack: ${mapping.slackWebhookUrl ? maskSlackUrl(mapping.slackWebhookUrl) : '(none)'}`,
-  );
-  console.log(`  toggles: ${mapping.toggles ? JSON.stringify(mapping.toggles) : '(none)'}`);
+function printExistingMapping(mapping: Mapping, report: Report): void {
+  report(`- ${mapping.key.kind}: ${mapping.key.name}`);
+  report(`  repos: ${mapping.repos.join(', ') || '(none)'}`);
+  report(`  slack: ${mapping.slackWebhookUrl ? maskSlackUrl(mapping.slackWebhookUrl) : '(none)'}`);
+  report(`  toggles: ${mapping.toggles ? JSON.stringify(mapping.toggles) : '(none)'}`);
 }
 
 type ExistingMappingAction = 'keep' | 'edit-repos' | 'edit-slack' | 'remove';
@@ -340,8 +354,9 @@ async function reviewExistingMapping(
   mapping: Mapping,
   discovered: DiscoveredRepo[],
   p: WizardPrompts,
+  report: Report,
 ): Promise<Mapping | null> {
-  printExistingMapping(mapping);
+  printExistingMapping(mapping, report);
   const action = await p.select<ExistingMappingAction>({
     message: `What should happen to the "${mapping.key.name}" mapping?`,
     choices: [
@@ -355,7 +370,7 @@ async function reviewExistingMapping(
   if (action === 'keep') return mapping;
   if (action === 'remove') return null;
   if (action === 'edit-repos') {
-    const repos = await promptRepoSelection(discovered, p);
+    const repos = await promptRepoSelection(discovered, p, report);
     return { ...mapping, repos };
   }
   // 'edit-slack'
@@ -383,22 +398,23 @@ export async function buildMappings(
   discovered: DiscoveredRepo[],
   existing?: Mapping[],
   p: WizardPrompts = realPrompts,
+  report: Report = consoleReport,
 ): Promise<Mapping[]> {
   const candidates = await listMappingCandidates(linearClient);
   const result: Mapping[] = [];
 
   if (existing && existing.length > 0) {
     for (const mapping of existing) {
-      const outcome = await reviewExistingMapping(mapping, discovered, p);
+      const outcome = await reviewExistingMapping(mapping, discovered, p, report);
       if (outcome) result.push(outcome);
     }
   } else {
-    result.push(await promptOneMapping(candidates, discovered, p));
+    result.push(await promptOneMapping(candidates, discovered, p, report));
   }
 
   let addMore = await p.confirm({ message: 'Add another mapping?', default: false });
   while (addMore) {
-    result.push(await promptOneMapping(candidates, discovered, p));
+    result.push(await promptOneMapping(candidates, discovered, p, report));
     addMore = await p.confirm({ message: 'Add another mapping?', default: false });
   }
 
