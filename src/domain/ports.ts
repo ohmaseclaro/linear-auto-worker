@@ -174,7 +174,19 @@ export type EngineEvent =
    * (06-03), so it cannot key off `question.answered`, whose handler looks the
    * row up and requires status `open`.
    */
-  | { kind: 'run.resumed'; runId: RunId; input: string; reason: 'question_flow_disabled' }
+  /**
+   * A run resumed WITHOUT a question row to key off. `question_flow_disabled` is QA-07's
+   * branch; `question_round_cap` is gap D5's — the agent asked once too often and is being
+   * resumed on its own stated assumption. They are separate values because they are
+   * separate operator situations: one is a setting, the other is an agent misbehaving, and
+   * collapsing them would hide the second inside the first in every log line.
+   */
+  | {
+      kind: 'run.resumed';
+      runId: RunId;
+      input: string;
+      reason: 'question_flow_disabled' | 'question_round_cap';
+    }
   | { kind: 'ignored'; reason: string };
 
 export type DomainEvent = IngressEvent | EngineEvent;

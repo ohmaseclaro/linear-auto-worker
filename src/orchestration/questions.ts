@@ -177,14 +177,17 @@ export function createQuestions(deps: QuestionsDeps): Questions {
     questionId: string | null,
     input: string,
     authorName: string | null,
+    reason: 'question_flow_disabled' | 'question_round_cap' = 'question_flow_disabled',
   ): Promise<void> {
     const event: EngineEvent =
       questionId !== null
         ? { kind: 'question.answered', questionId, answer: input, authorName }
         : // QA-07's branch has no question row by construction, so it cannot key off
           // `question.answered`, whose handler looks the row up and requires it `open`.
-          // Landed in the contract as `run.resumed` by 07-02.
-          { kind: 'run.resumed', runId: run.id, input, reason: 'question_flow_disabled' };
+          // Landed in the contract as `run.resumed` by 07-02. Gap D5's cap reaches the same
+          // branch and passes its own `reason` — an operator reading the log needs to tell
+          // "I turned questions off" apart from "the agent would not stop asking".
+          { kind: 'run.resumed', runId: run.id, input, reason };
     await engine.handle(event);
   }
 
@@ -243,7 +246,38 @@ export function createQuestions(deps: QuestionsDeps): Questions {
         return null;
       }
 
+      // Gap D5 — `maxQuestionRounds` was dead config. `questionRound` was written `0` at
+      // run creation and then never read, incremented or compared anywhere, so the wizard
+      // prompted for a limit that bounded nothing and an agent could ask forever. Each
+      // round costs a full `claude` session, so "forever" is a real bill.
+      //
+      // The cap degrades to the SAME behaviour as a deadline expiry rather than failing the
+      // run: the agent stated an assumption, so proceeding on it is strictly better than
+      // discarding work that may be nearly done. QA-07's disabled-questions branch above is
+      // the same shape for the same reason.
+      //
+      // Global, not a per-mapping toggle — `maxQuestionRounds` sits on `Config`, beside
+      // `concurrency`, not in `TogglesSchema`. `0` therefore means "never ask", which is
+      // `questionsEnabled: false` reached by a different route, and is consistent.
+      const round = run.questionRound + 1;
+      if (round > config.maxQuestionRounds) {
+        await post(
+          run.issueId,
+          `That is question ${round}, and this workspace allows ${config.maxQuestionRounds} ` +
+            `per run — proceeding with the stated assumption:\n\n> ${assumption}`,
+        );
+        log.warn(
+          { runId, round, maxQuestionRounds: config.maxQuestionRounds },
+          'question round cap reached; proceeding on the assumption',
+        );
+        await resumeWith(run, null, assumption, null, 'question_round_cap');
+        return null;
+      }
+
       const at = now();
+      // Counted when a question is actually OPENED, so the two branches above — questions
+      // disabled, and the cap — do not consume a round they never spent.
+      store.updateRun(runId, { questionRound: round, updatedAt: at });
       // Resolved at open time and stored as an absolute instant, not a duration:
       // a config edit must not retroactively move a deadline already announced
       // on the ticket.

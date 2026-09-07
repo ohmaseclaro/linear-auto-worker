@@ -163,6 +163,10 @@ function harness(over: { config?: Partial<Config>; store?: InMemoryStore } = {})
 
   const config = {
     botUserId: BOT,
+    // Present by default since gap D5: with it absent, `round > config.maxQuestionRounds`
+    // compares against `undefined`, which is false for every round — so every case in this
+    // file would have exercised an unbounded daemon that no real config can produce.
+    maxQuestionRounds: 3,
     defaults: { questionsEnabled: true, questionTimeoutMs: undefined, baseBranch: 'main' },
     mappings: [],
     ...over.config,
@@ -461,3 +465,58 @@ test('a disabled mapping does not disable the flow for another mapping', async (
 });
 
 export { harness, seedRun, silent, question, comment, BOT };
+
+// -- gap D5: `maxQuestionRounds` --------------------------------------------
+//
+// Until this landed the field was dead config: `questionRound` was written `0` at run
+// creation and never read, incremented or compared anywhere, so the wizard prompted for a
+// limit that bounded nothing. Each round is a whole `claude` session, so an agent that
+// keeps asking is a bill, not just a stall.
+
+test('D5: opening a question spends a round', async () => {
+  const h = harness();
+  seedRun(h.store);
+  await h.questions.openQuestion('r1', 'which database?', 'postgres');
+  assert.equal(h.store.getRun('r1')!.questionRound, 1, 'the counter must advance, or no cap can bind');
+});
+
+test('D5: the round AFTER the cap is refused and resumed on the assumption', async () => {
+  const h = harness({ config: { maxQuestionRounds: 2 } as Partial<Config> });
+  seedRun(h.store, { questionRound: 2 });
+
+  const result = await h.questions.openQuestion('r1', 'and another thing?', 'assume yes');
+
+  assert.equal(result, null, 'no question row may be opened past the cap');
+  assert.equal(h.store.listByState('awaiting_answer').length, 0, 'the run must not park');
+  assert.match(
+    h.comments.at(-1)?.body ?? '',
+    /proceeding with the stated assumption/,
+    'the ticket must say why it stopped asking; a silent cap is indistinguishable from a hang',
+  );
+  assert.match(h.comments.at(-1)?.body ?? '', /assume yes/, 'and must state the assumption used');
+  const resumed = h.events.find((e) => e.kind === 'run.resumed');
+  assert.ok(resumed, 'the run must be resumed, not abandoned holding nothing');
+  assert.equal(
+    resumed.kind === 'run.resumed' ? resumed.reason : null,
+    'question_round_cap',
+    'the cap must be distinguishable in the log from a mapping with questions turned off',
+  );
+});
+
+test('D5: a refused round is not charged', async () => {
+  const h = harness({ config: { maxQuestionRounds: 1 } as Partial<Config> });
+  seedRun(h.store, { questionRound: 1 });
+  await h.questions.openQuestion('r1', 'one too many', 'assume no');
+  assert.equal(
+    h.store.getRun('r1')!.questionRound,
+    1,
+    'a question that was never opened must not consume a round',
+  );
+});
+
+test('D5: maxQuestionRounds 0 means never ask', async () => {
+  const h = harness({ config: { maxQuestionRounds: 0 } as Partial<Config> });
+  seedRun(h.store);
+  const result = await h.questions.openQuestion('r1', 'anything?', 'assume the default');
+  assert.equal(result, null, '0 is a real setting — the same effect as questionsEnabled: false');
+});
