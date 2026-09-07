@@ -1,6 +1,6 @@
 # Traps
 
-One hundred and four footguns found while building this daemon, kept as a running ledger so no two
+One hundred and five footguns found while building this daemon, kept as a running ledger so no two
 parallel work streams had to rediscover the same one.
 
 **Every entry here was measured, not recalled.** Versions come from the npm registry, API
@@ -15,7 +15,7 @@ spawn processes, several of them will cost you an afternoon each.
 Measured against: `@linear/sdk@93.0.1`, `@ngrok/ngrok@1.7.0`, `better-sqlite3@13.0.3`,
 `execa@10.0.1`, Claude Code CLI `2.1.259`, `gh` `2.98.0`, Node `22.23.1`, macOS.
 
-The complete internal ledger — all 104 rows with per-phase attribution and the evidence for
+The complete internal ledger — all 105 rows with per-phase attribution and the evidence for
 each — is in [`.planning/TRAPS.md`](../.planning/TRAPS.md). This page is the subset that
 generalises.
 
@@ -355,6 +355,20 @@ Two caveats learned by doing it:
 Where two representations of the same fact genuinely must both exist, the cheap fix is not
 to unify them but to **assert their equivalence** — one test comparing a lookup table
 against the arrays beside it turns an invisible drift into a red build.
+
+## Shipping a CLI
+
+**`tsc` does not make your `bin` entry executable, and a clean build destroys the bit npm
+set.** A `bin` mapping plus a `#!/usr/bin/env node` shebang is not enough: TypeScript emits
+0644. `npm link` chmods the target at link time, so installing works exactly once — the next
+build wipes `dist/` and recreates the entry non-executable, and the command dies with
+`permission denied` (exit 126). Set the bit in the build itself, and assert it on the built
+artifact.
+
+The reason it survived a whole packaging pass here: `--help` had been "tested" by running
+`node dist/src/cli/index.js --help`, which needs no executable bit at all. **Test a CLI by
+invoking it the way the operator will** — through the name on their PATH — or you are
+testing a different program than the one you shipped.
 
 ## The one that cost the most
 

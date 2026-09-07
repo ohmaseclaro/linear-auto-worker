@@ -44,7 +44,7 @@
     "test": "npm run assets && node --test \"dist/**/*.test.js\"",
     "build": "npm run clean && tsc && npm run assets",
     "dev": "tsx watch src/index.ts",
-    "assets": "node -e \"require('fs').cpSync('src','dist/src',{recursive:true,filter:(f)=>!f.endsWith('.ts')})\"",
+    "assets": "node -e \"const fs=require('fs');fs.cpSync('src','dist/src',{recursive:true,filter:(f)=>!f.endsWith('.ts')});fs.chmodSync('dist/src/cli/index.js',0o755)\"",
     "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
     "uat:ingress": "tsx scripts/live-ingress-uat.ts"
   },
