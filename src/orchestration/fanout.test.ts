@@ -18,7 +18,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { deriveParentStatus, planSubRuns, ticketBriefRepos } from './fanout.js';
+import { deriveParentStatus, planSubRuns } from './fanout.js';
 import type { RunState } from '../domain/types.js';
 
 const ISSUE = {
@@ -149,12 +149,18 @@ test('two repos whose slugs share a trailing segment still get distinct branches
   assert.deepEqual(branches, ['eng-1-rename-the-widget-orga-api', 'eng-1-rename-the-widget-orgb-api']);
 });
 
-test('the ticket brief gets the full repo list, so a child knows it is one of several', () => {
-  const plan = planSubRuns(ISSUE, THREE_REPOS);
-  assert.deepEqual(ticketBriefRepos(plan), ['org/api', 'org/web', 'org/infra']);
-
-  // Composing the brief is Phase 4's prompt work; this plan supplies the list.
-  assert.deepEqual(ticketBriefRepos(planSubRuns(ISSUE, ONE_REPO)), ['org/api']);
+test('the plan names every repo, so a child can be told it is one of several', () => {
+  // This asserted `ticketBriefRepos(plan)`, a helper whose only caller was this line. Its
+  // title was the promise — "so a child knows it is one of several" — and the child never
+  // knew: the prompt builder never took the list. The list now reaches the agent through
+  // `buildAgentPrompt`'s `siblingRepos` (asserted in `execution/prompt.test.ts`, and
+  // sourced at runtime from `store.childRuns`). What remains this file's job is that the
+  // plan names them all in the first place.
+  assert.deepEqual(
+    planSubRuns(ISSUE, THREE_REPOS).children.map((c) => c.repoSlug),
+    ['org/api', 'org/web', 'org/infra'],
+  );
+  assert.deepEqual(planSubRuns(ISSUE, ONE_REPO).children.map((c) => c.repoSlug), ['org/api']);
 });
 
 // ---------------------------------------------------------------------------

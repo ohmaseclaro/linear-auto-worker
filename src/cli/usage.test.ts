@@ -35,6 +35,7 @@ const silent = {
 
 const config = {
   concurrency: 3,
+  maxTurns: 40,
   defaults: {
     postLinearComments: true,
     notifySlack: false,
@@ -200,4 +201,78 @@ test('D6: an unrecognised usage key is ignored rather than thrown on', async () 
   await runOnce(0.5, { input_tokens: 10, some_new_field_anthropic_added: 999 } as never);
   const run = store.getRun(RUN_ID)!;
   assert.equal(run.tokensUsed, 10, 'a run must not fail because a vendor added a key');
+});
+
+// -- the run budget ----------------------------------------------------------
+
+/** The same config with a run budget attached. */
+function budgeted(maxBudgetUsd: number): Config {
+  return { ...(config as object), maxBudgetUsd } as unknown as Config;
+}
+
+async function runWith(cfg: Config, costUsd: number, spawnPid = SPAWN_PID) {
+  const runner = createAgentRunner({
+    store: store as never,
+    config: cfg,
+    log: silent,
+    index: mappingIndex(cfg),
+    runCommand: gitWithCommits as never,
+    spawn: (() => ({ ...sessionReporting(costUsd, { input_tokens: 1 })(), pid: spawnPid })) as never,
+  });
+  return runner.run(request, new AbortController().signal);
+}
+
+test('the budget passed to the CLI is what REMAINS, not the configured total', async () => {
+  // One run is several `claude` sessions. Passing the full figure to each would let an
+  // N-question run cost up to N+1 times the cap — a limit that does not limit, and the
+  // same per-session-value-on-a-per-run-quantity mistake as T95.
+  store.updateRun(RUN_ID, { costUsd: 4, tokensUsed: 0 });
+  let seen: readonly string[] = [];
+  const runner = createAgentRunner({
+    store: store as never,
+    config: budgeted(10),
+    log: silent,
+    index: mappingIndex(budgeted(10)),
+    runCommand: gitWithCommits as never,
+    spawn: ((_cwd: string, args: readonly string[]) => {
+      seen = args;
+      return sessionReporting(1, { input_tokens: 1 })();
+    }) as never,
+  });
+  await runner.run(request, new AbortController().signal);
+
+  const i = seen.indexOf('--max-budget-usd');
+  assert.notEqual(i, -1, 'a configured budget must reach the CLI');
+  assert.equal(seen[i + 1], '6', '$10 configured minus $4 already spent');
+});
+
+test('an exhausted budget does not spawn, and does not discard committed work', async () => {
+  // The CLI refuses a non-positive budget outright, so this must be decided before the
+  // spawn. Routed through the same evidence-based verdict as every other ending: the
+  // worktree has commits, so the run ships them as a draft `partial` rather than being
+  // thrown away for running out of money.
+  store.updateRun(RUN_ID, { costUsd: 10, tokensUsed: 0 });
+  let spawned = false;
+  const cfg = budgeted(10);
+  const runner = createAgentRunner({
+    store: store as never,
+    config: cfg,
+    log: silent,
+    index: mappingIndex(cfg),
+    runCommand: gitWithCommits as never,
+    spawn: (() => {
+      spawned = true;
+      return sessionReporting(1, undefined)();
+    }) as never,
+  });
+  const result = await runner.run(request, new AbortController().signal);
+
+  assert.equal(spawned, false, 'the point of a budget is not to start work it cannot pay for');
+  assert.equal(result.status, 'partial', 'commits exist; running out of money must not discard them');
+});
+
+test('no configured budget means no cap and no early exit', async () => {
+  store.updateRun(RUN_ID, { costUsd: 999, tokensUsed: 0 });
+  const result = await runWith(config, 1);
+  assert.equal(result.status, 'complete', 'an unbudgeted run is never refused for spend');
 });

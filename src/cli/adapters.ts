@@ -291,6 +291,39 @@ async function gatherEvidence(
 
 /** Exported for `adapters.verdict.test.ts`: the timeout branch is only reachable
  *  through a real 15s escalation ladder, which is not worth paying on every gate run. */
+/**
+ * A run stopped by one of its limits rather than by the agent.
+ *
+ * Two limits reach this: the supervisor's `maxRunMs` reap, and an exhausted run budget.
+ * They are the same decision — commits on the branch are real, pushable work, and
+ * discarding them because a limit fired is the same error as trusting a barren `complete`,
+ * pointed the other way (T73). Shared so the two cannot drift into different answers for
+ * the same situation, which is the defect shape this codebase has produced four times.
+ */
+function cutShort(
+  what: string,
+  detail: string,
+  prTitle: string,
+  evidence: WorktreeEvidence | undefined,
+): AgentResult {
+  if (evidence && evidence.commitCount > 0) {
+    return {
+      status: 'partial',
+      summary: `${what}; ${evidence.commitCount} commit(s) were left on the branch`,
+      prTitle,
+      prBody:
+        `${detail} The commits below are what the agent finished before that point; the ` +
+        `work is incomplete by definition.`,
+      ...(evidence.uncommittedPaths ? { uncommittedPaths: evidence.uncommittedPaths } : {}),
+    };
+  }
+  return {
+    status: 'failed',
+    summary: what,
+    failureReason: `${detail} The worktree is left in place.`,
+  };
+}
+
 export function toAgentResult(
   outcome: AgentRunOutcome,
   evidence?: WorktreeEvidence,
@@ -302,28 +335,13 @@ export function toAgentResult(
 
     // T73, and the subtle half. A reap is the ONLY way `classifyOutcome` produces
     // `partial`, so returning `failed` here unconditionally — as this did — left `partial`
-    // unreachable no matter what the classifier decided downstream. A timed-out run that
-    // left commits behind has real, pushable work; discarding it because the clock ran out
-    // is the same error as trusting a barren `complete`, pointed the other way.
-    if (evidence && evidence.commitCount > 0) {
-      return {
-        status: 'partial',
-        summary: `${reaped}; ${evidence.commitCount} commit(s) were left on the branch`,
-        prTitle: 'WIP: agent run reached its deadline',
-        prBody:
-          `The agent's session was ${reaped}. The commits below are what it finished ` +
-          `before the deadline; the work is incomplete by definition.`,
-        ...(evidence.uncommittedPaths
-          ? { uncommittedPaths: evidence.uncommittedPaths }
-          : {}),
-      };
-    }
-
-    return {
-      status: 'failed',
-      summary: 'the session was still running when its deadline expired',
-      failureReason: `${reaped}; the worktree is left in place${denialPhrase(outcome)}`,
-    };
+    // unreachable no matter what the classifier decided downstream.
+    return cutShort(
+      `the session was ${reaped}`,
+      `The agent's session was ${reaped}.${denialPhrase(outcome)}`,
+      'WIP: agent run reached its deadline',
+      evidence,
+    );
   }
   const event = outcome.resultEvent;
   if (!event) {
@@ -404,16 +422,53 @@ export function createAgentRunner(deps: AgentRunnerDeps): AgentRunner {
       const run = deps.store.getRun(req.runId);
       const repoSlug = run?.kind === 'repo' ? run.repoSlug : null;
       const toggles = togglesFor(deps.config, deps.index, repoSlug);
+      // What is LEFT of the run's budget, not the configured total (see `ClaudeArgsInput`).
+      // `run.costUsd` is what gap D6 records; before D6 there was no way to compute this at
+      // all, which is part of why the knob stayed unwired.
+      const spent = run?.kind === 'repo' ? (run.costUsd ?? 0) : 0;
+      const budget = deps.config.maxBudgetUsd;
+      const remaining = budget === undefined ? undefined : budget - spent;
+
+      // The CLI refuses a non-positive budget outright, so an exhausted run cannot simply
+      // be spawned with what is left. Stopping here is also the correct behaviour rather
+      // than a workaround: the point of a budget is not to start work it cannot pay for.
+      //
+      // Routed through the same evidence-based verdict as every other ending, so a run that
+      // already produced commits ships them as a draft `partial` instead of being thrown
+      // away for running out of money (T73's rule, reused rather than restated).
+      if (remaining !== undefined && remaining <= 0) {
+        deps.log.warn(
+          { runId: req.runId, spent, maxBudgetUsd: budget },
+          'run has exhausted its budget; not spawning',
+        );
+        // Decided here rather than by synthesising a result event and handing it to
+        // `toAgentResult`: no session ran, and a fake event with no `structured_output`
+        // parses as "the agent returned no usable result object" — which is a different,
+        // and wrong, diagnosis. `cutShort` is the same decision the deadline reap makes.
+        const evidence = await gatherEvidence(deps, req.cwd, repoSlug);
+        return cutShort(
+          `the run reached its $${budget} budget`,
+          `This run had spent $${spent.toFixed(4)} of its $${budget} budget, so no further ` +
+            `agent session was started.`,
+          'WIP: agent run reached its budget',
+          evidence,
+        );
+      }
+
       const args = req.resume
         ? buildResumeArgs({
             sessionId: req.sessionId,
             prompt: req.prompt,
             schema: AGENT_RESULT_JSON_SCHEMA,
+            maxTurns: deps.config.maxTurns,
+            ...(remaining !== undefined ? { maxBudgetUsd: remaining } : {}),
           })
         : buildClaudeArgs({
             sessionId: req.sessionId,
             prompt: req.prompt,
             schema: AGENT_RESULT_JSON_SCHEMA,
+            maxTurns: deps.config.maxTurns,
+            ...(remaining !== undefined ? { maxBudgetUsd: remaining } : {}),
           });
 
       const outcome = await runAgent({

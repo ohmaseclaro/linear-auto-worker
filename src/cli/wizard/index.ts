@@ -26,6 +26,8 @@ import { LinearClientImpl } from '../../outbound/linear-client.js';
 import { assembleConfig, toWizardMappings, writeConfig } from './config-writer.js';
 import { buildMappings } from './mapping.js';
 import { runPreflight, type PreflightResult } from './preflight.js';
+import { chooseOperator } from './operator.js';
+import { realPrompts } from './deps.js';
 import { discoverRepos } from './repo-discovery.js';
 import { annotateRepoSafety, type SafetyWarning } from './repo-safety.js';
 import { doctorWebhooks, reconcileWebhook } from './register.js';
@@ -161,10 +163,26 @@ export async function runSetupWizard(deps: WizardDeps = {}): Promise<number> {
   const teamId =
     mappings.find((m) => m.key.kind === 'team')?.key.id ?? existingConfig?.teamId ?? '';
 
+  // ── 6a. Who the operator is (INTK-03) ──────────────────────────────────────
+  // Asked, never inferred: the key authenticates as the BOT, so `viewer()` above returned
+  // the bot rather than the human. Skippable, and a workspace whose key cannot list users
+  // simply keeps whatever was already configured.
+  const operatorUserId = await chooseOperator(linear.value.linearClient, {
+    prompts: realPrompts,
+    botUserId,
+    ...(existingConfig?.operatorUserId ? { existing: existingConfig.operatorUserId } : {}),
+  });
+  console.log(
+    operatorUserId
+      ? `✓ Operator: you will be subscribed to each ticket the bot picks up`
+      : `✓ Operator: not subscribing — assignment to the bot will take tickets out of your view`,
+  );
+
   const config = assembleConfig({
     mappings: safety.mappings,
     botUserId,
     teamId,
+    ...(operatorUserId ? { operatorUserId } : {}),
     existing: existingConfig,
   });
   await writeConfig(configPath, config);

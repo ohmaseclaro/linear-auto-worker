@@ -228,14 +228,13 @@ export function deriveParentStatus(
 }
 
 /**
- * The repo list every child needs in its brief, so a child knows it is one
- * repo of a coordinated change rather than the whole ticket.
+ * `ticketBriefRepos` was here: it mapped a `FanoutPlan` to its child repo slugs, for a
+ * brief that was never composed. Phase 4's prompt builder never took the list, so for the
+ * whole milestone a ticket fanned out to three repos was implemented by three agents that
+ * did not know the other two existed.
  *
- * Composing and writing the brief into the worktree is Phase 4's prompt work.
- * This plan supplies the list and nothing else -- deliberately no cross-run
- * agent messaging, which for a single-operator tool is speculative complexity
- * with a coordination-failure mode attached.
+ * The list is now IN the brief (`buildAgentPrompt`'s `siblingRepos`) — but sourced from
+ * `store.childRuns(parentRunId)` rather than from a plan, because the plan exists only at
+ * fanout time and the brief is composed later, per child, when the worktree is ready.
+ * Reading the store also reflects what was actually dispatched rather than what was planned.
  */
-export function ticketBriefRepos(plan: FanoutPlan): readonly string[] {
-  return plan.children.map((c) => c.repoSlug).filter(Boolean);
-}

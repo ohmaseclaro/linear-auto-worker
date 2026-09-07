@@ -87,16 +87,20 @@ export function closeTunnel(listener: Listener): Promise<void> {
 }
 
 /**
- * Register the SIGINT/SIGTERM handlers that close the tunnel on a graceful stop.
+ * There is deliberately NO `installTunnelShutdownHooks` here any more.
  *
- * Deliberately NOT run at module scope: Phase 7 owns daemon lifecycle and calls this
- * once, explicitly. Module-scope signal handlers would fire in every test run and on
- * every import of this file.
+ * It existed, exported, uncalled, with a comment saying "Phase 7 owns daemon lifecycle and
+ * calls this once, explicitly". Phase 7 never did — and it was right not to. The function
+ * registered `process.once('SIGINT'|'SIGTERM')` handlers that called `ngrok.kill()` and then
+ * `process.exit(0)`. `daemon.ts` installs its own handlers for the same two signals and runs
+ * an ordered shutdown: reap children, disable the webhook, close the tunnel, close the
+ * server, mark in-flight runs, close the store. An immediate `process.exit(0)` racing that
+ * would abandon the run marking, which is the single write that keeps a Ctrl-C from costing
+ * a manual re-assignment of every live ticket (T18/T26).
+ *
+ * `ngrok.kill()` is also unnecessary: the tunnel is in-process by design, so its lifetime is
+ * already bound to this process — that is the whole reason the SDK was chosen over the CLI.
+ *
+ * If you are about to add process-level cleanup here, add it to `daemon.ts`'s shutdown
+ * instead, in order.
  */
-export function installTunnelShutdownHooks(ngrok: NgrokApi = ngrokSdk): void {
-  for (const signal of ['SIGINT', 'SIGTERM'] as const) {
-    process.once(signal, () => {
-      void ngrok.kill().finally(() => process.exit(0));
-    });
-  }
-}

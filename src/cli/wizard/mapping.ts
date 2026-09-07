@@ -127,6 +127,14 @@ export interface MappingKey {
   kind: 'project' | 'team';
   id: string;
   name: string;
+  /**
+   * For a `project` key, the id of the team that project belongs to.
+   *
+   * `listMappingCandidates` has always fetched this (`node.teams({ first: 1 })`) and it was
+   * dropped on the floor here, so a project-keyed mapping reached `config.json` with no
+   * record of its team. Undefined for a `team` key, where `id` IS the team.
+   */
+  teamId?: string;
 }
 
 export interface Mapping {
@@ -173,7 +181,14 @@ async function promptMappingKey(
   if (projectChoice !== NO_PROJECT_VALUE) {
     const project = candidates.projects.find((p) => p.id === projectChoice);
     if (!project) throw new Error(`Selected project "${projectChoice}" not found in candidates`);
-    return { kind: 'project', id: project.id, name: project.name };
+    return {
+      kind: 'project',
+      id: project.id,
+      name: project.name,
+      // Empty when the project has no team (the candidate lister defaults it to ''), and
+      // omitted rather than stored blank so the schema's `.min(1)` cannot reject it.
+      ...(project.teamId ? { teamId: project.teamId } : {}),
+    };
   }
 
   const teamId = await p.select({

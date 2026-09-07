@@ -35,11 +35,21 @@ arbitrary code from.
 issue in a mapped Linear project can put text in front of your agent. This is treated as a
 real attack surface, not a theoretical one:
 
-- The issue body is wrapped in a delimiter that is defanged against a closing-tag escape,
-  and the containment is asserted by tests that run two concrete injection attacks.
+- The issue body **and** any answer you post to the bot's question are wrapped in a
+  delimiter that is defanged against a closing-tag escape, and the containment is asserted
+  by tests that run concrete injection attacks against both paths.
 - The prompt is a single `argv` entry. There is no shell anywhere on the spawn path, so a
   ticket title cannot break out of it.
 - Linear-supplied `branchName` is validated before it becomes a filesystem path.
+
+> **This section described the wrong thing until 2026-09-07.** The containment above was
+> written in Phase 4 and tested there — and the code that actually ran never called it. The
+> live path sent the raw ticket title as the entire prompt, so ticket text reached the agent
+> with no instruction/data boundary at all, and the answer path passed a Linear comment
+> through verbatim. Both are fixed, both are now asserted on the live path (an end-to-end
+> test that fails if the delimiter is absent, not only a unit test of the builder), and the
+> whole class is recorded as T99. If you ran a version of this before that date, its
+> injection containment was not active.
 
 It is still input written by someone else that steers a program with write access to your
 code. Treat mapped Linear projects with the same care as repository write access.

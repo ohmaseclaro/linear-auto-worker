@@ -26,6 +26,7 @@ import type {
   Store,
   WorktreeManager,
 } from '../domain/ports.js';
+import { buildAgentPrompt, buildAnswerPrompt } from '../execution/prompt.js';
 import type { Scheduler } from './scheduler.js';
 import type { Questions } from './questions.js';
 import { deriveParentStatus, planSubRuns, type FanoutPlan } from './fanout.js';
@@ -611,6 +612,63 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
     };
   }
 
+  /**
+   * The brief the agent actually receives.
+   *
+   * This used to be `prepared.issueTitle` — the raw ticket title and NOTHING else — under a
+   * comment saying the real brief "is composed in execution/prompt.ts, Phase 4 owns it".
+   * `buildAgentPrompt` was there the whole time and nothing called it. Three things were
+   * missing from every run this project has ever made:
+   *
+   *   1. **The task.** No description, no acceptance criteria, no URL, no branch, and no
+   *      instruction to run GSD. The agent was asked to implement a one-line title.
+   *   2. **The delivery contract.** "Commit, do NOT push, do NOT open a PR." The worker
+   *      pushes after the child exits, precisely so every push passes `gates.ts` — the
+   *      secret scan, the default-branch refusal, the CI-file flag. An agent never told
+   *      this can push on its own and bypass all of them.
+   *   3. **The prompt-injection containment.** `sanitizeUntrustedText` + `defangDelimiter`
+   *      + the DATA/instruction delimiter live in `buildAgentPrompt`. The live path passed
+   *      Linear-authored text straight through. The two injection tests that "PASS" in the
+   *      Phase 7 runtime evidence were exercising a function no run ever reached.
+   *
+   * The issue is re-fetched rather than read off the run row: the row stores the title and
+   * url but not the description, and re-fetching is what the ingress does everywhere else
+   * on purpose — it decides from fresh state, never from a payload.
+   *
+   * A failed fetch degrades to a title-only brief WITH the trusted framing and the
+   * delimiter still in place, rather than to no brief. Losing the description is bad; losing
+   * the delivery contract and the injection containment because Linear had a bad minute is
+   * worse.
+   */
+  async function briefFor(run: RepoRun, branch: string): Promise<string> {
+    let issue: LinearIssue | undefined;
+    try {
+      issue = await linear.getIssue(run.issueId);
+    } catch (err) {
+      log.warn(
+        { runId: run.id, err: String(err) },
+        'could not re-fetch the issue for the brief; sending a title-only brief',
+      );
+    }
+    // Sibling repos, when this ticket fanned out to more than one. Read off the parent's
+    // children rather than off the config, so it reflects what was actually dispatched.
+    const siblings = run.parentRunId
+      ? store
+          .childRuns(run.parentRunId)
+          .filter((c): c is RepoRun => c.kind === 'repo' && c.id !== run.id)
+          .map((c) => c.repoSlug)
+      : [];
+
+    return buildAgentPrompt({
+      identifier: issue?.identifier ?? run.issueKey,
+      title: issue?.title ?? run.issueTitle,
+      description: issue?.description ?? '',
+      url: issue?.url ?? run.issueUrl,
+      branch,
+      ...(siblings.length > 0 ? { siblingRepos: siblings } : {}),
+    });
+  }
+
   function spawnRequest(run: RepoRun, prompt: string, resume: boolean) {
     return {
       runId: run.id,
@@ -656,9 +714,10 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
       store.updateRun(runId, { branch: wt.branch, worktreePath: wt.path, updatedAt: now() });
       checkpoint(runId);
       const prepared = await transition(runId, 'running', wt.path);
-      // ponytail: the real brief (issue body, acceptance criteria, repo list)
-      // is composed in execution/prompt.ts -- Phase 4 owns it.
-      const result = await agent.run(spawnRequest(prepared, prepared.issueTitle, false), ac.signal);
+      const result = await agent.run(
+        spawnRequest(prepared, await briefFor(prepared, wt.branch), false),
+        ac.signal,
+      );
       // The supervisor checkpoint a `running` cancel waits for.
       checkpoint(runId);
       await dispatch(runId, result, release);
@@ -699,7 +758,13 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
     try {
       if (questionId !== null) await deps.questions().applyAnswer(questionId, answer);
       const run = repoRun(runId);
-      const result = await agent.run(spawnRequest(run, answer, true), ac.signal);
+      // Framed, never raw. The answer is a Linear comment — see `buildAnswerPrompt`. This
+      // was `answer` verbatim, which put the most likely injection vector in the product
+      // through the only path with no delimiter around it.
+      const result = await agent.run(
+        spawnRequest(run, buildAnswerPrompt(answer), true),
+        ac.signal,
+      );
       checkpoint(runId);
       await dispatch(runId, result, release);
     } catch (err) {

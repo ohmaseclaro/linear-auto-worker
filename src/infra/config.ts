@@ -44,6 +44,9 @@ const ProjectMappingSchema = z
   .object({
     linearProjectId: z.string().min(1).nullable(),
     linearTeamId: z.string().min(1).nullable(),
+    // Both optional: an existing config.json predates them and must still load.
+    ownerTeamId: z.string().min(1).optional(),
+    displayName: z.string().min(1).optional(),
     repos: z.array(RepoMappingSchema).min(1),
     slackWebhookUrl: z.url().optional(),
     overrides: TogglesSchema.partial().optional(),

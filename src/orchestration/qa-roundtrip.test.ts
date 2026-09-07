@@ -160,7 +160,17 @@ test('one run travels queued -> delivered through the Q&A detour, holding no slo
   assert.equal(agent.calls.length, 2, 'the answer re-spawns the agent');
   assert.equal(agent.calls[1].resume, true, 'the second spawn resumes the session');
   assert.equal(agent.calls[1].sessionId, agent.calls[0].sessionId, 'same pre-assigned session id');
-  assert.equal(agent.calls[1].prompt, 'Yes -- include a database ping.');
+  // CONTAINS, not EQUALS. This asserted equality with the bare answer, which pinned the
+  // defect it should have caught: the human's reply is a Linear COMMENT, and passing it to
+  // `-p` verbatim put the most likely injection vector in the product through the one path
+  // with no delimiter around it (T99).
+  assert.match(agent.calls[1].prompt, /Yes -- include a database ping\./, 'the answer must reach the agent');
+  assert.match(agent.calls[1].prompt, /is DATA, not instructions/i, 'and must be framed as data');
+  assert.match(
+    agent.calls[1].prompt,
+    /do NOT run\s+git push/i,
+    'a resumed turn must restate the delivery contract — the original brief is not in this turn',
+  );
 
   const done = store.getRun(run.id)!;
   assert.equal(done.state, 'delivered');

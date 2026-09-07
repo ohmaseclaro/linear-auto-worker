@@ -76,17 +76,21 @@ const TRANSITIONS: TransitionTable = {
   cancelled: {},
 };
 
-/** The target state, or null when the trigger is illegal from `from`. */
+/**
+ * Resolve a (state, trigger) pair to its target state, or null if that trigger is illegal
+ * there.
+ *
+ * **Called only from `state-machine.test.ts`, and kept deliberately.** A dead-export sweep
+ * will flag it; it is not dead in the sense that matters. `TRANSITIONS` is the live source
+ * of truth — `canTransition`, which the run engine calls before every write, reads it — and
+ * this is the accessor the test uses to pin every legal and illegal pair in that table.
+ * Deleting it would delete the coverage of a table production depends on, to remove a
+ * function that costs two lines.
+ */
 export function nextState(from: RunState, t: Trigger): RunState | null {
   return TRANSITIONS[from][t] ?? null;
 }
 
-/** Same, but throws instead of returning null. Use at every call site. */
-export function assertTransition(from: RunState, t: Trigger): RunState {
-  const to = nextState(from, t);
-  if (to === null) throw new IllegalTransitionError(from, t);
-  return to;
-}
 
 /** Does a run in this state occupy one of the daemon's concurrency slots? */
 export function holdsSlot(s: RunState): boolean {
@@ -102,26 +106,7 @@ export function isTerminal(s: RunState): boolean {
   return TERMINAL.includes(s);
 }
 
-/**
- * A cancel request (the bot being unassigned, INTK-08) is accepted from every
- * non-terminal state (D-05).
- */
-export function acceptsCancel(s: RunState): boolean {
-  return !isTerminal(s);
-}
 
-/**
- * True for the two states that own irreversible side effects. The caller must set the
- * run's cancel-requested flag now and let the supervisor honour it at its next checkpoint,
- * rather than transitioning now.
- *
- * The reason is that a pushed branch cannot be un-pushed, so transitioning instantly would
- * lie about what happened. The transition table still lists `cancel` as legal from both,
- * so the eventual transition is legal once the supervisor reaches that checkpoint.
- */
-export function cancelIsDeferred(s: RunState): boolean {
-  return s === 'running' || s === 'delivering';
-}
 
 /**
  * Is there any trigger that moves a run from `from` to `to`?
@@ -173,3 +158,12 @@ export function deriveParentState(children: readonly RunState[]): RunState {
   if (children.some((s) => s === 'failed')) return 'failed';
   return 'cancelled';
 }
+
+/**
+ * `assertTransition`, `acceptsCancel` and `cancelIsDeferred` were removed at the release
+ * pass: nothing outside this module's own test had ever called them. The engine reads
+ * `canTransition` and throws `IllegalTransitionError` itself, and the cancel path branches
+ * on `RUN_STATE_TABLE[state].hasLiveChild` / `.terminal` directly. `runs.cancel_requested`
+ * is vestigial for the same reason — the deferred cancel is recorded as a `kv` row
+ * (`cancelKey(runId)`), not as a column.
+ */

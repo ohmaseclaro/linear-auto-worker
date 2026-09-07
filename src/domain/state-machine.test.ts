@@ -2,17 +2,15 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import type { RunState } from './types.js';
-import { TERMINAL } from './types.js';
+import { HAS_CHILD, HOLDS_SLOT, TERMINAL } from './types.js';
 import type { Trigger } from './state-machine.js';
 import {
-  acceptsCancel,
-  assertTransition,
-  cancelIsDeferred,
   deriveParentState,
   hasLiveChild,
   holdsSlot,
   isTerminal,
   nextState,
+  RUN_STATE_TABLE,
 } from './state-machine.js';
 import { IllegalTransitionError } from './errors.js';
 
@@ -106,18 +104,15 @@ const ILLEGAL: ReadonlyArray<readonly [RunState, Trigger]> = [
 test('every legal transition resolves to its stated target state', () => {
   for (const [from, trigger, to] of LEGAL) {
     assert.equal(nextState(from, trigger), to, `${from} --${trigger}--> ${to}`);
-    assert.equal(assertTransition(from, trigger), to, `${from} --${trigger}--> ${to}`);
   }
 });
 
-test('illegal transitions return null and throw IllegalTransitionError', () => {
+test('illegal transitions resolve to null', () => {
+  // `assertTransition` used to be asserted here too. It was deleted at the release pass —
+  // nothing outside this file ever called it, and the engine throws
+  // `IllegalTransitionError` from its own `canTransition` check.
   for (const [from, trigger] of ILLEGAL) {
     assert.equal(nextState(from, trigger), null, `${from} --${trigger}--> should not resolve`);
-    assert.throws(
-      () => assertTransition(from, trigger),
-      IllegalTransitionError,
-      `${from} --${trigger}--> should throw`,
-    );
   }
 });
 
@@ -158,21 +153,25 @@ test('the parked state holds no slot and has no live child', () => {
   assert.equal(isTerminal('awaiting_answer'), false);
 });
 
+// The two cases below asserted `acceptsCancel` / `cancelIsDeferred`, helpers that nothing
+// outside this file called. They are gone; the RULES they encoded are not, so the same
+// assertions now read the table the live cancel path actually branches on
+// (`run-engine.ts` checks `RUN_STATE_TABLE[state].terminal` and `.hasLiveChild`).
+
 test('cancel is accepted from every non-terminal state (D-05)', () => {
-  for (const s of ALL_STATES) {
-    assert.equal(acceptsCancel(s), !isTerminal(s), `acceptsCancel(${s})`);
-  }
-  assert.deepEqual(ALL_STATES.filter(acceptsCancel), [
-    'queued',
-    'preparing',
-    'running',
-    'awaiting_answer',
-    'delivering',
-  ]);
+  assert.deepEqual(
+    ALL_STATES.filter((s) => !RUN_STATE_TABLE[s].terminal),
+    ['queued', 'preparing', 'running', 'awaiting_answer', 'delivering'],
+  );
 });
 
-test('cancel is deferred for exactly the two states with irreversible side effects', () => {
-  assert.deepEqual(ALL_STATES.filter(cancelIsDeferred), ['running', 'delivering']);
+test('cancel is deferred for exactly the state with an irreversible side effect', () => {
+  // `hasLiveChild` is what defers it: the run engine sets the cancel marker and aborts,
+  // honouring it at the next supervisor checkpoint, rather than transitioning immediately.
+  assert.deepEqual(
+    ALL_STATES.filter((s) => RUN_STATE_TABLE[s].hasLiveChild),
+    ['running'],
+  );
 });
 
 test("a parent's state is a pure function of its children (D-04)", () => {
@@ -186,4 +185,20 @@ test("a parent's state is a pure function of its children (D-04)", () => {
   assert.equal(deriveParentState(['partial', 'cancelled']), 'partial');
   assert.equal(deriveParentState(['failed', 'cancelled']), 'failed');
   assert.equal(deriveParentState(['cancelled', 'cancelled']), 'cancelled');
+});
+
+test('the state TABLE and the exported arrays cannot disagree', () => {
+  // Two sources of truth for the same three facts. `domain/state-machine.ts` exposed
+  // `holdsSlot` reading `HOLDS_SLOT.includes(s)` while `orchestration/scheduler.ts` defined
+  // its OWN `holdsSlot` reading `RUN_STATE_TABLE[state].holdsSlot` — two functions, agreeing
+  // only by luck. The duplicate is gone; this is what keeps the remaining pair honest.
+  //
+  // A divergence here is not cosmetic: the scheduler admits work by one and the daemon
+  // decides what is "in flight" at shutdown by the other, so a disagreement is a run that
+  // holds a slot nobody accounts for, or is requeued while its child is still alive.
+  for (const s of ALL_STATES) {
+    assert.equal(RUN_STATE_TABLE[s].holdsSlot, HOLDS_SLOT.includes(s), `holdsSlot(${s})`);
+    assert.equal(RUN_STATE_TABLE[s].hasLiveChild, HAS_CHILD.includes(s), `hasLiveChild(${s})`);
+    assert.equal(RUN_STATE_TABLE[s].terminal, TERMINAL.includes(s), `terminal(${s})`);
+  }
 });

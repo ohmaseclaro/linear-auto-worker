@@ -26,9 +26,14 @@ export const DEFAULT_CONCURRENCY = 3;
  * slot because the table says it holds none. That is the whole implementation,
  * and it is deliberately the whole implementation.
  */
-export function holdsSlot(state: RunState): boolean {
-  return RUN_STATE_TABLE[state].holdsSlot;
-}
+// Re-exported, not re-implemented. This module used to define its own `holdsSlot` reading
+// `RUN_STATE_TABLE[state].holdsSlot`, while `domain/state-machine.ts` defined one reading
+// `HOLDS_SLOT.includes(s)` — two functions, two sources of truth, agreeing only by luck.
+// `state-machine.test.ts` now asserts the table and the arrays agree for all nine states,
+// so a divergence is a red test rather than a scheduler that admits a run the daemon thinks
+// is parked.
+import { holdsSlot } from '../domain/state-machine.js';
+export { holdsSlot };
 
 export interface Scheduler extends SchedulerPort {
   /** 1-based place in the wait queue; 0 once admitted. Side-effect free. */

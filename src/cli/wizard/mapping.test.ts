@@ -130,7 +130,10 @@ test('buildMappings: builds one mapping and stops when the operator declines ano
 
   assert.equal(result.length, 1);
   assert.deepEqual(result[0], {
-    key: { kind: 'project', id: 'proj-1', name: 'Project One' },
+    // `teamId` is carried since the release pass: the candidate lister always fetched the
+    // project's team and `promptMappingKey` discarded it, so `config.json` had no record of
+    // which team a project-keyed mapping belonged to.
+    key: { kind: 'project', id: 'proj-1', name: 'Project One', teamId: 'team-1' },
     repos: ['/repos/alpha'],
     slackWebhookUrl: undefined,
     toggles: undefined,

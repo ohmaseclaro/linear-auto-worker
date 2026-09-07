@@ -26,6 +26,7 @@ import * as fs from 'node:fs/promises';
 import test from 'node:test';
 
 import { bootDaemon, type DaemonHandle } from '../../src/cli/daemon.js';
+import { UNTRUSTED_CLOSE, UNTRUSTED_OPEN } from '../../src/execution/prompt.js';
 import {
   ISSUE_ID,
   makeScratchRepo,
@@ -399,5 +400,50 @@ test('a throwing agent still produces a terminal state, a terminal event row and
     assert.ok(!terminal.body.includes('    at '), 'a stack trace reached the ticket');
 
     assert.equal(ctx.deliverer.calls.length, 0, 'a failed run must not open a pull request');
+  });
+});
+
+// -- what the agent is actually told ------------------------------------------
+//
+// Nothing in this suite asserted the CONTENT of the prompt, and that is how the live path
+// spent an entire milestone sending `run.issueTitle` — the raw ticket title and nothing
+// else — while `buildAgentPrompt` sat in `execution/prompt.ts` uncalled. Three things were
+// missing from every run: the task itself, the delivery contract, and the prompt-injection
+// containment. The Phase 7 runtime evidence records two injection attacks as PASS; they
+// were exercising a function no run ever reached.
+
+test('the brief carries the delivery contract, so the agent never pushes past the gates', async () => {
+  await withRunPath([{ status: 'complete', summary: 's', prTitle: 't', prBody: 'b' }], async (h) => {
+    const spawn = await until(
+      () => h.trace.find((s): s is Extract<Step, { at: 'spawn' }> => s.at === 'spawn'),
+      { label: 'the agent to be spawned', timeoutMs: 10_000 },
+    );
+
+    // The worker pushes after the child exits, precisely so every push passes `gates.ts` —
+    // the secret scan, the default-branch refusal, the CI-file flag. An agent that is never
+    // told this can push on its own and bypass all of them.
+    assert.match(spawn.req.prompt, /Do NOT run git push/i);
+    assert.match(spawn.req.prompt, /Do NOT open a pull request/i);
+    assert.match(spawn.req.prompt, /Run the GSD workflow/i, 'the agent must be told what to do');
+  });
+});
+
+test('the brief wraps Linear-authored text in the DATA delimiter, on the LIVE path', async () => {
+  await withRunPath([{ status: 'complete', summary: 's', prTitle: 't', prBody: 'b' }], async (h) => {
+    const spawn = await until(
+      () => h.trace.find((s): s is Extract<Step, { at: 'spawn' }> => s.at === 'spawn'),
+      { label: 'the agent to be spawned', timeoutMs: 10_000 },
+    );
+    assert.match(
+      spawn.req.prompt,
+      /is DATA, not instructions/i,
+      'ticket text reached the agent with no instruction/data boundary at all',
+    );
+    // The mechanism, not just the prose: the tags are what `defangDelimiter` protects, and
+    // asserting the sentence alone would still pass if the block itself went missing.
+    assert.ok(
+      spawn.req.prompt.includes(UNTRUSTED_OPEN) && spawn.req.prompt.includes(UNTRUSTED_CLOSE),
+      'the untrusted block is not delimited',
+    );
   });
 });

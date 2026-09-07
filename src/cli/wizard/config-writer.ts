@@ -209,6 +209,17 @@ function toProjectMapping(
     ),
   };
 
+  // The two fields the wizard knew and used to discard. `displayName` is what a re-run
+  // shows instead of a UUID; `ownerTeamId` records which team a project-keyed mapping
+  // belongs to. Both omitted rather than set to '' — see the note on conditional
+  // assignment below, and the schema's `.min(1)`.
+  if (mapping.key.name && mapping.key.name !== mapping.key.id) {
+    value.displayName = mapping.key.name;
+  }
+  if (mapping.key.kind === 'project' && mapping.key.teamId) {
+    value.ownerTeamId = mapping.key.teamId;
+  }
+
   // Conditional assignment, not `x: y ?? undefined` — an `undefined`-valued key survives
   // in the object even though JSON.stringify drops it, which breaks the round-trip
   // equality this plan asserts on. Omit rather than null.
@@ -240,7 +251,21 @@ export function toWizardMappings(config: Config | undefined): Mapping[] | undefi
           .map((r) => (typeof r.repoDir === 'string' ? r.repoDir : ''))
           .filter((p) => p !== '')
       : [];
-    const mapping: Mapping = { key: { kind, id: key, name: key }, repos };
+    // `name: key` was the whole of gap 5: with no name persisted, a re-run listed every
+    // existing mapping by its raw Linear UUID and asked the operator to choose between
+    // them. `displayName` is now written at setup time; the id remains the fallback for a
+    // config written before it existed.
+    const displayName = typeof entry.displayName === 'string' ? entry.displayName : key;
+    const ownerTeamId = typeof entry.ownerTeamId === 'string' ? entry.ownerTeamId : undefined;
+    const mapping: Mapping = {
+      key: {
+        kind,
+        id: key,
+        name: displayName,
+        ...(kind === 'project' && ownerTeamId ? { teamId: ownerTeamId } : {}),
+      },
+      repos,
+    };
     if (typeof entry.slackWebhookUrl === 'string') mapping.slackWebhookUrl = entry.slackWebhookUrl;
     const toggles = fromDomainOverrides(entry.overrides as Partial<MappingToggles> | undefined);
     if (toggles) mapping.toggles = toggles;
@@ -259,6 +284,12 @@ export interface AssembleConfigInput {
   botUserId?: string;
   /** Best-effort: the team a workspace-scoped call needs. May be empty on a project-keyed setup. */
   teamId?: string;
+  /**
+   * The Linear user to subscribe to each picked-up ticket (INTK-03), or undefined for
+   * "don't subscribe". Chosen by `chooseOperator`; it cannot be inferred, because the
+   * daemon authenticates as the BOT and `viewer()` returns the bot.
+   */
+  operatorUserId?: string;
   /** The already-written config, if any. Untrusted input (T-08-19). */
   existing?: Config;
 }
@@ -308,6 +339,13 @@ export function assembleConfig(input: AssembleConfigInput): Config {
   if (typeof existing.maxBudgetUsd === 'number' && Number.isFinite(existing.maxBudgetUsd)) {
     config.maxBudgetUsd = existing.maxBudgetUsd;
   }
+
+  // This run's answer wins over what is on disk, INCLUDING when this run's answer is
+  // "don't subscribe me" — an operator who re-runs setup to turn the subscription off must
+  // not have the old id merged back in. `input.operatorUserId` being undefined therefore
+  // has to mean "no operator", not "keep whatever was there", so the caller passes the
+  // existing value back in when the step is skipped rather than relying on a merge here.
+  if (input.operatorUserId) config.operatorUserId = input.operatorUserId;
 
   return config;
 }

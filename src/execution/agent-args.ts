@@ -67,14 +67,50 @@ export interface ClaudeArgsInput {
   sessionId: string;
   prompt: string;
   schema: object;
+  /**
+   * `Config.maxTurns`. Passed as `--max-turns`, which is a real, validated flag despite
+   * being absent from `claude --help` on 2.1.259 — verified by passing a non-numeric value
+   * and getting `option '--max-turns <turns>' argument 'notanumber' is invalid. must be a
+   * number`, which an unknown flag does not produce (it says `unknown option`).
+   *
+   * PER SESSION, deliberately. A resumed run gets a fresh turn budget, because the answer
+   * to a question is new work and the turns already spent were spent reaching the question.
+   * The RUN is bounded elsewhere: by `maxQuestionRounds` on how many times it may resume,
+   * and by `maxRunMs` on each session's wall clock.
+   *
+   * Hitting it is not a crash. The result event comes back with `subtype:
+   * "error_max_turns"`, and `classifyOutcome` already reads any non-`success` subtype as
+   * truncated — so a run with commits ships a draft PR as `partial` rather than being
+   * discarded.
+   */
+  maxTurns: number;
+  /**
+   * What is LEFT of `Config.maxBudgetUsd` for this run, or undefined when the operator set
+   * no budget.
+   *
+   * Remaining, not the configured total: one run is several `claude` sessions, and passing
+   * the full figure to each would make an N-question run cost up to N+1 times the cap — a
+   * limit that does not limit. This is the same per-session-value-on-a-per-run-quantity
+   * mistake as T95, refused this time before it shipped.
+   *
+   * The CLI rejects zero and negatives (`--max-budget-usd must be a positive number
+   * greater than 0`), so an exhausted budget must be handled before the spawn rather than
+   * passed down as `0`. `cli/adapters.ts` does that.
+   */
+  maxBudgetUsd?: number;
 }
 
 /**
  * Everything both paths share. Built once so the fresh and the resumed session cannot be
  * granted different permissions, different output handling, or different schemas.
  */
-function commonArgs(schema: object): string[] {
+function commonArgs(o: ClaudeArgsInput): string[] {
   return [
+    // Both caps ride on `commonArgs` rather than on one path, for the same reason the
+    // permissions do: a resumed session must not be granted a budget a fresh one is not.
+    '--max-turns',
+    String(o.maxTurns),
+    ...(o.maxBudgetUsd !== undefined ? ['--max-budget-usd', String(o.maxBudgetUsd)] : []),
     '--output-format',
     OUTPUT_FORMAT,
     // D-03 / T3: omitting this is a hard STARTUP error, not a warning —
@@ -96,7 +132,7 @@ function commonArgs(schema: object): string[] {
     '--permission-prompts',
     PERMISSION_PROMPTS,
     '--json-schema',
-    JSON.stringify(schema),
+    JSON.stringify(o.schema),
     //
     // D-02 / T2 — THE FORBIDDEN FLAG, named here on purpose so a contributor who has just
     // read the vendor docs does not add it back:
@@ -123,7 +159,7 @@ export function buildClaudeArgs(o: ClaudeArgsInput): string[] {
     // the spawn. Never parsed back out of the stream — 16 hook events precede system/init.
     '--session-id',
     o.sessionId,
-    ...commonArgs(o.schema),
+    ...commonArgs(o),
   ];
 }
 
@@ -139,5 +175,5 @@ export function buildClaudeArgs(o: ClaudeArgsInput): string[] {
  * ("Session ID <uuid> is already in use.", exit 1, empty stdout).
  */
 export function buildResumeArgs(o: ClaudeArgsInput): string[] {
-  return ['--resume', o.sessionId, '-p', o.prompt, ...commonArgs(o.schema)];
+  return ['--resume', o.sessionId, '-p', o.prompt, ...commonArgs(o)];
 }

@@ -216,3 +216,61 @@ test('writeConfig is idempotent: assemble -> write -> read -> assemble is stable
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+// -- what the wizard knew and used to discard --------------------------------
+
+test('a project-keyed mapping records the team it belongs to', () => {
+  // `listMappingCandidates` has always fetched this and `promptMappingKey` dropped it, so
+  // `config.json` had no record of which team a project mapping belonged to. Harmless while
+  // the registrar registers with `allPublicTeams: true`; needed the moment scoping narrows.
+  const config = assembleConfig({
+    mappings: [mapping({ key: { kind: 'project', id: 'proj-1', name: 'Alpha', teamId: 'team-9' } })],
+  });
+  const entry = config.mappings['proj-1']!;
+  assert.equal(entry.ownerTeamId, 'team-9');
+  assert.equal(entry.linearTeamId, null, 'the KEY is still the project — the invariant holds');
+  assert.equal(entry.linearProjectId, 'proj-1');
+});
+
+test('a team-keyed mapping records no ownerTeamId — its key already is the team', () => {
+  const config = assembleConfig({
+    mappings: [mapping({ key: { kind: 'team', id: 'team-9', name: 'Core' } })],
+  });
+  assert.equal('ownerTeamId' in config.mappings['team-9']!, false);
+});
+
+test('the mapping name survives the round trip, so a re-run shows names not UUIDs', () => {
+  // `toWizardMappings` used to build `{ id: key, name: key }`, so re-running `law setup`
+  // asked the operator to choose between raw Linear UUIDs.
+  const config = assembleConfig({
+    mappings: [mapping({ key: { kind: 'project', id: 'proj-1', name: 'Alpha', teamId: 'team-9' } })],
+  });
+  const restored = toWizardMappings(config)!;
+
+  assert.equal(restored[0]?.key.name, 'Alpha', 'the operator must see the project name');
+  assert.equal(restored[0]?.key.teamId, 'team-9', 'and the owning team survives too');
+  assert.equal(restored[0]?.key.id, 'proj-1');
+});
+
+test('a config written before displayName existed still round-trips, falling back to the id', () => {
+  // The upgrade case. Both fields are optional precisely so an operator's existing
+  // config.json keeps loading; showing the id is what it did before and is no worse.
+  const legacy = {
+    mappings: { 'proj-1': { linearProjectId: 'proj-1', linearTeamId: null, repos: [{ repoDir: '/r' }] } },
+  } as never;
+  const restored = toWizardMappings(legacy)!;
+  assert.equal(restored[0]?.key.name, 'proj-1');
+  assert.equal(restored[0]?.key.teamId, undefined);
+});
+
+test('operatorUserId is written when chosen and absent when declined', () => {
+  const chosen = assembleConfig({ mappings: [mapping()], operatorUserId: 'u-ada' });
+  assert.equal(chosen.operatorUserId, 'u-ada');
+
+  const declined = assembleConfig({ mappings: [mapping()] });
+  assert.equal(
+    'operatorUserId' in declined,
+    false,
+    'declining must not leave an explicit undefined key — it breaks the JSON round trip',
+  );
+});

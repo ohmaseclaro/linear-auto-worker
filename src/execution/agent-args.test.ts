@@ -18,6 +18,7 @@ import {
   PERMISSION_PROMPTS,
   buildClaudeArgs,
   buildResumeArgs,
+  type ClaudeArgsInput,
 } from './agent-args.js';
 
 const SESSION = '3f1a9c74-6d20-4b8e-9a51-0c7d2e5f8b13';
@@ -28,12 +29,16 @@ const SCHEMA = {
   additionalProperties: false,
 };
 
-function input(prompt = 'implement the ticket'): {
-  sessionId: string;
-  prompt: string;
-  schema: object;
-} {
-  return { sessionId: SESSION, prompt, schema: SCHEMA };
+const MAX_TURNS = 40;
+
+function input(over: Partial<ClaudeArgsInput> = {}): ClaudeArgsInput {
+  return {
+    sessionId: SESSION,
+    prompt: 'implement the ticket',
+    schema: SCHEMA,
+    maxTurns: MAX_TURNS,
+    ...over,
+  };
 }
 
 /** The entry immediately following `flag`, or undefined if the flag is absent. */
@@ -47,7 +52,7 @@ function count(args: readonly string[], flag: string): number {
 }
 
 /** Both argument lists, so no assertion below can pass on one path and rot on the other. */
-const BOTH: ReadonlyArray<[string, (o: ReturnType<typeof input>) => string[]]> = [
+const BOTH: ReadonlyArray<[string, (o: ClaudeArgsInput) => string[]]> = [
   ['buildClaudeArgs', buildClaudeArgs],
   ['buildResumeArgs', buildResumeArgs],
 ];
@@ -127,8 +132,8 @@ test('argv-array safety: a hostile prompt reaches the array as exactly one entry
   // than filtered. No shell is involved anywhere on this path, so quoting is not a
   // concern that exists — but only for as long as the prompt stays a single entry.
   const hostile = 'line one\n"quoted"; $(rm -rf /) `whoami` --bare';
-  const plain = buildClaudeArgs(input('plain'));
-  const nasty = buildClaudeArgs(input(hostile));
+  const plain = buildClaudeArgs(input({ prompt: 'plain' }));
+  const nasty = buildClaudeArgs(input({ prompt: hostile }));
 
   assert.equal(nasty.length, plain.length);
   assert.equal(after(nasty, '-p'), hostile);
@@ -142,7 +147,7 @@ test('T57: buildResumeArgs keeps -p, drops --session-id, keeps the rest', () => 
   // --session-id is the flag that actually hard-errors on reuse:
   // "Session ID <uuid> is already in use.", exit 1, empty stdout.
   const answer = 'use the existing migration runner';
-  const args = buildResumeArgs({ sessionId: SESSION, prompt: answer, schema: SCHEMA });
+  const args = buildResumeArgs(input({ prompt: answer }));
 
   assert.equal(after(args, '--resume'), SESSION);
   assert.ok(!args.includes('--session-id'), 'a spent session id is a hard error on reuse');
@@ -169,4 +174,48 @@ test('the fresh and resumed paths agree on every flag value they share', () => {
     resumed.slice(b + 1, b + 1 + ALLOWED_TOOLS.length),
     fresh.slice(a + 1, a + 1 + ALLOWED_TOOLS.length)
   );
+});
+
+// -- the two caps, wired at the release pass ---------------------------------
+//
+// `Config.maxTurns` and `Config.maxBudgetUsd` were validated by the schema, written by the
+// setup wizard, and read by nothing — the operator was told they had limits that did not
+// exist. Both CLI flags were verified real on 2.1.259 by passing a non-numeric value:
+// `--max-turns` is absent from `--help` but answers
+// `option '--max-turns <turns>' argument 'notanumber' is invalid. must be a number`,
+// which an unknown flag does not (it answers `unknown option`).
+
+test('both paths carry --max-turns, and it is the configured value', () => {
+  for (const [name, build] of BOTH) {
+    const args = build(input({ maxTurns: 7 }));
+    assert.equal(count(args, '--max-turns'), 1, name);
+    assert.equal(after(args, '--max-turns'), '7', name);
+  }
+});
+
+test('--max-budget-usd is present only when a budget is configured', () => {
+  for (const [name, build] of BOTH) {
+    assert.equal(
+      count(build(input()), '--max-budget-usd'),
+      0,
+      `${name}: no budget configured must mean no flag — the CLI rejects a non-positive one`,
+    );
+    const args = build(input({ maxBudgetUsd: 2.5 }));
+    assert.equal(count(args, '--max-budget-usd'), 1, name);
+    assert.equal(after(args, '--max-budget-usd'), '2.5', name);
+  }
+});
+
+test('a resumed session is capped exactly like a fresh one', () => {
+  // The same reason the permission mode lives in `commonArgs`: a resumed session that
+  // inherited no cap is an uncapped run reached through the Q&A path, and every log line
+  // would look healthy.
+  const o = input({ maxTurns: 12, maxBudgetUsd: 3 });
+  for (const flag of ['--max-turns', '--max-budget-usd'] as const) {
+    assert.equal(
+      after(buildResumeArgs(o), flag),
+      after(buildClaudeArgs(o), flag),
+      `${flag} differs between a fresh and a resumed session`,
+    );
+  }
 });

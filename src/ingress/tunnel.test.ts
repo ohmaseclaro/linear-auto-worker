@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 
 import type { Listener } from '@ngrok/ngrok';
 import { TunnelError } from '../domain/errors.js';
-import { closeTunnel, installTunnelShutdownHooks, openTunnel, type NgrokApi } from './tunnel.js';
+import { closeTunnel, openTunnel, type NgrokApi } from './tunnel.js';
 
 const TOKEN = '2fAkEaUtHtOkEn_do_not_leak';
 
@@ -189,29 +189,8 @@ test('closeTunnel delegates to listener.close()', async () => {
   assert.equal(listener.closes, 1);
 });
 
-test('installTunnelShutdownHooks registers SIGINT and SIGTERM handlers', () => {
-  const before = {
-    SIGINT: process.listeners('SIGINT'),
-    SIGTERM: process.listeners('SIGTERM'),
-  };
-  const ngrok = fakeNgrok({ connect: async () => fakeListener('https://x.ngrok.app').handle });
-
-  installTunnelShutdownHooks(ngrok);
-
-  try {
-    for (const signal of ['SIGINT', 'SIGTERM'] as const) {
-      assert.equal(
-        process.listeners(signal).length,
-        before[signal].length + 1,
-        `${signal} handler must be registered`
-      );
-    }
-  } finally {
-    // These call process.exit(0); leaving them attached would kill the test runner.
-    for (const signal of ['SIGINT', 'SIGTERM'] as const) {
-      for (const handler of process.listeners(signal)) {
-        if (!before[signal].includes(handler)) process.removeListener(signal, handler);
-      }
-    }
-  }
-});
+// The `installTunnelShutdownHooks` case was removed with the function it tested. It
+// asserted that two signal handlers got registered — and those handlers called
+// `process.exit(0)`, which would have raced `daemon.ts`'s ordered shutdown and abandoned
+// the in-flight run marking. The test had to detach them again in a `finally` to avoid
+// killing the test runner, which was the clue. `daemon.test.ts` owns signal handling now.

@@ -351,16 +351,12 @@ Neither can be reproduced offline. They are the reason this file exists at all.
 
 Do not report these as bugs. They are deliberate, and each has its reasoning written down.
 
-**Six entries that used to be here are now closed** and are listed at the bottom so this
+**Eleven entries that used to be here are now closed** and are listed at the bottom so this
 table is not read against a daemon that no longer behaves that way.
 
 | # | What you will see | Why it is this way |
 |---|---|---|
-| **`maxBudgetUsd`** | The config key exists and nothing reads it. | Dead knob, same class as D5 was. `maxTurns` beside it is also never passed to `claude` — the run is bounded by `maxRunMs` alone. Both are recorded rather than fixed because bounding a run by spend or by turns is a design question (what happens at the limit?), not a wiring one. |
-| **`operatorUserId`** | Unset, so the INTK-03 subscribe step is skipped and logs a warning. | No wizard step writes it. The daemon authenticates as the BOT, so it cannot infer which human to subscribe. |
-| — | A project-keyed mapping does not record its Linear team id. | Harmless while the registrar registers with `allPublicTeams: true`. Revisit only if webhook scoping ever narrows to one team. |
-| — | A re-run's review prompt labels each existing mapping by id rather than by project/team name. | `Config.mappings` stores no human-readable name. |
-| — | End-to-end has never been run against a live Linear workspace. | That is what this document is for. |
+| — | End-to-end has never been run against a live Linear workspace. | That is what this document is for. It is now the only open item in this table. |
 
 ### Closed since this table was written
 
@@ -373,6 +369,11 @@ table is not read against a daemon that no longer behaves that way.
 | **D6** | Terminal notifications reported `costUsd: 0` and `tokensUsed: 0` on every run. | Migration 002 added the columns; the runner writes them. Also fixed the log redactor, which was printing `tokensUsed` as `"[REDACTED]"`. |
 | **D7** | `runs.pid` was never written, so an unclean exit left no pid to inspect. | Written the moment the child exists, before any await. |
 | — | `law status` printed `not yet implemented`. | Reads the store directly, and works whether or not the daemon is running. |
+| **`maxTurns`** | Never passed to `claude`; the run was bounded by `maxRunMs` alone. | `--max-turns`, per session. A resumed run gets a fresh budget — answering a question is new work — and the RUN is bounded by `maxQuestionRounds` on how often it may resume. |
+| **`maxBudgetUsd`** | Read by nothing. | `--max-budget-usd`, carrying what REMAINS of the run's budget across all its sessions. An exhausted run is not spawned, and ships whatever is committed as a draft rather than losing it. |
+| **`operatorUserId`** | Unset, so INTK-03's subscribe was skipped with a warning on every run. | A wizard step asks which Linear user you are. It cannot be inferred: the key authenticates as the BOT. Skippable, and a workspace whose key cannot list users keeps whatever was configured. |
+| — | A project-keyed mapping did not record its Linear team id. | `ownerTeamId`. The wizard always fetched it and threw it away. Kept separate from `linearTeamId`, which is the KEY and is mutually exclusive with the project id. |
+| — | A re-run labelled existing mappings by raw id. | `displayName`, written at setup and read back on re-run. A config written before it exists still loads and falls back to the id. |
 
 ## Record the outcome
 

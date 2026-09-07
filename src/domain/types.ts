@@ -226,6 +226,31 @@ export interface RepoMapping {
 export interface ProjectMapping {
   linearProjectId: string | null;
   linearTeamId: string | null;
+  /**
+   * The team a PROJECT-keyed mapping belongs to.
+   *
+   * Separate from `linearTeamId`, which is the mapping's KEY and is mutually exclusive with
+   * `linearProjectId` — overloading it would break that invariant and make a project-keyed
+   * mapping indistinguishable from a team-keyed one. The wizard already fetches this while
+   * listing candidates and used to discard it, which left the daemon unable to say which
+   * team a project mapping belonged to. Harmless while the registrar registers with
+   * `allPublicTeams: true`; needed the moment webhook scoping narrows to one team.
+   *
+   * Optional so an existing `config.json` written before this field still validates.
+   */
+  ownerTeamId?: string;
+  /**
+   * The Linear project or team NAME, for showing the operator on a setup re-run.
+   *
+   * The wizard knows it at pick time and threw it away, so re-running `law setup` listed
+   * each existing mapping by its raw id — an operator choosing which mapping to edit was
+   * reading UUIDs. Stored rather than re-fetched because the review prompt must work
+   * offline and before the Linear key is re-validated.
+   *
+   * Display only. Nothing keys, matches or routes on it, so a stale name after a rename in
+   * Linear is cosmetic and is corrected on the next re-run.
+   */
+  displayName?: string;
   repos: RepoMapping[];
   slackWebhookUrl?: string;
   /** Sparse by construction (D-09): a mapping names only what it changes. */
