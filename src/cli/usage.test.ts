@@ -174,15 +174,29 @@ test('D7: the run row records the pid of the process it spawned', () => {
   );
 });
 
-test('D6: a result event with no usage block reports zero, not NaN', async () => {
+test('D6: a resumed run ACCUMULATES cost across its sessions', async () => {
+  // One run is one row and can be several `claude` sessions — every answered question
+  // resumes the run through this same function, and `total_cost_usd` is that SESSION's
+  // cost. Assigning instead of adding reports only the last session, so the runs that cost
+  // the most (the ones that asked the most questions) under-report the worst.
+  store.updateRun(RUN_ID, { costUsd: 0, tokensUsed: 0 });
+  await runOnce(1.5, { input_tokens: 100 });
+  await runOnce(2.25, { input_tokens: 200 });
+  const run = store.getRun(RUN_ID)!;
+  assert.equal(run.costUsd, 3.75, 'two sessions on one run cost the sum of both');
+  assert.equal(run.tokensUsed, 300);
+});
+
+test('D6: a result event with no usage block adds zero, not NaN', async () => {
   store.updateRun(RUN_ID, { costUsd: 9, tokensUsed: 9 });
   await runOnce(0, undefined);
   const run = store.getRun(RUN_ID)!;
-  assert.equal(run.tokensUsed, 0);
-  assert.equal(run.costUsd, 0);
+  assert.equal(run.tokensUsed, 9, 'a session that reported nothing must not corrupt the total');
+  assert.equal(run.costUsd, 9);
 });
 
 test('D6: an unrecognised usage key is ignored rather than thrown on', async () => {
+  store.updateRun(RUN_ID, { costUsd: 0, tokensUsed: 0 });
   await runOnce(0.5, { input_tokens: 10, some_new_field_anthropic_added: 999 } as never);
   const run = store.getRun(RUN_ID)!;
   assert.equal(run.tokensUsed, 10, 'a run must not fail because a vendor added a key');

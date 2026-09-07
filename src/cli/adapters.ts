@@ -443,9 +443,21 @@ export function createAgentRunner(deps: AgentRunnerDeps): AgentRunner {
       // column to read. Written here, on the way past, so it survives even for a run that
       // is about to be classified `failed`: a run that burned twenty dollars and produced
       // nothing is precisely the one an operator needs the number for.
+      //
+      // ACCUMULATED, not assigned. One run is one row but can be several `claude`
+      // sessions: every answered question resumes the run through this same function, and
+      // `total_cost_usd` is that SESSION's cost, not the run's. Assigning would silently
+      // report only the last session, so a run that asked three questions would under-report
+      // by however much the first three sessions cost — the runs that cost the most being
+      // exactly the ones it would under-report the worst.
+      const priorRun = deps.store.getRun(req.runId);
+      const prior =
+        priorRun?.kind === 'repo'
+          ? { costUsd: priorRun.costUsd ?? 0, tokensUsed: priorRun.tokensUsed ?? 0 }
+          : { costUsd: 0, tokensUsed: 0 };
       deps.store.updateRun(req.runId, {
-        costUsd: outcome.resultEvent?.total_cost_usd ?? 0,
-        tokensUsed: usageTokens(outcome.resultEvent?.usage),
+        costUsd: prior.costUsd + (outcome.resultEvent?.total_cost_usd ?? 0),
+        tokensUsed: prior.tokensUsed + usageTokens(outcome.resultEvent?.usage),
       });
 
       // The abort may have won the race inside `runAgent`, which reports the reap rather

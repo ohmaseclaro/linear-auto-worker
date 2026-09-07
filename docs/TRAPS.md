@@ -1,6 +1,6 @@
 # Traps
 
-Ninety-four footguns found while building this daemon, kept as a running ledger so no two
+Ninety-five footguns found while building this daemon, kept as a running ledger so no two
 parallel work streams had to rediscover the same one.
 
 **Every entry here was measured, not recalled.** Versions come from the npm registry, API
@@ -15,7 +15,7 @@ spawn processes, several of them will cost you an afternoon each.
 Measured against: `@linear/sdk@93.0.1`, `@ngrok/ngrok@1.7.0`, `better-sqlite3@13.0.3`,
 `execa@10.0.1`, Claude Code CLI `2.1.259`, `gh` `2.98.0`, Node `22.23.1`, macOS.
 
-The complete internal ledger — all 94 rows with per-phase attribution and the evidence for
+The complete internal ledger — all 95 rows with per-phase attribution and the evidence for
 each — is in [`.planning/TRAPS.md`](../.planning/TRAPS.md). This page is the subset that
 generalises.
 
@@ -277,6 +277,15 @@ a real number. Resist narrowing the pattern: over-redaction is the safe error fo
 sink, and under-redaction leaks a credential. Add an explicit exception list instead, so
 anything new still fails closed — and write the test that goes red if someone later
 "fixes" it by loosening the pattern.
+
+**A per-session value written to a per-run row under-reports the runs that matter most.**
+The first cut of the cost tracking here assigned the session's `total_cost_usd` to the run's
+row. One run is one row, but it can be several `claude` sessions — every answered question
+resumes it through the same code — so the row ended up holding the *last* session's cost.
+A run that asked three questions reported a quarter of what it spent, and the error scales
+with session count, so the most expensive runs were the most wrongly reported. Nothing
+fails; the number is simply false. Ask of every write: *can this path run twice for one
+row?* Accumulate if it can.
 
 **Config keys that nothing reads are worse than missing features.** Three were found here
 by grepping for consumers rather than definitions: `maxQuestionRounds` was validated by the
