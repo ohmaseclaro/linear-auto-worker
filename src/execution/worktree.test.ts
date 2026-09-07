@@ -173,6 +173,41 @@ describe('prepareWorktree', () => {
     gate.resolve();
     await Promise.all([p1, p2]);
   });
+
+  /**
+   * T112. These two script `show-ref` by ref NAMESPACE, not by the bare word `show-ref`.
+   * Every case above answers `show-ref` with exit 1 unconditionally, so a test written the
+   * obvious way tells the new remote-tracking probe "absent" and passes against unfixed
+   * code — vacuous. Both were run against HEAD before the fix landed: the first RED, the
+   * second already green.
+   */
+  test('the base is the remote-tracking ref when it exists, not the bare local name', async () => {
+    const { run, calls } = makeRunner((call) => {
+      if (call.args.includes('show-ref')) {
+        const ref = call.args[call.args.length - 1] ?? '';
+        if (ref.startsWith('refs/remotes/')) return { exitCode: 0 }; // origin/main exists
+        return { exitCode: 1 }; // no local branch collides
+      }
+      return { exitCode: 0 };
+    });
+
+    await prepareWorktree({ ...BASE_INPUT, runCommand: run, branchName: 'ENG-1' });
+
+    const addCall = calls.find((c) => c.args.includes('add'));
+    assert.ok(addCall, 'expected a worktree add call');
+    const base = addCall.args[addCall.args.length - 1];
+    assert.equal(base, 'refs/remotes/origin/main');
+    assert.notEqual(base, 'main', 'branching from the bare local name makes the fetch inert');
+  });
+
+  test('the base falls back to the bare local name when no remote-tracking ref exists', async () => {
+    const { run, calls } = makeRunner((call) => (call.args.includes('show-ref') ? { exitCode: 1 } : { exitCode: 0 }));
+
+    await prepareWorktree({ ...BASE_INPUT, runCommand: run, branchName: 'ENG-1' });
+
+    const addCall = calls.find((c) => c.args.includes('add'));
+    assert.equal(addCall?.args[addCall.args.length - 1], 'main');
+  });
 });
 
 describe('finishWorktree', () => {
