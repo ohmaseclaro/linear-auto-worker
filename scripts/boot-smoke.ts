@@ -286,10 +286,74 @@ async function main(): Promise<void> {
       after?.failureReason === SHUTDOWN_NOTE,
       'the requeued run carries the shutdown reason (07-CONTEXT D-06)',
     );
+    const spentSessionId = after?.kind === 'repo' ? after.sessionId : null;
+    // The watermark, and it is load-bearing. This run ALREADY has a `queued -> preparing`
+    // row: the shutdown case above manufactured the in-flight run by transitioning it
+    // through exactly that edge. Asserting on the whole history therefore passes against
+    // unmodified `src/` — measured, not feared. `run_events.id` is monotonic and
+    // `listRunEvents` is `ORDER BY id ASC`, so everything at or after this index was
+    // written by the SECOND boot.
+    const eventsBefore = reopened.listRunEvents(run.id).length;
     reopened.close();
     daemon = undefined;
 
-    console.log('\nSMOKE PASSED — a signed webhook became a persisted queued run, and the stop was clean.');
+    // ── the SECOND boot (T108) ───────────────────────────────────────────────
+    // The whole reason `markInFlight` writes `queued` is that the next boot picks it up.
+    // Nothing read that queue until 2026-09-07, so a clean Ctrl-C silently cost a manual
+    // re-assignment of every live ticket while `law status` reported the run as active.
+    // This is the only place that can see it: the unit suite drives runs it enqueued
+    // itself, and a run "left by a previous process" is by definition one no driver in
+    // this heap is holding.
+    const tunnel2 = probingTunnel();
+    daemon = await bootDaemon({
+      configDir: workspace.dir,
+      linear,
+      tunnel: tunnel2,
+      runCommand,
+      // Belt and braces. `runCommand` answers exitCode 0 to `git show-ref`, so
+      // `resolveBranchName` exhausts its 50 candidates and throws (T87) long before the
+      // agent is reached — but a future change to `runCommand` must not be able to make
+      // `npm run verify` spawn a real `claude`.
+      agent: {
+        run: () => Promise.reject(new Error('smoke: no agent')),
+        onProgress: () => {},
+      },
+    });
+
+    const dispatched = () =>
+      daemon!.store
+        .listRunEvents(run.id)
+        .slice(eventsBefore)
+        .some((e) => e.from === 'queued' && e.to === 'preparing');
+
+    await until(() => dispatched() || undefined, {
+      label: 'the requeued run to be dispatched on the next boot',
+    });
+
+    check(dispatched(), 'the requeued run left `queued` on the next boot, by its OWN id');
+    // Not the watermark. The second boot's missed-work sweep DOES see SMK-1 still assigned
+    // and still open, and T107's `trigger: 'reconcile'` guard is what refuses it. If the
+    // poll were the actor being credited above there would be a second row here and the
+    // original would still be `queued` — both halves flip together.
+    check(
+      daemon.store.findRunsByIssue(ISSUE_ID).length === 1,
+      `it was RESUMED, not re-created — one run row for the issue (got ${
+        daemon.store.findRunsByIssue(ISSUE_ID).length
+      })`,
+    );
+    const redriven = daemon.store.getRun(run.id);
+    check(
+      redriven?.kind === 'repo' && redriven.sessionId !== spentSessionId,
+      'the redriven run got a FRESH session id (a spent --session-id is a hard CLI error)',
+    );
+    check(
+      redriven?.kind === 'repo' && redriven.failureReason !== SHUTDOWN_NOTE,
+      'the shutdown note was cleared when the run resumed',
+    );
+
+    console.log(
+      '\nSMOKE PASSED — a signed webhook became a persisted queued run, the stop was clean, and the next boot ran what the stop left behind.',
+    );
   } finally {
     if (daemon) await daemon.shutdown('smoke cleanup');
     if (workspace) await workspace.remove();

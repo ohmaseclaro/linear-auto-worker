@@ -6,6 +6,8 @@
  * Contains no SQL. Every read and write goes through the `Store` port; raw
  * statements live in Phase 2's store implementation.
  */
+import { randomUUID } from 'node:crypto';
+
 import { canTransition, RUN_STATE_TABLE } from '../domain/state-machine.js';
 import { IllegalTransitionError } from '../domain/errors.js';
 // T32: the self-event marker is declared once, in the domain barrel. Every
@@ -51,6 +53,31 @@ export interface RunEngine {
   isCancelRequested(runId: RunId): boolean;
   /** D-10: re-edit the queue-position comment of every still-queued run. */
   refreshQueuePositions(): Promise<void>;
+  /**
+   * Drive every run this process finds sitting at `queued` with no driver behind it —
+   * the queue a PREVIOUS process left in the database. Returns the ids it started.
+   *
+   * **This is resumption, not retry.** A `queued` row is an attempt that was interrupted
+   * before it finished, not one that finished badly, so driving it does not violate
+   * OPS-04/T17 ("a run is attempted exactly once"). And the guarantee is not this
+   * sentence — it is the SELECTION. The drain reads `state = 'queued'` and nothing else,
+   * and `queued` is unreachable from every terminal state
+   * (`canTransition('failed', 'queued') === false`, pinned by `state-machine.test.ts`).
+   * Widen this query to a terminal state and it becomes the bounded `failed -> queued`
+   * auto-retry T17 forbids — at which point `run-engine.test.ts`'s "the drain never
+   * touches a terminal run" goes red at exactly that edit. Do not bound it by `attempt`
+   * either: that counter IS the vestige of the forbidden retry (see `types.ts`).
+   *
+   * **Boot only, and that is a claim about the writers.** Exactly three sites write
+   * `queued`: `insertPlan` (ingress and poll — `handle` calls `drive()` in the same turn,
+   * so the row is never driverless), `recoverAtBoot` (`preparing -> queued` at boot), and
+   * `markInFlight` (`running -> queued` at shutdown, after which the process exits). Only
+   * the last two leave a driverless row, and both are bounded by an operator action —
+   * a Ctrl-C or a re-boot. So there is no tick case to guard today. If a fourth writer is
+   * ever added, calling this from the tick is one line and the `driving` filter below is
+   * already what makes that safe.
+   */
+  dispatchQueued(): RunId[];
   /**
    * Post the terminal comment for an ALREADY-terminal run, guarded so it happens once.
    *
@@ -122,6 +149,16 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
 
   /** Live child handles, keyed by run. Plan 02's cancel path reaches in here. */
   const aborts = new Map<RunId, AbortController>();
+  /**
+   * Runs this process has a driver for, INCLUDING the ones still parked for a slot.
+   *
+   * Deliberately not `aborts`: `stop()` depends on `aborts` holding only runs that already
+   * have a slot and can therefore have a child process behind them, and widening it would
+   * make Ctrl-C on an idle daemon wait out the full child-reap budget for a driver that
+   * holds nothing. This set answers a different question — "is anyone already driving this
+   * row?" — and `dispatchQueued` is its only reader.
+   */
+  const driving = new Set<RunId>();
   const inFlight = new Set<Promise<void>>();
   /**
    * Set by `stop()` and never cleared: this engine is finished for the life of the
@@ -323,6 +360,56 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
       );
       if (updated !== null) writeAck(run.id, { ...ack, position });
     }
+  }
+
+  /**
+   * ponytail: 1000 is a ceiling, not a page size. A three-slot single-operator daemon with
+   * a thousand-deep queue has a different problem than this function solves.
+   */
+  const DRAIN_LIMIT = 1000;
+
+  /** See the `RunEngine` interface for why this is resumption and why it is boot-only. */
+  function dispatchQueued(): RunId[] {
+    const runs = store
+      // `nextQueued`, NOT `listByState('queued')`. The difference is the
+      // `ORDER BY created_at ASC` this one carries, and that ordering is what makes
+      // admission FIFO across a restart rather than whatever order SQLite hands back.
+      .nextQueued(DRAIN_LIMIT)
+      // A ticket parent can never be `queued` — the migration's CHECK constraint gives it
+      // a NULL state — so this is the type narrowing and the invariant at once, the same
+      // way `recoverAtBoot` does it.
+      .filter((r): r is RepoRun => r.kind === 'repo')
+      // D-5. Boot order is sweep -> `scheduler.start()` -> this, and a run the sweep just
+      // enqueued has a driver parked on `acquire`. `start()` resolved its slot promise but
+      // the continuation is a microtask, so the row is STILL `queued` here and reads as
+      // stranded when it is not.
+      .filter((r) => !driving.has(r.id));
+    if (runs.length === 0) return [];
+
+    for (const run of runs) {
+      store.updateRun(run.id, {
+        // Unconditionally fresh (D-6). A run requeued out of `running` by `markInFlight`
+        // has SPENT its id, and `claude` answers a reused one with
+        // `Session ID <uuid> is already in use` — a hard error no fake agent can see, so
+        // without this the fix is green in tests and 0% correct in production. See
+        // `docs/agent-invocation.md` and `agent-args.ts`. For a never-spawned run the
+        // replacement costs nothing, which is why there is no "was it spent" bookkeeping.
+        sessionId: randomUUID(),
+        // A run carrying the shutdown note while it is running again is a lie `law status`
+        // would repeat.
+        failureReason: null,
+        updatedAt: now(),
+      });
+      // `null` ack (D-7): this run was acknowledged, moved to In Progress and subscribed by
+      // the process that first picked it up, and its ack entry is still in kv for
+      // `refreshQueuePositions` to edit. Re-running that sequence posts a SECOND pickup
+      // comment on the ticket — T72's double-post through a new door.
+      track(drive(run.id, null, scheduler.acquire(run.id)));
+    }
+
+    const runIds = runs.map((r) => r.id);
+    log.info({ runIds }, 'dispatched runs left queued by a previous process');
+    return runIds;
   }
 
   /**
@@ -694,6 +781,14 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
     ackCommentId: string | null,
     slot: Promise<() => void>,
   ): Promise<void> {
+    // BEFORE `await slot`, which is the whole point (D-5). `scheduler.start()` resolves a
+    // parked driver's slot promise, but the continuation is a microtask — it has not run
+    // when the next SYNCHRONOUS statement executes, so a drain there reads this row still
+    // at `queued` and would drive it a second time: two worktrees, two `claude` sessions
+    // and two pull requests for one ticket. `acquire()` never rejects, so the only way
+    // past this line without reaching the `finally` is a slot that never resolves — in
+    // which case the run does still have a driver and belongs in the set.
+    driving.add(runId);
     // Parks here with no slot held until one is free. `awaiting_answer` runs
     // are not in the admitted set, so they cannot starve this.
     const release = await slot;
@@ -729,6 +824,7 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
       if (err instanceof CancelledSignal) await finishCancel(runId, 'cancel requested');
       else await fail(runId, classify(err), err);
     } finally {
+      driving.delete(runId);
       aborts.delete(runId);
       release();
       if (!stopping) {
@@ -784,6 +880,7 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
   return {
     transition,
     refreshQueuePositions,
+    dispatchQueued,
     cancel,
     isCancelRequested,
     announceTerminal,

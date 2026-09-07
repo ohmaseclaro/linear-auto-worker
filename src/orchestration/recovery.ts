@@ -68,7 +68,11 @@ export type BootAction = 'leave' | 'requeue' | 'fail';
  * Terminal states are listed for exhaustiveness only -- they are never loaded.
  */
 export const BOOT_ACTION: Readonly<Record<RunState, BootAction>> = {
-  // Already correct. It will be picked up by the normal queue drain.
+  // Already correct: `daemon.ts` step 8b calls `engine.dispatchQueued()` once the
+  // scheduler is admitting, and that drives it. Until 2026-09-07 this line said it would
+  // "be picked up by the normal queue drain" and there was no queue drain — so a run
+  // requeued by a clean Ctrl-C sat here forever while `law status` reported it active
+  // (TRAPS T108).
   queued: 'leave',
   // Nothing was spent -- no agent had been spawned. A partial worktree is
   // Phase 4's boot GC to prune; the worktree port is deliberately not a

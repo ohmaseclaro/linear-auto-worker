@@ -697,6 +697,12 @@ export async function bootDaemon(opts: BootOptions = {}): Promise<DaemonHandle> 
 
   // ── 8. and only now may anything spawn a child process ─────────────────────
   scheduler.start();
+
+  // ── 8b. drain the queue the LAST process left behind ───────────────────────
+  // After `start()` and not before: a drain that runs while the scheduler is not admitting
+  // silently does nothing, which is this bug's own failure mode. No log line here — the
+  // engine logs what it dispatched, the same convention `recoverAtBoot` above follows.
+  engine.dispatchQueued();
   /** The idempotence memo. See `shutdown` below. */
   let shuttingDown: Promise<void> | null = null;
 
