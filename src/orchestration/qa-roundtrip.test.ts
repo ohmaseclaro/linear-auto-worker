@@ -19,10 +19,11 @@ import {
   InMemoryStore,
 } from '../domain/fakes.js';
 import type { AgentResult, Config, Logger } from '../domain/ports.js';
+import type { RepoRun } from '../domain/types.js';
 import { createScheduler } from './scheduler.js';
 import { createRunEngine } from './run-engine.js';
 import { createQuestions } from './questions.js';
-import { POLL_WATERMARK_KEY, reconcile } from './recovery.js';
+import { POLL_WATERMARK_KEY, recoverAtBoot, reconcile } from './recovery.js';
 import type { RecoveryDeps } from './recovery.js';
 
 const silent: Logger = {
@@ -316,4 +317,82 @@ test('three poll passes over an issue with a live run still produce one run (T10
   }
 
   assert.equal(h.store.findRunsByIssue(ISSUE.id).length, 1, 'three passes, one run');
+});
+
+/**
+ * D-3: `recoverAtBoot` is not on the new rule's path and cannot be stranded by it, pinned
+ * rather than asserted. It never emits `run.requested` — it transitions the EXISTING row —
+ * and the row it produces sits at `queued`, which is non-terminal, so the unchanged
+ * live-run check keeps the poll off it.
+ *
+ * This matters because it is the third door to the same loop: `recoverAtBoot` FAILS a
+ * `running`/`delivering` row (D-07), and before T107 the very next poll tick resurrected
+ * that still-assigned ticket.
+ */
+function crashedRun(state: RepoRun['state']): RepoRun {
+  return {
+    id: 'run-crashed',
+    kind: 'repo',
+    parentRunId: null,
+    issueId: ISSUE.id,
+    issueKey: ISSUE.identifier,
+    issueTitle: ISSUE.title,
+    issueUrl: ISSUE.url,
+    repoDir: '/repo/api',
+    repoSlug: 'org/api',
+    branch: 'bot/eng-42',
+    worktreePath: '/tmp/wt/run-crashed',
+    sessionId: 's-crashed',
+    pid: null,
+    state,
+    attempt: 1,
+    questionRound: 0,
+    prUrl: null,
+    failureReason: null,
+    createdAt: 1,
+    updatedAt: 1,
+  };
+}
+
+test('a run requeued by the boot sweep is left alone by the poll, not stranded (T107, D-3)', async () => {
+  const h = harness([COMPLETE]);
+  h.store.insertRun(crashedRun('preparing'));
+
+  const boot = await recoverAtBoot({
+    store: h.store,
+    engine: h.engine,
+    scheduler: h.scheduler,
+    questions: h.questions,
+    linear: h.linear,
+    config: CONFIG,
+    log: silent,
+    now: () => Date.parse('2026-06-01T00:00:00.000Z'),
+  });
+
+  assert.deepEqual(boot.requeued, ['run-crashed'], 'nothing was spent, so it requeues');
+  assert.equal(h.store.getRun('run-crashed')!.state, 'queued');
+
+  // The same issue is still assigned and still clears the watermark, so the poll sees it.
+  h.linear.putIssue({ ...ISSUE, updatedAt: '2026-03-01T00:00:00.000Z' });
+  const report = await reconcile(
+    {
+      store: h.store,
+      engine: h.engine,
+      scheduler: h.scheduler,
+      questions: h.questions,
+      linear: h.linear,
+      config: CONFIG,
+      log: silent,
+      now: () => Date.parse('2026-06-01T00:00:00.000Z'),
+    },
+    Date.parse('2026-06-01T00:00:00.000Z'),
+  );
+
+  assert.deepEqual(report.enqueued, [], 'the poll enqueued nothing');
+  assert.equal(
+    h.store.getRun('run-crashed')!.state,
+    'queued',
+    'the requeued run is still queued: not stranded, not failed, not restarted',
+  );
+  assert.equal(h.store.findRunsByIssue(ISSUE.id).length, 1, 'and it was not duplicated');
 });
