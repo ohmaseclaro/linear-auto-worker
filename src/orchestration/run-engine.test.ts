@@ -21,7 +21,7 @@ import assert from 'node:assert/strict';
 import { FakeAgentRunner, FakeDeliverer, InMemoryStore } from '../domain/fakes.js';
 import { RUN_STATE_TABLE } from '../domain/state-machine.js';
 import type { AgentResult, Config, LinearClient, Logger, WorktreeManager } from '../domain/ports.js';
-import type { RunState } from '../domain/types.js';
+import type { Run, RunState } from '../domain/types.js';
 import { createScheduler } from './scheduler.js';
 import { createRunEngine } from './run-engine.js';
 import { createQuestions } from './questions.js';
@@ -145,14 +145,20 @@ function recordingLinear(issues: Array<ReturnType<typeof issue>>, opts: { failCr
  * A worktree port that fails the test on early invocation rather than merely
  * documenting the rule. Nothing in the acknowledgement sequence may reach it.
  */
-function spyWorktrees(order: string[]) {
+function spyWorktrees(order: string[], opts: { requireAck?: boolean } = {}) {
   const ACK_SEQUENCE = ['comment.create', 'issue.state', 'issue.subscribe'];
+  // A REDRIVEN run deliberately does not re-acknowledge (D-7): it was acknowledged, moved
+  // to In Progress and subscribed by the process that first picked it up, and re-running
+  // that sequence posts a second pickup comment on the ticket (T72 through a new door).
+  // So for those cases the guard below would fail the test for the product being correct.
+  // Defaulted `true`, so every existing call site keeps today's behaviour.
+  const requireAck = opts.requireAck ?? true;
   const removed: string[] = [];
   const created: string[] = [];
 
   const wt = {
     async create(runId: string, repo: { repoDir: string }, branch: string) {
-      const missing = ACK_SEQUENCE.filter((s) => !order.includes(s));
+      const missing = requireAck ? ACK_SEQUENCE.filter((s) => !order.includes(s)) : [];
       if (missing.length > 0) {
         throw new Error(`worktree reached before the acknowledgement sequence: missing ${missing.join(', ')}`);
       }
@@ -179,6 +185,8 @@ function harness(opts: {
   issues: Array<ReturnType<typeof issue>>;
   concurrency?: number;
   failCreate?: boolean;
+  /** The run was acknowledged by a PREVIOUS process; this one must not re-acknowledge. */
+  preAcked?: boolean;
 }) {
   const config = configWith(opts.concurrency ?? 3);
   const store = new InMemoryStore();
@@ -186,7 +194,7 @@ function harness(opts: {
   const agent = new FakeAgentRunner(opts.script);
   const deliverer = new FakeDeliverer();
   const linear = recordingLinear(opts.issues, { failCreate: opts.failCreate });
-  const spy = spyWorktrees(linear.order);
+  const spy = spyWorktrees(linear.order, { requireAck: !opts.preAcked });
 
   let questions: ReturnType<typeof createQuestions>;
   const engine = createRunEngine({
@@ -505,4 +513,125 @@ test('a throw in the delivering path still produces exactly one terminal emissio
   assert.equal(terminal.length, 1, 'invariant 11: emitted from the finally, exactly once');
   assert.doesNotMatch(terminal[0].body, /headers:/, 'T-06-06: the raw error body never reaches the ticket');
   assert.equal(h.scheduler.inUse(), 0, 'and the slot came back');
+});
+
+
+// ---------------------------------------------------------------------------
+// Task 3 — the drain (T108). The boot smoke proves the WIRE; these prove the
+// RULES, and each one names the edit it catches.
+// ---------------------------------------------------------------------------
+
+/**
+ * A run row with no driver in this heap — which IS "left by a previous process". Shaped
+ * after `recovery.test.ts`'s seed, because that is the same fiction: rows that exist
+ * because some earlier process wrote them.
+ */
+function seedRun(store: InMemoryStore, over: Partial<Run> = {}): Run {
+  const run = {
+    id: `r-${over.state ?? 'queued'}`,
+    parentRunId: null,
+    kind: 'repo',
+    issueId: 'issue-1',
+    issueKey: 'ENG-1',
+    issueTitle: 'Ticket 1',
+    issueUrl: 'https://linear.app/x/issue/ENG-1',
+    repoDir: '/repo/api',
+    repoSlug: 'org/api',
+    branch: 'bot/eng-1',
+    worktreePath: null,
+    sessionId: 's-spent',
+    pid: null,
+    state: 'queued',
+    attempt: 0,
+    questionRound: 0,
+    prUrl: null,
+    failureReason: null,
+    createdAt: 0,
+    updatedAt: 0,
+    ...over,
+  } as Run;
+  store.insertRun(run);
+  return run;
+}
+
+test('a run left queued by a previous process is dispatched with a FRESH session id', async () => {
+  const h = harness({ script: [COMPLETE], issues: [issue(1)], preAcked: true });
+  const run = seedRun(h.store, { id: 'r-stranded', sessionId: 's-spent' });
+
+  assert.deepEqual(h.engine.dispatchQueued(), ['r-stranded'], 'the drain claims it');
+  await h.engine.settle();
+
+  assert.equal(h.store.getRun('r-stranded')!.state, 'delivered', 'and it actually runs');
+  // D-6, and the assertion that separates a fix which works from one that is green here
+  // and hard-errors on every real spawn: `claude` answers a reused --session-id with
+  // `Session ID <uuid> is already in use`, which no fake agent can see.
+  assert.notEqual(
+    (h.store.getRun('r-stranded') as { sessionId: string }).sessionId,
+    's-spent',
+    'the spent session id was replaced before the spawn',
+  );
+  assert.equal(h.agent.calls[0]!.sessionId, h.store.getRun('r-stranded')!.sessionId);
+  assert.equal(
+    h.store.findRunsByIssue('issue-1').length,
+    1,
+    'RESUMED, not re-created — one row per issue (T107 intact)',
+  );
+  // D-7 / T72: no second acknowledgement. The pickup comment, the In Progress transition
+  // and the subscription all already happened, in the process that first picked it up.
+  assert.equal(
+    h.linear.created.filter((c) => /Picked up/.test(c.body)).length,
+    0,
+    'no second pickup comment on the ticket',
+  );
+  assert.deepEqual(h.linear.states, [], 'no second In Progress transition');
+  assert.deepEqual(h.linear.subscribed, [], 'no second subscription');
+});
+
+test('the drain never touches a terminal run (OPS-04 / T17)', async () => {
+  const h = harness({ script: [COMPLETE], issues: [issue(1)], preAcked: true });
+  for (const state of ['delivered', 'partial', 'failed', 'cancelled'] as RunState[]) {
+    seedRun(h.store, { id: `r-${state}`, issueId: `issue-${state}`, state });
+  }
+  seedRun(h.store, { id: 'r-stranded' });
+
+  // A `queued` row is an INTERRUPTED attempt, not a finished-badly one, and the guarantee
+  // is the SELECTION rather than a comment: widen the read to a terminal state and this is
+  // the bounded `failed -> queued` auto-retry T17 forbids. That edit goes red here.
+  assert.deepEqual(h.engine.dispatchQueued(), ['r-stranded']);
+  await h.engine.settle();
+  assert.deepEqual(h.spy.created, ['r-stranded'], 'exactly one run reached the worktree');
+});
+
+test('the drain does not double-drive a run that already has a driver', async () => {
+  // The boot window, reproduced: `sweepMissedWork` enqueues a run whose driver parks on
+  // `acquire`, `scheduler.start()` resolves that slot promise as a MICROTASK, and step 8b
+  // runs in the very next synchronous statement — so the row is still `queued` and reads
+  // as stranded when it is not. Without the `driving` guard: two worktrees, two `claude`
+  // sessions and two pull requests for one ticket.
+  const h = harness({ script: [COMPLETE], issues: [issue(1)], concurrency: 1 });
+  const releaseOutsider = await h.scheduler.acquire('outsider');
+
+  await h.engine.handle({ kind: 'run.requested', trigger: 'assignment', issueId: 'issue-1' });
+  const [run] = h.store.findActiveRunByIssue('issue-1');
+  assert.equal(h.store.getRun(run.id)!.state, 'queued', 'queued, with a live parked driver');
+
+  assert.deepEqual(h.engine.dispatchQueued(), [], 'the drain leaves it to the driver it has');
+
+  releaseOutsider();
+  await h.engine.settle();
+  assert.deepEqual(h.spy.created, [run.id], 'exactly ONE worktree for one run');
+});
+
+test('the drain admits oldest-first across a restart', async () => {
+  const h = harness({ script: [COMPLETE], issues: [issue(1)], concurrency: 1, preAcked: true });
+  // Inserted 3, 1, 2 — so insertion order and `created_at` order disagree, which is what
+  // makes wiring `nextQueued` (ORDER BY created_at ASC) load-bearing rather than
+  // incidental. `listByState('queued')` would hand them back 3, 1, 2.
+  for (const at of [3, 1, 2]) {
+    seedRun(h.store, { id: `r-at-${at}`, issueId: `issue-${at}`, createdAt: at });
+  }
+
+  assert.deepEqual(h.engine.dispatchQueued(), ['r-at-1', 'r-at-2', 'r-at-3']);
+  await h.engine.settle();
+  assert.deepEqual(h.spy.created, ['r-at-1', 'r-at-2', 'r-at-3'], 'FIFO survives the restart');
 });
