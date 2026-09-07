@@ -7,7 +7,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import * as z from 'zod';
 import type { Config } from '../domain/types.js';
-import { ConfigSchema, loadSecrets, resolveMapping } from './config.js';
+import { ConfigSchema, loadSecrets, resolveMapping, webhookTeamId } from './config.js';
 
 function makeTempRoot(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'law-config-'));
@@ -184,4 +184,59 @@ test('loadSecrets throws when a required key is missing', () => {
   fs.writeFileSync(envPath, 'LINEAR_API_KEY=abc\n');
   fs.chmodSync(envPath, 0o600);
   assert.throws(() => loadSecrets(root));
+});
+
+// ---------------------------------------------------------------------------
+// webhookTeamId — the P2 that blocks the P0 (this plan's D0)
+// ---------------------------------------------------------------------------
+
+test('webhookTeamId heals a config whose teamId is blank from a project mapping ownerTeamId', () => {
+  // This is the operator's live config.json, byte for byte in shape: a project-keyed
+  // mapping, `linearTeamId: null`, and `teamId: ''`. Before `ownerTeamId` was consulted
+  // this threw, and `law start` could not register a webhook at all.
+  const cfg = {
+    ...config({
+      'proj-1': {
+        linearProjectId: 'proj-1',
+        linearTeamId: null,
+        ownerTeamId: 'team-abc',
+        repos: [repo('/repo-a', 'org/a')],
+      },
+    }),
+    teamId: '',
+  };
+
+  assert.equal(webhookTeamId(cfg), 'team-abc');
+});
+
+test('webhookTeamId prefers the explicit config.teamId over any mapping', () => {
+  const cfg = config({
+    'proj-1': {
+      linearProjectId: 'proj-1',
+      linearTeamId: null,
+      ownerTeamId: 'team-abc',
+      repos: [repo('/repo-a', 'org/a')],
+    },
+  });
+
+  assert.equal(webhookTeamId(cfg), 'team-1', 'validTop.teamId wins');
+});
+
+test('webhookTeamId still throws the named error when no team id exists anywhere', () => {
+  const cfg = {
+    ...config({
+      'proj-1': { linearProjectId: 'proj-1', linearTeamId: null, repos: [repo('/r', 'org/r')] },
+    }),
+    teamId: '',
+  };
+
+  assert.throws(
+    () => webhookTeamId(cfg),
+    (err: unknown) => {
+      assert.ok(err instanceof Error);
+      assert.match(err.message, /no Linear team is configured/);
+      assert.match(err.message, /config\.json/);
+      return true;
+    },
+  );
 });

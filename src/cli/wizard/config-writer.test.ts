@@ -274,3 +274,50 @@ test('operatorUserId is written when chosen and absent when declined', () => {
     'declining must not leave an explicit undefined key — it breaks the JSON round trip',
   );
 });
+
+// ---------------------------------------------------------------------------
+// teamId derivation — the P2 that blocks the P0 (this plan's D0)
+// ---------------------------------------------------------------------------
+
+/** A project-keyed mapping that carries its owning team, which is what the wizard has
+ *  always had at pick time and used to throw away. */
+function projectKeyed(): Mapping {
+  return {
+    key: { kind: 'project', id: 'proj-1', name: 'Alpha', teamId: 'team-abc' },
+    repos: ['/repos/api'],
+  };
+}
+
+test('a project-keyed mapping derives teamId from its owning team, not ""', () => {
+  // The live defect: `index.ts` passes `teamId: ''` for a project-only setup, and the
+  // written config then has no team for `webhookCreate` to register against.
+  const config = assembleConfig({ mappings: [projectKeyed()], teamId: '' });
+
+  assert.equal(config.teamId, 'team-abc');
+});
+
+test('a team-keyed mapping still wins over a project-keyed one', () => {
+  const teamKeyed: Mapping = {
+    key: { kind: 'team', id: 'team-direct', name: 'Team Direct' },
+    repos: ['/repos/api'],
+  };
+
+  const config = assembleConfig({ mappings: [projectKeyed(), teamKeyed], teamId: '' });
+
+  assert.equal(config.teamId, 'team-direct');
+});
+
+test("a caller's explicit teamId still beats anything derived from the mappings", () => {
+  const config = assembleConfig({ mappings: [projectKeyed()], teamId: 'team-explicit' });
+
+  assert.equal(config.teamId, 'team-explicit');
+});
+
+test('with no team anywhere in the mappings, an existing config.teamId is kept', () => {
+  const existing = assembleConfig({ mappings: [projectKeyed()], teamId: 'team-old' });
+  const noTeam: Mapping = { key: { kind: 'project', id: 'proj-2', name: 'Beta' }, repos: ['/r'] };
+
+  const merged = assembleConfig({ mappings: [noTeam], teamId: '', existing });
+
+  assert.equal(merged.teamId, 'team-old');
+});

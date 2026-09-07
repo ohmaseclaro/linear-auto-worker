@@ -306,6 +306,25 @@ export interface AssembleConfigInput {
  *  - anything unrecognised or wrongly typed in the existing file reverts to the shipped
  *    default rather than being carried forward.
  */
+/**
+ * The team id `webhookCreate` needs, derived from the mappings rather than taken on trust.
+ *
+ * The caller's hint only ever looked at TEAM-keyed mappings, so an operator who mapped a
+ * PROJECT got `teamId: ''` written to disk and `law start` then refused to register a
+ * webhook at all. A project-keyed mapping has always carried `key.teamId` (the owning
+ * team, fetched at pick time), so the answer was available and simply not asked for.
+ *
+ * Order is deliberate: a team-keyed mapping names the team directly, a project-keyed one
+ * names it by ownership, and only then does the previous file's value stand in.
+ */
+function deriveTeamId(mappings: Mapping[], existingTeamId: string): string {
+  const teamKeyed = mappings.find((m) => m.key.kind === 'team')?.key.id;
+  if (teamKeyed) return teamKeyed;
+  const owning = mappings.find((m) => m.key.kind === 'project' && m.key.teamId)?.key.teamId;
+  if (owning) return owning;
+  return existingTeamId;
+}
+
 export function assembleConfig(input: AssembleConfigInput): Config {
   const existing = (input.existing ?? {}) as Partial<Config> & Record<string, unknown>;
   const defaults = mergeToggles(existing.defaults);
@@ -324,7 +343,7 @@ export function assembleConfig(input: AssembleConfigInput): Config {
 
   const config: Config = {
     botUserId: pickString(input.botUserId, pickString(existing.botUserId, '')),
-    teamId: pickString(input.teamId, pickString(existing.teamId, '')),
+    teamId: pickString(input.teamId, deriveTeamId(input.mappings, pickString(existing.teamId, ''))),
     concurrency: pickNumber(existing.concurrency, DEFAULT_CONCURRENCY),
     maxQuestionRounds: pickNumber(existing.maxQuestionRounds, DEFAULT_MAX_QUESTION_ROUNDS),
     maxTurns: pickNumber(existing.maxTurns, DEFAULT_MAX_TURNS),

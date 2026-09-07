@@ -126,7 +126,12 @@ export function webhookTeamId(config: Config): string {
   const teamId =
     config.teamId ||
     Object.values(config.mappings)
-      .map((m) => m.linearTeamId)
+      // `ownerTeamId` is the repair: the operator's live config has a PROJECT-keyed
+      // mapping, so `linearTeamId` is null on every entry and this threw before the
+      // daemon could register anything. Every project-keyed mapping already records the
+      // team it belongs to, so the value was on disk the whole time — a config written
+      // by an older wizard heals here without a setup re-run.
+      .map((m) => m.linearTeamId ?? m.ownerTeamId ?? null)
       .find((t): t is string => Boolean(t));
   if (!teamId) {
     throw new Error(
