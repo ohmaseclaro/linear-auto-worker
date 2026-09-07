@@ -506,3 +506,93 @@ test('promptRepoSelection: a blank first term is the escape hatch — no selecti
   assert.deepEqual(result[0]?.repos, [], 'whitespace-only finishes with nothing selected');
   assert.equal(seen.checkbox.length, 0);
 });
+
+// ---------------------------------------------------------------------------
+// A mapping with no repos is refused, never saved (P0 defect 2)
+// ---------------------------------------------------------------------------
+
+/** Captures what the operator was told, so the refusal can be asserted on its REASON and
+ *  not only on the return value. */
+function lines(): { report: (m: string) => void; all: string[] } {
+  const all: string[] = [];
+  return { report: (m: string) => all.push(m), all };
+}
+
+test('buildMappings: a fresh mapping with no repos selected is discarded, with a reason', async () => {
+  // The live failure: this wrote `repos: []` into config.json, and `loadConfig` — the
+  // daemon's own loader — then threw on the file the wizard had just written.
+  const client = fakeLinearClient(
+    [{ id: 'team-1', name: 'Team One' }],
+    [{ id: 'proj-1', name: 'Project One', teamId: 'team-1' }],
+  );
+  const out = lines();
+
+  const result = await buildMappings(
+    client,
+    DISCOVERED,
+    undefined,
+    // No `input`/`confirm` for Slack/toggles queued: reaching them would reject, which is
+    // the point — a discarded mapping must not go on asking about itself.
+    scripted({ select: ['proj-1'], checkbox: [[]], confirm: [false /* addAnother */] }),
+    out.report,
+  );
+
+  assert.deepEqual(result, []);
+  assert.ok(
+    out.all.some((l) => l.includes('mapping with no repos cannot be saved')),
+    `the discard reason must be named; got ${JSON.stringify(out.all)}`,
+  );
+});
+
+test('buildMappings: an empty first mapping is dropped and the second one is still kept', async () => {
+  const client = fakeLinearClient(
+    [{ id: 'team-1', name: 'Team One' }],
+    [
+      { id: 'proj-1', name: 'Project One', teamId: 'team-1' },
+      { id: 'proj-2', name: 'Project Two', teamId: 'team-1' },
+    ],
+  );
+
+  const result = await buildMappings(
+    client,
+    DISCOVERED,
+    undefined,
+    scripted({
+      select: ['proj-1', 'proj-2'],
+      checkbox: [[], ['/repos/beta']],
+      input: [''], // Slack, asked only for the mapping that survived
+      confirm: [true /* addAnother */, false /* wantsOverrides */, false /* addAnother */],
+    }),
+    sink,
+  );
+
+  assert.equal(result.length, 1, 'exactly one mapping survives');
+  assert.equal(result[0]?.key.id, 'proj-2', 'and it is the second one');
+  assert.deepEqual(result[0]?.repos, ['/repos/beta']);
+});
+
+test('buildMappings: re-run "edit repos" with an empty selection keeps the existing repos', async () => {
+  // Never a silent clear: "remove" is the action that already exists for that intent.
+  const client = fakeLinearClient([], []);
+  const existingRepos = ['/repos/alpha', '/repos/beta'];
+  const existingMapping: Mapping = {
+    key: { kind: 'project', id: 'proj-1', name: 'Project One' },
+    repos: existingRepos,
+  };
+  const out = lines();
+
+  const result = await buildMappings(
+    client,
+    DISCOVERED,
+    [existingMapping],
+    scripted({ select: ['edit-repos'], checkbox: [[]], confirm: [false] }),
+    out.report,
+  );
+
+  assert.equal(result.length, 1);
+  assert.deepEqual(result[0]?.repos, existingRepos, 'byte-identical to the input');
+  assert.ok(
+    out.all.some((l) => l.includes('choose "remove"')),
+    `the operator must be pointed at the action that does remove it; got ${JSON.stringify(out.all)}`,
+  );
+});

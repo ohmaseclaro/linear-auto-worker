@@ -165,6 +165,17 @@ export async function runSetupWizard(deps: WizardDeps = {}): Promise<number> {
     report,
   );
 
+  // A mapping with no repos is not a usable setup, and it is not a writable config either:
+  // `ConfigSchema` requires `repos` to be non-empty, so the wizard would write a file its
+  // own loader then rejects. Halt HERE, before `writeConfig`, not after.
+  if (mappings.length === 0) {
+    return fail(
+      'Mapping',
+      'no mapping has any repos — re-run `law setup` and select at least one repo for a mapping',
+      report,
+    );
+  }
+
   // ── 5. Repo safety (D-03/D-07/D-09) — warnings never halt ──────────────────
   const safety = await annotateRepoSafety(mappings, { run, prompts, report });
   for (const warning of safety.warnings) printWarning(warning, report);

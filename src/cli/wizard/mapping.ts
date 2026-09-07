@@ -244,8 +244,11 @@ function repoChoices(repos: DiscoveredRepo[]): { name: string; value: string }[]
  * Pick the repos for one mapping.
  *
  * Small sets go straight to the checkbox they always did. Large sets get a filter loop in
- * front of it: type a substring, pick from the matches, repeat; blank finishes (possibly
- * with nothing selected — `[]` is a valid mapping and the operator's way out of the loop).
+ * front of it: type a substring, pick from the matches, repeat; blank finishes. Blank stays
+ * the operator's way out of the loop, so `[]` is still a possible RETURN here — it is just
+ * not a valid mapping. `promptOneMapping` discards a mapping that ends up with no repos and
+ * `reviewExistingMapping` refuses to clear one, so nothing downstream ever sees `repos: []`.
+ * (It used to, and `loadConfig` then rejected the config the wizard had just written.)
  * Already-selected repos leave the candidate pool, so `remaining.length > 0` ends the loop
  * on its own if the operator exhausts it. Trade-off: no de-selecting on a later pass; the
  * re-run's "edit repos" action is where you take one back off.
@@ -376,16 +379,30 @@ async function promptSlackAndToggles(p: WizardPrompts): Promise<{
   return { slackWebhookUrl, toggles };
 }
 
-/** One full mapping's prompt sequence: key, repos, Slack + toggles. Shared by the fresh-add
- *  loop and (per-field) by the re-run edit paths — see `reviewExistingMapping`. */
+/**
+ * One full mapping's prompt sequence: key, repos, Slack + toggles. Shared by the fresh-add
+ * loop and (per-field) by the re-run edit paths — see `reviewExistingMapping`.
+ *
+ * Returns `null` when the operator selected no repos. D6: REFUSED, never re-prompted in a
+ * loop — a `while (repos.length === 0)` retry spins forever against a stub that keeps
+ * returning `[]`, and refusal is deterministic from both sides (the operator gets a named
+ * reason, the caller gets a value).
+ */
 async function promptOneMapping(
   candidates: { teams: TeamCandidate[]; projects: ProjectCandidate[] },
   discovered: DiscoveredRepo[],
   p: WizardPrompts,
   report: Report,
-): Promise<Mapping> {
+): Promise<Mapping | null> {
   const key = await promptMappingKey(candidates, p);
   const repos = await promptRepoSelection(discovered, p, report);
+  if (repos.length === 0) {
+    report(
+      'a mapping with no repos cannot be saved — the daemon would have nothing to work in; ' +
+        'mapping discarded',
+    );
+    return null;
+  }
   const { slackWebhookUrl, toggles } = await promptSlackAndToggles(p);
   return { key, repos, slackWebhookUrl, toggles };
 }
@@ -440,6 +457,13 @@ async function reviewExistingMapping(
   if (action === 'remove') return null;
   if (action === 'edit-repos') {
     const repos = await promptRepoSelection(discovered, p, report);
+    // Never a silent clear. An empty selection here means "I changed my mind", not "delete
+    // the repos and keep the mapping" — and the config the wizard writes has to stay one
+    // `loadConfig` accepts. "remove" is the action that already exists for the other intent.
+    if (repos.length === 0) {
+      report('no repos selected — keeping the existing ones; to remove this mapping entirely, choose "remove"');
+      return mapping;
+    }
     return { ...mapping, repos };
   }
   // 'edit-slack'
@@ -478,12 +502,14 @@ export async function buildMappings(
       if (outcome) result.push(outcome);
     }
   } else {
-    result.push(await promptOneMapping(candidates, discovered, p, report));
+    const first = await promptOneMapping(candidates, discovered, p, report);
+    if (first) result.push(first);
   }
 
   let addMore = await p.confirm({ message: 'Add another mapping?', default: false });
   while (addMore) {
-    result.push(await promptOneMapping(candidates, discovered, p, report));
+    const next = await promptOneMapping(candidates, discovered, p, report);
+    if (next) result.push(next);
     addMore = await p.confirm({ message: 'Add another mapping?', default: false });
   }
 
