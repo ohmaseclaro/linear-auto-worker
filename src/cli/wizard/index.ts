@@ -218,8 +218,20 @@ export async function runSetupWizard(deps: WizardDeps = {}): Promise<number> {
     ...(operatorUserId ? { operatorUserId } : {}),
     existing: existingConfig,
   });
-  await writeConfig(configPath, config);
-  report(`✓ Config: written to ${configPath}`);
+  // `writeConfig` validates against `loadConfig`'s own schema and refuses rather than
+  // writing a file the daemon will reject at boot. Surfaced as a named fix, never a stack.
+  try {
+    await writeConfig(configPath, config);
+  } catch (err) {
+    return fail(
+      'Config',
+      `the assembled config is not valid and was NOT written: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+      report,
+    );
+  }
+  report(`✓ Config: written to ${configPath} (mode 0600)`);
 
   // ── 7. Register the webhook — the step that makes setup mean something ──────
   // Called UNCONDITIONALLY. It registers rather than merely validating, because

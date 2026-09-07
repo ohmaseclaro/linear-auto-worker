@@ -14,11 +14,14 @@
  *    `config.json` is read field by field through type guards; anything unrecognised or
  *    wrongly-typed falls back to the default rather than propagating garbage forward.
  *
- * No secret ever reaches this file (D-08). `LINEAR_API_KEY` and `NGROK_AUTHTOKEN` live in
- * the mode-0600 `.env` beside it, and the webhook signing secret lives in SQLite.
+ * Neither PROMPTED secret reaches this file (D-08): `LINEAR_API_KEY` and `NGROK_AUTHTOKEN`
+ * live in the mode-0600 `.env` beside it, and the webhook signing secret lives in SQLite.
+ * The file is still mode 0600 and is NOT safe to paste — a mapping's `slackWebhookUrl` is a
+ * bearer credential, and anyone holding it can post to that channel.
  */
-import { mkdir, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
+import * as z from 'zod';
 
 import {
   CONFIG_ROOT,
@@ -28,6 +31,8 @@ import {
   type ProjectMapping,
   type RepoMapping,
 } from '../../domain/index.js';
+import { ConfigError } from '../../domain/errors.js';
+import { ConfigSchema } from '../../infra/config.js';
 import type { Mapping, ToggleName, ToggleOverrides } from './mapping.js';
 import type { EnrichedMapping, RepoSafetyInfo } from './repo-safety.js';
 
@@ -369,11 +374,40 @@ export function assembleConfig(input: AssembleConfigInput): Config {
   return config;
 }
 
-/** Write `config.json`, creating `~/.linear-auto-worker/` if it is not there yet (D-06). */
+/**
+ * Write `config.json`, creating `~/.linear-auto-worker/` if it is not there yet (D-06).
+ *
+ * ## It validates against the loader's own schema first
+ *
+ * The wizard wrote a config `loadConfig` throws on, and nothing noticed until `law start`
+ * three days later. `ConfigSchema` is the daemon's gate; running it HERE, at the one funnel
+ * every config write goes through, is what makes that impossible rather than unlikely —
+ * for the zero-repo case today and for whatever field is added next. Nothing is written
+ * when it fails.
+ *
+ * ## It is mode 0600, and it is NOT secret-free
+ *
+ * A mapping's `slackWebhookUrl` is a bearer credential: anyone who can read it can post to
+ * that channel. Three places in this repo claimed the opposite and all three were wrong.
+ * The two PROMPTED secrets do still live only in `.env` — that part was always true.
+ *
+ * `mode` on `writeFile` applies only at CREATION, so the `chmod` is the load-bearing half:
+ * the operator already has a 0644 file on disk that this has to repair.
+ */
 export async function writeConfig(configPath: string, config: Config): Promise<void> {
+  const result = ConfigSchema.safeParse(config);
+  if (!result.success) {
+    throw new ConfigError(
+      `refusing to write an invalid config to ${configPath}:\n${z.prettifyError(result.error)}`,
+    );
+  }
+
   await mkdir(dirname(configPath), { recursive: true });
   // Pretty-printed: the operator is expected to read this file, and is explicitly NOT
-  // expected to hand-edit it (SETUP-05). It carries no secret (D-08), so it is the file
-  // they can safely paste when asking for help.
-  await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
+  // expected to hand-edit it (SETUP-05).
+  await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`, {
+    encoding: 'utf8',
+    mode: 0o600,
+  });
+  await chmod(configPath, 0o600);
 }

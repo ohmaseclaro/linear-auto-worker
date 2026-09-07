@@ -260,10 +260,13 @@ export interface ProjectMapping {
 /**
  * The whole of `config.json`.
  *
- * No secret-bearing field appears here, and none may be added (D-08). `LINEAR_API_KEY`
- * and `NGROK_AUTHTOKEN` live in a mode-0600 `.env` beside `config.json`, so the file an
- * operator would naturally paste when asking for help carries no credential. The Phase 8
- * wizard and the Phase 2 logger redaction list both encode this.
+ * Neither PROMPTED secret appears here, and neither may be added (D-08): `LINEAR_API_KEY`
+ * and `NGROK_AUTHTOKEN` live in a mode-0600 `.env` beside `config.json`.
+ *
+ * This file is NOT credential-free, and it used to say it was. A mapping's
+ * `slackWebhookUrl` is a bearer secret — posting to that channel needs nothing else — so
+ * `config.json` is written mode 0600 and is not a file an operator can safely paste when
+ * asking for help. Strip the Slack URLs first.
  */
 export interface Config {
   botUserId: string;

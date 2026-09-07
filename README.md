@@ -65,7 +65,8 @@ law --help
 Everything lives in `~/.linear-auto-worker/`:
 
 ```
-config.json     the project→repo map and behaviour toggles
+config.json     the project→repo map and behaviour toggles, mode 0600
+                (a mapping's Slack webhook URL is a posting credential)
 .env            LINEAR_API_KEY and NGROK_AUTHTOKEN, mode 0600
 *.db            SQLite: run queue, pending questions, delivery dedupe, kv
 logs/

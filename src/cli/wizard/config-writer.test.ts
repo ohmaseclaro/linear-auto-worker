@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
+import { chmodSync, existsSync, statSync, writeFileSync } from 'node:fs';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
 import type { Config } from '../../domain/index.js';
+import { ConfigError } from '../../domain/errors.js';
 import {
   DEFAULT_TOGGLES,
   assembleConfig,
@@ -320,4 +322,61 @@ test('with no team anywhere in the mappings, an existing config.teamId is kept',
   const merged = assembleConfig({ mappings: [noTeam], teamId: '', existing });
 
   assert.equal(merged.teamId, 'team-old');
+});
+
+// ---------------------------------------------------------------------------
+// writeConfig: validate before writing, and write 0600 (P0 backstop + P1)
+// ---------------------------------------------------------------------------
+
+test('writeConfig REFUSES a config with a zero-repo mapping and leaves no file behind', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'law-config-'));
+  try {
+    const target = join(dir, 'config.json');
+    const config = assembleConfig({ mappings: [{ ...enriched(), repos: [] }], botUserId: 'bot-1' });
+
+    await assert.rejects(
+      () => writeConfig(target, config),
+      (err: unknown) => {
+        assert.ok(err instanceof ConfigError, `expected ConfigError, got ${String(err)}`);
+        assert.match(err.message, /repos/, 'the message must name the offending field');
+        return true;
+      },
+    );
+
+    // Nothing written: a half-written config is worse than none, and this is the exact
+    // shape the wizard put on the operator's disk.
+    assert.equal(existsSync(target), false, 'no file may exist after a refused write');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('writeConfig writes mode 0600 — config.json holds a Slack posting credential', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'law-config-'));
+  try {
+    const target = join(dir, 'config.json');
+    await writeConfig(target, assembleConfig({ mappings: [enriched()], botUserId: 'bot-1' }));
+
+    assert.equal(statSync(target).mode & 0o777, 0o600);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('writeConfig REPAIRS an existing 0644 file to 0600', async () => {
+  // `mode` on writeFile applies only at creation, so this is the case the chmod exists for
+  // — and the operator already has a 0644 config.json on disk.
+  const dir = await mkdtemp(join(tmpdir(), 'law-config-'));
+  try {
+    const target = join(dir, 'config.json');
+    writeFileSync(target, '{}\n', { mode: 0o644 });
+    chmodSync(target, 0o644);
+    assert.equal(statSync(target).mode & 0o777, 0o644, 'precondition: the file starts world-readable');
+
+    await writeConfig(target, assembleConfig({ mappings: [enriched()], botUserId: 'bot-1' }));
+
+    assert.equal(statSync(target).mode & 0o777, 0o600);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
