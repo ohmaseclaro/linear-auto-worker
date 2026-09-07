@@ -56,6 +56,17 @@ export interface Store {
   updateRun(id: RunId, patch: Partial<Run>): void;
   /** Non-terminal runs for an issue. */
   findActiveRunByIssue(issueId: IssueId): Run[];
+  /**
+   * EVERY run row for an issue, terminal included, ticket parents included.
+   * ORDER BY createdAt DESC, matching its sibling.
+   *
+   * This is the *history* question -- "has this issue ever been attempted" -- against
+   * `findActiveRunByIssue`'s *liveness* question -- "is a session running on it right
+   * now". They are not interchangeable, and reaching for the liveness one to answer the
+   * history question is exactly what let the reconciliation poll re-run a `delivered`
+   * ticket once a minute, forever (T107).
+   */
+  findRunsByIssue(issueId: IssueId): Run[];
   listByState(...s: RunState[]): Run[];
   /** ORDER BY createdAt. */
   nextQueued(limit: number): Run[];

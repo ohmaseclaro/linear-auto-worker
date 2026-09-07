@@ -106,6 +106,10 @@ export class InMemoryStore implements Store {
       return !isTerminal(r.state);
     });
   }
+  /** Every run for the issue, terminal included: the history question (T107). */
+  findRunsByIssue(issueId: IssueId): Run[] {
+    return this.allRuns().filter((r) => r.issueId === issueId);
+  }
   listByState(...s: RunState[]): Run[] {
     return this.allRuns().filter((r) => r.kind === 'repo' && s.includes(r.state));
   }

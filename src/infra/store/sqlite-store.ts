@@ -98,6 +98,9 @@ export interface Store {
    * distinct here so a future reader cannot miss it.
    */
   findActiveRunByIssue(issueId: string): RunRow[];
+  /** Every row for the issue, no state filter: the *history* question, not the liveness
+   *  one. See the `Store` port for why the distinction is load-bearing (T107). */
+  findRunsByIssue(issueId: string): RunRow[];
   listByState(...states: string[]): RunRow[];
   nextQueued(limit: number): RunRow[];
   childRuns(parentRunId: string): RunRow[];
@@ -218,6 +221,12 @@ export function createSqliteStore(db: Database.Database): Store {
              AND state NOT IN ('delivered', 'partial', 'failed', 'cancelled')
            ORDER BY created_at DESC`
         )
+        .all(issueId);
+      return rowsToCamel<RunRow>(rows);
+    },
+    findRunsByIssue(issueId) {
+      const rows = db
+        .prepare('SELECT * FROM runs WHERE issue_id = ? ORDER BY created_at DESC')
         .all(issueId);
       return rowsToCamel<RunRow>(rows);
     },

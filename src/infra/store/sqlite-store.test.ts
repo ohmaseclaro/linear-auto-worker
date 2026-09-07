@@ -134,6 +134,29 @@ test('findActiveRunByIssue: terminal-value filter, not a transition check', () =
   assert.deepEqual(store.findActiveRunByIssue('ENG-8'), []);
 });
 
+test('findRunsByIssue: the history question — every row for the issue, terminals included', () => {
+  const { store } = freshStore();
+  store.insertRun(makeRun({ id: 'run-open', issueId: 'ENG-9', state: 'queued' }));
+  store.insertRun(makeRun({ id: 'run-done', issueId: 'ENG-9', state: 'delivered' }));
+  store.insertRun(makeRun({ id: 'run-other', issueId: 'ENG-8', state: 'delivered' }));
+
+  assert.deepEqual(
+    store
+      .findRunsByIssue('ENG-9')
+      .map((r) => r.id)
+      .sort(),
+    ['run-done', 'run-open'],
+    'history: every row, terminal or not',
+  );
+  assert.equal(store.findActiveRunByIssue('ENG-9').length, 1, 'liveness: only the queued one');
+  assert.equal(
+    store.findRunsByIssue('ENG-9').some((r) => r.id === 'run-other'),
+    false,
+    "another issue's run is in neither answer",
+  );
+  assert.deepEqual(store.findActiveRunByIssue('ENG-8'), []);
+});
+
 test('listByState() and nextQueued() filter and cap as named', () => {
   const { store } = freshStore();
   store.insertRun(makeRun({ id: 'run-a', state: 'queued', createdAt: 1 }));

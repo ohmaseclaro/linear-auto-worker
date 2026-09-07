@@ -74,6 +74,7 @@ export function asDomainStore(raw: RowStore): DomainStore {
     },
     updateRun: (id: RunId, patch: Partial<Run>) => raw.updateRun(id, toRow(patch) as Partial<RunRow>),
     findActiveRunByIssue: (issueId: IssueId) => raw.findActiveRunByIssue(issueId).map(toRun),
+    findRunsByIssue: (issueId: IssueId) => raw.findRunsByIssue(issueId).map(toRun),
     listByState: (...s: RunState[]) => raw.listByState(...s).map(toRun),
     nextQueued: (limit: number) => raw.nextQueued(limit).map(toRun),
     childRuns: (parentId: RunId) => raw.childRuns(parentId).map(toRun),

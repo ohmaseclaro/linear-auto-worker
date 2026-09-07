@@ -99,6 +99,33 @@ test('InMemoryStore.findActiveRunByIssue excludes terminal runs', () => {
   );
 });
 
+test('InMemoryStore.findRunsByIssue answers the history question, terminals included', () => {
+  const store = new InMemoryStore();
+  store.insertRun(makeRepoRun({ id: 'r-open', state: 'running' }));
+  store.insertRun(makeRepoRun({ id: 'r-done', state: 'delivered' }));
+  store.insertRun(makeRepoRun({ id: 'r-other', issueId: 'issue-2', state: 'delivered' }));
+
+  assert.deepEqual(
+    store
+      .findRunsByIssue('issue-1')
+      .map((r) => r.id)
+      .sort(),
+    ['r-done', 'r-open'],
+    'history: every row, terminal or not',
+  );
+  assert.deepEqual(
+    store.findActiveRunByIssue('issue-1').map((r) => r.id),
+    ['r-open'],
+    'liveness: only the non-terminal one',
+  );
+  assert.equal(
+    store.findRunsByIssue('issue-1').some((r) => r.id === 'r-other'),
+    false,
+    "another issue's run is in neither answer",
+  );
+  assert.deepEqual(store.findActiveRunByIssue('issue-2'), []);
+});
+
 test("FakeConfigLoader's fixture resolves a sparse override over the defaults (CONF-01/02, D-07, D-09)", async () => {
   const loader = new FakeConfigLoader();
   const config = await loader.load();
