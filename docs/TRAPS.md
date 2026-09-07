@@ -409,6 +409,21 @@ integration check goes red. Both red means the test targets the module; neither 
 targets nothing. Running it here also caught a vacuous first attempt — the assertion passed
 against unfixed code because the setup already manufactured the same event history.
 
+**Both of the above were re-verified live after the fix, and that mattered.** Unit tests for
+a crash-recovery path are written by the same understanding that missed the bug, so the fixes
+were re-run against a real workspace: a ticket interrupted mid-flight with Ctrl-C, then the
+daemon restarted. The lines that prove it are `dispatched runs left queued by a previous
+process` followed by `queued -> preparing -> running`, and `poll observed an issue that has
+already been attempted; ignoring` across five polls reporting `enqueued:0 resumed:0`. Exactly
+one agent spawned, and one run row existed for the resumed ticket.
+
+Two things surfaced only because that re-run happened. **Creating the test ticket with the
+bot's own API key makes the bot the actor**, so its webhook is dropped as a self-event and
+pickup falls back to the reconciliation sweep up to a full tick later — a delay that reads
+exactly like broken ingress. And **worktrees are pruned at the next boot, not at delivery**,
+so a running daemon accumulates delivered worktrees; that briefly looked like a leak from the
+interrupted attempt, and is not one.
+
 ## The one that cost the most
 
 **A security control that is only tested in its own module is not known to be wired.**

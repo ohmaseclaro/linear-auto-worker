@@ -2,13 +2,13 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-current_phase: 1
-current_phase_name: Domain Contract, State Machine & Schema
+current_phase: 8
+current_phase_name: Setup Wizard & Safety Pass
 status: milestone_complete
-stopped_at: Completed 07-04-PLAN.md
-last_updated: "2026-09-06T18:45:00.380Z"
-last_activity: 2026-09-06
-last_activity_desc: Roadmap created; 70/70 v1 requirements mapped across 8 phases
+stopped_at: v1.0 shipped, published, and live-verified end to end
+last_updated: "2026-09-07T23:45:00.000Z"
+last_activity: 2026-09-07
+last_activity_desc: Live UAT re-run confirmed the T107 and T108 fixes on the real path
 progress:
   total_phases: 8
   completed_phases: 8
@@ -27,10 +27,10 @@ See: .planning/PROJECT.md (updated 2026-09-06)
 
 ## Current Position
 
-Phase: 1 of 8 (Domain Contract, State Machine & Schema)
-Plan: 0 of TBD in current phase
-Status: Ready to plan
-Last activity: 2026-09-06 — Roadmap created; 70/70 v1 requirements mapped across 8 phases
+Phase: 8 of 8 (Setup Wizard & Safety Pass) — milestone complete
+Plan: 35 of 35 complete
+Status: Shipped. Published at ohmaseclaro/linear-auto-worker (MIT, public), CI green on Node 22/24 x Ubuntu/macOS.
+Last activity: 2026-09-07 — Live UAT re-run confirmed the T107 and T108 fixes on the real path
 
 Progress: [██████████] 100%
 
@@ -77,11 +77,17 @@ Recent decisions affecting current work:
 
 ### Pending Todos
 
-None yet.
+Operator actions, not code work:
+
+- Rotate the Slack incoming-webhook URL in `~/.linear-auto-worker/config.json` — it was exposed in a working session on 2026-09-07.
+- Repoint the Instantchat mapping away from the throwaway `~/law-uat-sandbox` to the real repos (`law setup` then edit repos).
+- Delete the `ohmaseclaro/law-uat-sandbox` GitHub repo and its local clone once the UAT record is no longer wanted.
 
 ### Blockers/Concerns
 
-Research corrections that must be applied during planning (research/SUMMARY.md "Corrections to PROJECT.md"):
+All five research corrections below were applied during their phases and are closed; kept for provenance.
+
+Research corrections applied (research/SUMMARY.md "Corrections to PROJECT.md"):
 
 - ngrok free accounts have a **permanent static domain** — PROJECT.md's "random domain per boot" is wrong. The webhook URL is configuration, not a per-boot value. Affects Phase 3.
 - `@linear/sdk` v93 removed `LinearWebhooks`; use `LinearWebhookClient.createHandler()` on `node:http` with no framework. Invalid signature returns **400**, not 401. Affects Phase 3.
@@ -97,7 +103,8 @@ Items acknowledged and carried forward from previous milestone close:
 
 | Category | Item | Status | Deferred At |
 |----------|------|--------|-------------|
-| *(none)* | | | |
+| Resume semantics | An interrupted run resumes as a fresh attempt on a new branch (`-2` suffix) rather than continuing the original branch; the spent `--session-id` cannot be reused. Abandoned worktree and local branch are pruned at the next boot, verified live. | Accepted as designed | 2026-09-07 |
+| Cleanup timing | Worktree pruning is deferred to the next boot rather than running at delivery, so a long-lived daemon accumulates delivered worktrees until restart. | Open, low priority | 2026-09-07 |
 
 ## Session Continuity
 
