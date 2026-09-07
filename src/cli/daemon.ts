@@ -257,7 +257,7 @@ export function createIngressMapper(deps: { store: Store; linear: LinearClient }
   return async function toEngineEvent(e: IngressEvent): Promise<EngineEvent> {
     switch (e.kind) {
       case 'issue.assigned':
-        return { kind: 'run.requested', issueId: e.issueId };
+        return { kind: 'run.requested', trigger: 'assignment', issueId: e.issueId };
 
       case 'issue.unassigned':
         return { kind: 'run.cancelled', issueId: e.issueId, reason: 'bot unassigned in Linear' };

@@ -164,7 +164,7 @@ export interface Receiver {
  *
  * | ingress                        | engine                                       |
  * |--------------------------------|----------------------------------------------|
- * | `issue.assigned`               | `run.requested`                              |
+ * | `issue.assigned`               | `run.requested` (trigger: `assignment`)      |
  * | `issue.unassigned`             | `run.cancelled` (reason: bot unassigned)     |
  * | `comment.created` + open q.    | `question.answered` (parentId correlation)   |
  * | `comment.created`, no match    | `ignored`                                    |
@@ -176,7 +176,24 @@ export type IngressEvent =
   | { kind: 'comment.created'; issueId: IssueId; commentId: string; parentId?: string; deliveryId?: string };
 
 export type EngineEvent =
-  | { kind: 'run.requested'; issueId: IssueId }
+  /**
+   * Start a run for an issue. `trigger` names the producer's EVIDENCE CLASS, and the
+   * engine's guard keys on it — the two producers are not equally trustworthy:
+   *
+   * | trigger      | producer                 | evidence                                                    |
+   * |--------------|--------------------------|-------------------------------------------------------------|
+   * | `assignment` | webhook `issue.assigned` | an ACT, with an actor, deduped by `Linear-Delivery`          |
+   * | `reconcile`  | the reconciliation poll  | an observed STATE, which the bot's own writes keep refreshing |
+   *
+   * The poll sees "still assigned, still open" forever, and the bot's own In Progress
+   * transition and Done comment bump `issue.updatedAt`, so the watermark cannot bound it
+   * either. A poll request is therefore blocked by ANY prior run; an assignment request
+   * only by a LIVE one, so the operator's unassign→reassign retry still works (T107).
+   *
+   * Required, not optional-with-a-default: a permissive default silently reintroduces the
+   * loop and a strict one silently breaks reassignment. Required means a compile error.
+   */
+  | { kind: 'run.requested'; trigger: 'assignment' | 'reconcile'; issueId: IssueId }
   | { kind: 'run.cancelled'; issueId: IssueId; reason: string }
   | { kind: 'question.answered'; questionId: string; answer: string; authorName: string | null }
   /**

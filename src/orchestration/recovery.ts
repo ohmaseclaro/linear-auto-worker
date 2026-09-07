@@ -261,7 +261,7 @@ export async function reconcile(deps: RecoveryDeps, now: number): Promise<Reconc
       // Idempotence: three passes over one issue produce one run. This is also
       // what makes re-covering a window on failure free.
       if (store.findActiveRunByIssue(issue.id).length > 0) continue;
-      await engine.handle({ kind: 'run.requested', issueId: issue.id });
+      await engine.handle({ kind: 'run.requested', trigger: 'reconcile', issueId: issue.id });
       report.enqueued.push(issue.id);
     }
 

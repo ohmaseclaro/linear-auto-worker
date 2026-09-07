@@ -509,7 +509,7 @@ test('one ticket over three repos inserts one parent, three children, and one ac
     issues: [issueN(1)],
   });
 
-  await h.engine.handle({ kind: 'run.requested', issueId: 'issue-1' });
+  await h.engine.handle({ kind: 'run.requested', trigger: 'assignment', issueId: 'issue-1' });
 
   // The acknowledgement is per TICKET, not per child: three children must not
   // produce three ack comments, three In Progress transitions and three
@@ -541,7 +541,7 @@ test('one ticket over three repos inserts one parent, three children, and one ac
 test('a ticket mapped to one repo is unchanged: one run, no parent', async () => {
   const h = fanoutHarness({ agent: agentByRepo({ 'org/solo': DELIVERS }), issues: [issueN(2)] });
 
-  await h.engine.handle({ kind: 'run.requested', issueId: 'issue-2' });
+  await h.engine.handle({ kind: 'run.requested', trigger: 'assignment', issueId: 'issue-2' });
   await h.engine.settle();
 
   const rows = h.runsOf('issue-2');
@@ -565,7 +565,7 @@ test('three children occupy three slots, and a fourth unrelated run waits (D-03)
     concurrency: 3,
   });
 
-  await h.engine.handle({ kind: 'run.requested', issueId: 'issue-1' });
+  await h.engine.handle({ kind: 'run.requested', trigger: 'assignment', issueId: 'issue-1' });
   // Let the three drivers reach the agent, where they park on the gate.
   await new Promise((r) => setImmediate(r));
 
@@ -575,7 +575,7 @@ test('three children occupy three slots, and a fourth unrelated run waits (D-03)
     'each child is a real claude process, so each costs a slot -- the cap bounds local RAM',
   );
 
-  await h.engine.handle({ kind: 'run.requested', issueId: 'issue-2' });
+  await h.engine.handle({ kind: 'run.requested', trigger: 'assignment', issueId: 'issue-2' });
   const [fourth] = h.runsOf('issue-2');
   assert.equal(h.scheduler.positionOf(fourth.id), 1, 'the fourth run waits; the cap is not exceeded');
   assert.equal(h.scheduler.inUse(), 3);
@@ -599,7 +599,7 @@ test('a failing child leaves its delivered sibling untouched, and the ticket der
     issues: [issueN(1)],
   });
 
-  await h.engine.handle({ kind: 'run.requested', issueId: 'issue-1' });
+  await h.engine.handle({ kind: 'run.requested', trigger: 'assignment', issueId: 'issue-1' });
   await h.engine.settle();
 
   const children = h.runsOf('issue-1').filter((r) => r.kind === 'repo');
@@ -641,7 +641,7 @@ test('the parent row still carries no state after every child has settled', asyn
     issues: [issueN(1)],
   });
 
-  await h.engine.handle({ kind: 'run.requested', issueId: 'issue-1' });
+  await h.engine.handle({ kind: 'run.requested', trigger: 'assignment', issueId: 'issue-1' });
   await h.engine.settle();
 
   const parent = h.runsOf('issue-1').find((r) => r.kind === 'ticket');
@@ -660,7 +660,7 @@ test('Linear gets one rollup for the ticket, not one terminal comment per child'
     issues: [issueN(1)],
   });
 
-  await h.engine.handle({ kind: 'run.requested', issueId: 'issue-1' });
+  await h.engine.handle({ kind: 'run.requested', trigger: 'assignment', issueId: 'issue-1' });
   await h.engine.settle();
 
   // One acknowledgement plus one rollup. Three children posting three terminal
@@ -687,7 +687,7 @@ test('cancelling the ticket cancels every non-terminal child and leaves terminal
   // One slot, held by an outsider, so all three children park at `queued`.
   const releaseHolder = await h.scheduler.acquire('outsider');
 
-  await h.engine.handle({ kind: 'run.requested', issueId: 'issue-1' });
+  await h.engine.handle({ kind: 'run.requested', trigger: 'assignment', issueId: 'issue-1' });
   const children = h.runsOf('issue-1').filter((r) => r.kind === 'repo');
   assert.equal(children.length, 3);
 

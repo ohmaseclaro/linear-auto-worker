@@ -127,7 +127,7 @@ test('one run travels queued -> delivered through the Q&A detour, holding no slo
     appendRunEvent(e);
   };
 
-  await engine.handle({ kind: 'run.requested', issueId: ISSUE.id });
+  await engine.handle({ kind: 'run.requested', trigger: 'assignment', issueId: ISSUE.id });
 
   const [run] = store.findActiveRunByIssue(ISSUE.id);
   assert.ok(run, 'run.requested inserts exactly one run');
@@ -199,7 +199,7 @@ test('an issue with no repo mapping is ignored rather than inserted half-formed'
   const unmapped = { ...ISSUE, id: 'issue-2', projectId: 'proj-unknown', teamId: 'team-unknown' };
   const { store, engine, agent } = harness([COMPLETE], [unmapped]);
 
-  await engine.handle({ kind: 'run.requested', issueId: unmapped.id });
+  await engine.handle({ kind: 'run.requested', trigger: 'assignment', issueId: unmapped.id });
   await engine.settle();
 
   assert.equal(store.findActiveRunByIssue(unmapped.id).length, 0, 'no run row');

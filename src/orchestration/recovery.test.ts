@@ -402,7 +402,9 @@ test('a bot-assigned issue with no non-terminal run is enqueued (INTK-07)', asyn
   const report = await reconcile(h.deps, NOW);
 
   assert.deepEqual(report.enqueued, ['ISS-new']);
-  assert.deepEqual(h.events, [{ kind: 'run.requested', issueId: 'ISS-new' }]);
+  assert.deepEqual(h.events, [
+    { kind: 'run.requested', trigger: 'reconcile', issueId: 'ISS-new' },
+  ]);
 });
 
 test('an issue that already has a non-terminal run is not enqueued again — three passes, one run', async () => {

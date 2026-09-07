@@ -254,7 +254,7 @@ function untilState(ctx: Ctx, ...states: RunState[]): Promise<RepoRun> {
 
 test('a queued run walks preparing -> running -> delivering with an event row per move', async () => {
   await withRunPath([COMPLETE], async (ctx) => {
-    await ctx.daemon.engine.handle({ kind: 'run.requested', issueId: ISSUE_ID });
+    await ctx.daemon.engine.handle({ kind: 'run.requested', trigger: 'assignment', issueId: ISSUE_ID });
     const run = await untilState(ctx, 'delivered');
 
     // Every state the run passed through has a row, in order, and each row's `from` is the
@@ -277,7 +277,7 @@ test('a queued run walks preparing -> running -> delivering with an event row pe
 
 test('the acknowledgement and the In Progress transition precede all worktree and git work', async () => {
   await withRunPath([COMPLETE], async (ctx) => {
-    await ctx.daemon.engine.handle({ kind: 'run.requested', issueId: ISSUE_ID });
+    await ctx.daemon.engine.handle({ kind: 'run.requested', trigger: 'assignment', issueId: ISSUE_ID });
     await untilState(ctx, 'delivered');
 
     // An ORDER assertion, not a latency one (06-CONTEXT D-09). Ten seconds is the budget
@@ -294,7 +294,7 @@ test('the acknowledgement and the In Progress transition precede all worktree an
 
 test('the session id is on the run row before the spawn, and the spawn carries that same id', async () => {
   await withRunPath([COMPLETE], async (ctx) => {
-    await ctx.daemon.engine.handle({ kind: 'run.requested', issueId: ISSUE_ID });
+    await ctx.daemon.engine.handle({ kind: 'run.requested', trigger: 'assignment', issueId: ISSUE_ID });
     await untilState(ctx, 'delivered');
 
     const spawn = ctx.trace.find((s): s is Extract<Step, { at: 'spawn' }> => s.at === 'spawn');
@@ -315,7 +315,7 @@ test('the session id is on the run row before the spawn, and the spawn carries t
 
 test('neither secret reaches the child environment', async () => {
   await withRunPath([COMPLETE], async (ctx) => {
-    await ctx.daemon.engine.handle({ kind: 'run.requested', issueId: ISSUE_ID });
+    await ctx.daemon.engine.handle({ kind: 'run.requested', trigger: 'assignment', issueId: ISSUE_ID });
     await untilState(ctx, 'delivered');
 
     const spawn = ctx.trace.find((s): s is Extract<Step, { at: 'spawn' }> => s.at === 'spawn');
@@ -337,7 +337,7 @@ test('neither secret reaches the child environment', async () => {
 
 test('the worktree exists on disk at spawn time and its branch is not the default branch', async () => {
   await withRunPath([NEEDS_INPUT], async (ctx) => {
-    await ctx.daemon.engine.handle({ kind: 'run.requested', issueId: ISSUE_ID });
+    await ctx.daemon.engine.handle({ kind: 'run.requested', trigger: 'assignment', issueId: ISSUE_ID });
     // Parked rather than delivered: `delivered` is the one verdict that REMOVES the
     // worktree (AGNT-02), so asserting its existence afterwards would race the cleanup.
     await untilState(ctx, 'awaiting_answer');
@@ -359,7 +359,7 @@ test('the worktree exists on disk at spawn time and its branch is not the defaul
 
 test('needs_input parks the run and releases its slot, leaving the scheduler at full capacity', async () => {
   await withRunPath([NEEDS_INPUT], async (ctx) => {
-    await ctx.daemon.engine.handle({ kind: 'run.requested', issueId: ISSUE_ID });
+    await ctx.daemon.engine.handle({ kind: 'run.requested', trigger: 'assignment', issueId: ISSUE_ID });
     await untilState(ctx, 'awaiting_answer');
 
     // The whole reason `awaiting_answer` is absent from HOLDS_SLOT: a human takes minutes
@@ -378,7 +378,7 @@ test('needs_input parks the run and releases its slot, leaving the scheduler at 
 
 test('a throwing agent still produces a terminal state, a terminal event row and a comment', async () => {
   await withRunPath([new Error('the child died in a way nobody planned for')], async (ctx) => {
-    await ctx.daemon.engine.handle({ kind: 'run.requested', issueId: ISSUE_ID });
+    await ctx.daemon.engine.handle({ kind: 'run.requested', trigger: 'assignment', issueId: ISSUE_ID });
     const run = await untilState(ctx, 'failed');
 
     // The report is emitted from a `finally`, so it survives the path that produced no

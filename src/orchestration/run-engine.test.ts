@@ -212,7 +212,7 @@ function harness(opts: {
 test('acknowledgement, In Progress and the subscription all happen before any worktree work', async () => {
   const { engine, linear, spy, store } = harness({ script: [COMPLETE], issues: [issue(1)] });
 
-  await engine.handle({ kind: 'run.requested', issueId: 'issue-1' });
+  await engine.handle({ kind: 'run.requested', trigger: 'assignment', issueId: 'issue-1' });
 
   // The three Linear calls are already done when `handle` returns. The claim
   // that nothing reached the worktree first is enforced by the spy itself,
@@ -240,7 +240,7 @@ test('acknowledgement, In Progress and the subscription all happen before any wo
 test('the ack comment id is persisted, so a restart edits rather than re-posts', async () => {
   const { engine, store, linear } = harness({ script: [COMPLETE], issues: [issue(1)] });
 
-  await engine.handle({ kind: 'run.requested', issueId: 'issue-1' });
+  await engine.handle({ kind: 'run.requested', trigger: 'assignment', issueId: 'issue-1' });
 
   const [run] = store.findActiveRunByIssue('issue-1');
   const saved = JSON.parse(store.kvGet(`ack:${run.id}`)!);
@@ -258,7 +258,7 @@ test('a queued run is acknowledged with its position, and three position changes
   const releaseHolder = await h.scheduler.acquire('outsider');
 
   for (let i = 1; i <= 5; i++) {
-    await h.engine.handle({ kind: 'run.requested', issueId: `issue-${i}` });
+    await h.engine.handle({ kind: 'run.requested', trigger: 'assignment', issueId: `issue-${i}` });
   }
 
   const [last] = h.store.findActiveRunByIssue('issue-5');
@@ -299,7 +299,7 @@ test('a Linear outage during acknowledgement is swallowed and the run still ship
     failCreate: true,
   });
 
-  await engine.handle({ kind: 'run.requested', issueId: 'issue-1' });
+  await engine.handle({ kind: 'run.requested', trigger: 'assignment', issueId: 'issue-1' });
   await engine.settle();
 
   const [run] = store.listByState('delivered');
@@ -321,7 +321,7 @@ test('cancel from a state with no live child transitions immediately', async () 
   const h = harness({ script: [COMPLETE], issues: [issue(1)], concurrency: 1 });
   const releaseHolder = await h.scheduler.acquire('outsider');
 
-  await h.engine.handle({ kind: 'run.requested', issueId: 'issue-1' });
+  await h.engine.handle({ kind: 'run.requested', trigger: 'assignment', issueId: 'issue-1' });
   const [run] = h.store.findActiveRunByIssue('issue-1');
   assert.equal(h.store.getRun(run.id)!.state, 'queued');
 
@@ -340,7 +340,7 @@ test('cancel from a state with no live child transitions immediately', async () 
 test('cancel from awaiting_answer transitions and closes the open question', async () => {
   const h = harness({ script: [NEEDS_INPUT], issues: [issue(1)] });
 
-  await h.engine.handle({ kind: 'run.requested', issueId: 'issue-1' });
+  await h.engine.handle({ kind: 'run.requested', trigger: 'assignment', issueId: 'issue-1' });
   await h.engine.settle();
 
   const [run] = h.store.findActiveRunByIssue('issue-1');
@@ -359,7 +359,7 @@ test('cancel from a state with a live child sets a flag instead of transitioning
   const h = harness({ script: [COMPLETE], issues: [issue(1)], concurrency: 1 });
   await h.scheduler.acquire('outsider');
 
-  await h.engine.handle({ kind: 'run.requested', issueId: 'issue-1' });
+  await h.engine.handle({ kind: 'run.requested', trigger: 'assignment', issueId: 'issue-1' });
   const [run] = h.store.findActiveRunByIssue('issue-1');
 
   // Fabricate the live-child state directly: the point under test is the
@@ -387,7 +387,7 @@ test('cancel from a state with a live child sets a flag instead of transitioning
 test('cancel from a terminal state is a no-op, not an error', async () => {
   const h = harness({ script: [COMPLETE], issues: [issue(1)] });
 
-  await h.engine.handle({ kind: 'run.requested', issueId: 'issue-1' });
+  await h.engine.handle({ kind: 'run.requested', trigger: 'assignment', issueId: 'issue-1' });
   await h.engine.settle();
 
   const [run] = h.store.listByState('delivered');
@@ -407,7 +407,7 @@ test('cancel is accepted from every non-terminal state in the table', async () =
     if (RUN_STATE_TABLE[state].terminal) continue;
     const h = harness({ script: [COMPLETE], issues: [issue(1)], concurrency: 1 });
     await h.scheduler.acquire('outsider');
-    await h.engine.handle({ kind: 'run.requested', issueId: 'issue-1' });
+    await h.engine.handle({ kind: 'run.requested', trigger: 'assignment', issueId: 'issue-1' });
     const [run] = h.store.findActiveRunByIssue('issue-1');
 
     h.store.updateRun(run.id, { state });
@@ -426,7 +426,7 @@ test('a failed run posts one diagnosis with the error and log path, and keeps it
     issues: [issue(1)],
   });
 
-  await h.engine.handle({ kind: 'run.requested', issueId: 'issue-1' });
+  await h.engine.handle({ kind: 'run.requested', trigger: 'assignment', issueId: 'issue-1' });
   await h.engine.settle();
 
   const [run] = h.store.listByState('failed');
@@ -444,7 +444,7 @@ test('nothing AUTOMATIC moves a run out of failed', async () => {
   const failed = { status: 'failed' as const, summary: 'nope', failureReason: 'tsc exited 2' };
   const h = harness({ script: [failed, failed], issues: [issue(1)] });
 
-  await h.engine.handle({ kind: 'run.requested', issueId: 'issue-1' });
+  await h.engine.handle({ kind: 'run.requested', trigger: 'assignment', issueId: 'issue-1' });
   await h.engine.settle();
   const [run] = h.store.listByState('failed');
 
@@ -473,7 +473,7 @@ test('nothing AUTOMATIC moves a run out of failed', async () => {
   // a terminal row is not a live one. This case originally listed `run.requested` among the
   // levers that "may not" restart it and asserted one diagnosis while producing two; the
   // guard against an automatic retry loop is the reconciliation watermark, not this check.
-  await h.engine.handle({ kind: 'run.requested', issueId: 'issue-1' });
+  await h.engine.handle({ kind: 'run.requested', trigger: 'assignment', issueId: 'issue-1' });
   await h.engine.settle();
 
   assert.equal(h.store.getRun(run.id)!.state, 'failed', 'the ORIGINAL run was never revived');
@@ -491,7 +491,7 @@ test('a throw in the delivering path still produces exactly one terminal emissio
     throw new Error('git push rejected: non-fast-forward\nheaders: <redacted>');
   };
 
-  await h.engine.handle({ kind: 'run.requested', issueId: 'issue-1' });
+  await h.engine.handle({ kind: 'run.requested', trigger: 'assignment', issueId: 'issue-1' });
   await h.engine.settle();
 
   const [run] = h.store.listByState('failed');

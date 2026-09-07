@@ -213,7 +213,7 @@ test('FakeScheduler.syncFromStore recomputes admitted count from holdsSlot state
 
 test('FakeRunEngine records handled events and recover/drain calls', async () => {
   const engine = new FakeRunEngine();
-  await engine.handle({ kind: 'run.requested', issueId: 'issue-1' });
+  await engine.handle({ kind: 'run.requested', trigger: 'assignment', issueId: 'issue-1' });
   await engine.recover();
   await engine.drain(5000);
   assert.equal(engine.handled.length, 1);
