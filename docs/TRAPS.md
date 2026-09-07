@@ -1,6 +1,6 @@
 # Traps
 
-Ninety footguns found while building this daemon, kept as a running ledger so no two
+Ninety-one footguns found while building this daemon, kept as a running ledger so no two
 parallel work streams had to rediscover the same one.
 
 **Every entry here was measured, not recalled.** Versions come from the npm registry, API
@@ -15,7 +15,7 @@ spawn processes, several of them will cost you an afternoon each.
 Measured against: `@linear/sdk@93.0.1`, `@ngrok/ngrok@1.7.0`, `better-sqlite3@13.0.3`,
 `execa@10.0.1`, Claude Code CLI `2.1.259`, `gh` `2.98.0`, Node `22.23.1`, macOS.
 
-The complete internal ledger — all 90 rows with per-phase attribution and the evidence for
+The complete internal ledger — all 91 rows with per-phase attribution and the evidence for
 each — is in [`.planning/TRAPS.md`](../.planning/TRAPS.md). This page is the subset that
 generalises.
 
@@ -234,6 +234,16 @@ line: `slackToken: "${'xox' + 'b'}-1111111111-2222222222-${'a'.repeat(24)}",`,
 
 Then break it once and confirm the case goes red, or you have changed a passing test into a
 differently passing test. It does: 21 pass / 1 fail with the prefix broken, 22 / 0 restored.
+
+**A test that boots your app may be reading credentials you forgot it needs.** Two of the
+three integration suites here called `bootDaemon` without injecting a fake command runner, so
+boot's preflight shelled out to the developer's real, authenticated `gh`. Locally: 511/511.
+On the first CI run: 14 failures on all four matrix legs, with an error
+(`law start: gh is not usable`) that reads like a product bug rather than a harness one.
+Reproduce it before you have CI by putting a shim that exits 1 first on `PATH` — measured
+0/14 with the shim, 14/14 without, and 511/511 with the shim after the fix. Keep CI
+*unauthenticated* on purpose: adding a token would make those tests pass again without
+fixing anything.
 
 **Scan your own history before you create the repository, and scan it the way GitHub
 does.** A grep for high-entropy patterns over the working tree is not enough — a public repo

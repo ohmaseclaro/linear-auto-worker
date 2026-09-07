@@ -27,6 +27,7 @@ import {
   BOT_USER_ID,
   ISSUE_ID,
   makeWorkspace,
+  okTools,
   postDelivery,
   probingTunnel,
   RecordingLinear,
@@ -70,6 +71,8 @@ async function withDaemon(fn: (ctx: Ctx) => Promise<void>): Promise<void> {
     configDir: workspace.dir,
     linear,
     tunnel: probingTunnel(),
+    // Without this, boot's preflight runs the operator's real `gh` — see `okTools`.
+    runCommand: okTools,
   });
   // Boot starts the scheduler (07-05). This file is about ingress REACHING persistence, and
   // every assertion below reads `queued` or counts rows; leaving the driver running means

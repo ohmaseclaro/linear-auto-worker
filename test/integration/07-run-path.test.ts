@@ -30,6 +30,7 @@ import {
   ISSUE_ID,
   makeScratchRepo,
   makeWorkspace,
+  okTools,
   probingTunnel,
   RecordingLinear,
   smokeIssue,
@@ -193,6 +194,8 @@ async function withRunPath(
     configDir: workspace.dir,
     linear,
     tunnel: probingTunnel(),
+    // Without this, boot's preflight runs the operator's real `gh` — see `okTools`.
+    runCommand: okTools,
     agent,
     deliverer,
   });

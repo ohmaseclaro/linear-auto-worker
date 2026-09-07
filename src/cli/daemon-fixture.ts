@@ -24,10 +24,34 @@ import { LINEAR_WEBHOOK_SIGNATURE_HEADER } from '@linear/sdk/webhooks';
 
 import { FakeLinearClient } from '../domain/fakes.js';
 import type { IssueId, LinearIssue, TunnelManager } from '../domain/ports.js';
-import { defaultRunCommand } from '../execution/execute-run.js';
+import { defaultRunCommand, type RunCommand } from '../execution/execute-run.js';
 import { createSqliteStore } from '../infra/store/sqlite-store.js';
 import { openStore } from '../infra/store/db.js';
 import { KEY_SECRET } from '../ingress/registrar.js';
+
+/**
+ * Preflight must not consult the operator's real `gh` or `claude` — but `git` MUST be real.
+ *
+ * **Every `bootDaemon` in a test needs this.** `bootDaemon` runs a real preflight that
+ * shells out to `gh auth status`, so a suite that omits it passes on a developer's machine
+ * and fails on any box without an authenticated `gh`. That is exactly what happened: the
+ * first CI run of this repository failed 14 tests across the two integration suites that
+ * had no `runCommand`, while the same commit passed locally. Reproduced by putting a `gh`
+ * shim that exits 1 first on `PATH` — 0/14 with it, 14/14 without.
+ *
+ * This slot is not preflight-only: `BootOptions.runCommand` also reaches the worktree
+ * manager and the deliverer. A blanket `exitCode: 0` therefore answers "yes" to
+ * `git show-ref --verify refs/heads/<branch>`, so every candidate branch reads as already
+ * taken and `prepareWorktree` dies with "could not find a free branch name ... after 50
+ * attempts" — before any agent is spawned (TRAPS T87). That is why three process-group
+ * cases timed out on the milestone's first gate run: nothing was ever spawned to reap.
+ *
+ * `git` is local and the fixtures' repositories are real, so it runs for real.
+ */
+export const okTools: RunCommand = (file, args, options) =>
+  file === 'git'
+    ? defaultRunCommand(file, args, options)
+    : Promise.resolve({ exitCode: 0, stdout: '', stderr: '' });
 
 export const BOT_USER_ID = 'bot-user-id';
 export const TEAM_ID = 'T-smoke';

@@ -43,4 +43,11 @@ jobs:
 
       # The single canonical gate: clean, tsc, copy non-TS assets, every test, boot smoke.
       # Identical to what a contributor runs locally — see CONTRIBUTING.md.
+      #
+      # Deliberately NO `GH_TOKEN` / `gh auth` step, and deliberately no Linear or ngrok
+      # credentials. `bootDaemon` runs a real preflight that shells out to `gh auth status`,
+      # so an unauthenticated runner is what keeps every test honest about injecting its own
+      # tool runner. The first CI run here failed 14 tests for exactly that reason while the
+      # same commit passed locally (TRAPS T91). Adding credentials would make those tests
+      # pass again without fixing anything — do not.
       - run: npm run verify

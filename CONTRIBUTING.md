@@ -63,7 +63,7 @@ verified it. This is the part of the repository most likely to be useful to a st
 ## Planning artifacts
 
 `.planning/` holds the full record of how this was built — requirements, per-phase context
-and plans, verification reports, and the raw 90-row traps ledger. It is kept deliberately.
+and plans, verification reports, and the raw 91-row traps ledger. It is kept deliberately.
 You do not need to read it to contribute, and you are not expected to add to it.
 
 ## Pull requests
