@@ -19,6 +19,25 @@ const DISCOVERED: DiscoveredRepo[] = [
 ];
 
 /**
+ * 30 repos — over `promptRepoSelection`'s filter threshold, and the reason the threshold
+ * exists: at inquirer's default `pageSize` of 7 this is already five pages of arrowing.
+ */
+const MANY: DiscoveredRepo[] = ['alpha', 'beta', 'gamma'].flatMap((prefix) =>
+  Array.from({ length: 10 }, (_, i) => ({ path: `/repos/${prefix}-${i}`, name: `${prefix}-${i}` })),
+);
+
+/** Swallows library output. Every case passes one: a `console.log` racing `node --test`'s
+ *  worker teardown produces "Unable to deserialize cloned data" with nothing to point at. */
+const sink = (): void => {};
+
+/** The re-run "edit repos" action calls the same `promptRepoSelection` as a fresh add, and
+ *  nothing else on that path consumes `input`/`checkbox` — so a case driving it can leave a
+ *  queue empty and have an unexpected prompt call reject rather than silently pass. */
+function editReposMapping(): Mapping {
+  return { key: { kind: 'project', id: 'proj-1', name: 'Project One' }, repos: [] };
+}
+
+/**
  * Minimal stand-in for the two `LinearClient` connections this module pages. `teams`/
  * `projects` mirror the real SDK's `{first, after}` → `{nodes, pageInfo}` connection shape;
  * each project node exposes its own `teams()` connection, matching `SdkProjectNode`.
@@ -160,6 +179,7 @@ test('buildMappings: builds one mapping and stops when the operator declines ano
       input: [''],
       confirm: [false /* wantsOverrides */, false /* addAnother */],
     }),
+    sink,
   );
 
   assert.equal(result.length, 1);
@@ -198,6 +218,7 @@ test('buildMappings: builds two mappings when the operator opts to add another',
         false /* add another? */,
       ],
     }),
+    sink,
   );
 
   assert.equal(result.length, 2);
@@ -219,6 +240,7 @@ test('buildMappings: re-run "keep as-is" leaves an existing mapping byte-identic
     DISCOVERED,
     [existingMapping],
     scripted({ select: ['keep'], confirm: [false /* add another? */] }),
+    sink,
   );
 
   assert.equal(result.length, 1);
@@ -243,6 +265,7 @@ test('buildMappings: re-run "edit repos" changes only that mapping\'s repos', as
       checkbox: [['/repos/beta']],
       confirm: [false /* add another? */],
     }),
+    sink,
   );
 
   assert.equal(result.length, 1);
@@ -271,6 +294,7 @@ test('buildMappings: a mapping with no toggle overrides selected has no override
       input: [''],
       confirm: [true /* wantsOverrides */, false /* add another? */],
     }),
+    sink,
   );
 
   assert.equal(result.length, 1);
@@ -300,6 +324,7 @@ test('buildMappings: selecting exactly one toggle overrides only that key, spars
         false /* add another? */,
       ],
     }),
+    sink,
   );
 
   assert.equal(result.length, 1);
@@ -356,4 +381,128 @@ test('buildMappings: re-run review prints the existing mapping through the sink,
     reported.some((line) => line.includes('hooks.slack.com/…')),
     'the webhook URL is still masked to host-only on the sink path',
   );
+});
+
+test('promptRepoSelection: a small repo set still goes straight to one checkbox, unfiltered', async () => {
+  const seen = collector();
+
+  const result = await buildMappings(
+    fakeLinearClient([], []),
+    DISCOVERED,
+    [editReposMapping()],
+    // No `input` queued at all: if the filter loop ran on a 2-repo set, `input()` rejects.
+    scripted({ select: ['edit-repos'], checkbox: [['/repos/alpha']], confirm: [false] }, seen),
+    sink,
+  );
+
+  assert.equal(seen.checkbox.length, 1, 'exactly one checkbox, no filter round-trip');
+  assert.deepEqual(
+    seen.checkbox[0]?.choices.map((c) => c.value),
+    ['/repos/alpha', '/repos/beta'],
+    'the whole small set was offered',
+  );
+  assert.deepEqual(result[0]?.repos, ['/repos/alpha']);
+});
+
+test('promptRepoSelection: a large repo set offers only the case-insensitive matches for the term', async () => {
+  const seen = collector();
+
+  await buildMappings(
+    fakeLinearClient([], []),
+    MANY,
+    [editReposMapping()],
+    scripted(
+      {
+        select: ['edit-repos'],
+        input: ['ALPHA', '' /* done */],
+        checkbox: [['/repos/alpha-3']],
+        confirm: [false],
+      },
+      seen,
+    ),
+    sink,
+  );
+
+  assert.equal(seen.checkbox.length, 1);
+  assert.deepEqual(
+    seen.checkbox[0]?.choices.map((c) => c.value),
+    Array.from({ length: 10 }, (_, i) => `/repos/alpha-${i}`),
+    'only the 10 matching repos were offered — not all 30, and matching is case-insensitive',
+  );
+});
+
+test('promptRepoSelection: a term matching nothing re-prompts and never falls back to the full list', async () => {
+  const seen = collector();
+  const reported: string[] = [];
+
+  await buildMappings(
+    fakeLinearClient([], []),
+    MANY,
+    [editReposMapping()],
+    scripted(
+      {
+        select: ['edit-repos'],
+        input: ['zzz', 'alpha', '' /* done */],
+        checkbox: [['/repos/alpha-0']],
+        confirm: [false],
+      },
+      seen,
+    ),
+    (message) => reported.push(message),
+  );
+
+  assert.ok(
+    reported.some((line) => line.includes('no repo matches "zzz"')),
+    'the empty match set was reported',
+  );
+  assert.equal(seen.checkbox.length, 1, 'the zero-match pass offered no checkbox at all');
+});
+
+test('promptRepoSelection: repos picked on an earlier pass leave the pool and are disclosed once each', async () => {
+  const seen = collector();
+  const reported: string[] = [];
+
+  const result = await buildMappings(
+    fakeLinearClient([], []),
+    MANY,
+    [editReposMapping()],
+    scripted(
+      {
+        select: ['edit-repos'],
+        // The same term twice on purpose: a second term that could not have matched the
+        // first pick would make the exclusion assertion below vacuous.
+        input: ['alpha', 'alpha', '' /* done */],
+        checkbox: [['/repos/alpha-0'], ['/repos/alpha-1']],
+        confirm: [false],
+      },
+      seen,
+    ),
+    (message) => reported.push(message),
+  );
+
+  assert.deepEqual(result[0]?.repos, ['/repos/alpha-0', '/repos/alpha-1'], 'insertion-ordered');
+  const secondPass = seen.checkbox[1]?.choices.map((c) => c.value) ?? [];
+  assert.equal(secondPass.length, 9, 'the pool shrank by the one already picked');
+  assert.ok(!secondPass.includes('/repos/alpha-0'), 'an already-selected repo is not re-offered');
+  assert.equal(
+    reported.filter((line) => line.includes('--bare')).length,
+    2,
+    'one trust disclosure per newly selected repo on the filtered path too (T-08-21)',
+  );
+});
+
+test('promptRepoSelection: a blank first term is the escape hatch — no selection, no checkbox', async () => {
+  const seen = collector();
+
+  const result = await buildMappings(
+    fakeLinearClient([], []),
+    MANY,
+    [editReposMapping()],
+    // No `checkbox` queued: if the loop offered a list anyway, `checkbox()` rejects.
+    scripted({ select: ['edit-repos'], input: ['   '], confirm: [false] }, seen),
+    sink,
+  );
+
+  assert.deepEqual(result[0]?.repos, [], 'whitespace-only finishes with nothing selected');
+  assert.equal(seen.checkbox.length, 0);
 });

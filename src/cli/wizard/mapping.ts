@@ -228,19 +228,88 @@ function printRepoTrustDisclosure(repoPath: string, report: Report): void {
   );
 }
 
+/**
+ * Above this many discovered repos, one flat checkbox stops being pickable: inquirer's
+ * checkbox `pageSize` defaults to 7 (verified in `@inquirer/checkbox/dist/index.js`), so a
+ * root with 277 repos — `~/ohmaseclaro` really does — is ~40 pages of arrowing to find four.
+ * 20 is ~3 pages, about where typing a term beats scrolling. Below it nothing changes.
+ */
+const REPO_FILTER_THRESHOLD = 20;
+
+function repoChoices(repos: DiscoveredRepo[]): { name: string; value: string }[] {
+  return repos.map((r) => ({ name: `${r.name} (${r.path})`, value: r.path }));
+}
+
+/**
+ * Pick the repos for one mapping.
+ *
+ * Small sets go straight to the checkbox they always did. Large sets get a filter loop in
+ * front of it: type a substring, pick from the matches, repeat; blank finishes (possibly
+ * with nothing selected — `[]` is a valid mapping and the operator's way out of the loop).
+ * Already-selected repos leave the candidate pool, so `remaining.length > 0` ends the loop
+ * on its own if the operator exhausts it. Trade-off: no de-selecting on a later pass; the
+ * re-run's "edit repos" action is where you take one back off.
+ *
+ * Select-all inside a match set is free — inquirer's checkbox already binds `a` to
+ * toggle-all and `i` to invert.
+ */
 async function promptRepoSelection(
   discovered: DiscoveredRepo[],
   p: WizardPrompts,
   report: Report,
 ): Promise<string[]> {
-  const selected = await p.checkbox({
-    message: 'Which local repos attach to this mapping?',
-    choices: discovered.map((r) => ({ name: `${r.name} (${r.path})`, value: r.path })),
-  });
-  for (const repoPath of selected) {
-    printRepoTrustDisclosure(repoPath, report);
+  if (discovered.length <= REPO_FILTER_THRESHOLD) {
+    const selected = await p.checkbox({
+      message: 'Which local repos attach to this mapping?',
+      choices: repoChoices(discovered),
+    });
+    for (const repoPath of selected) {
+      printRepoTrustDisclosure(repoPath, report);
+    }
+    return selected;
   }
-  return selected;
+
+  const selected = new Set<string>();
+  let remaining = discovered;
+  while (remaining.length > 0) {
+    const picked = Array.from(selected);
+    const raw = (
+      await p.input({
+        message:
+          `Filter ${remaining.length} repos by name or path (blank when done) — ` +
+          `${picked.length} selected${picked.length > 0 ? ': ' + picked.join(', ') : ''}`,
+      })
+    ).trim();
+    if (raw === '') break;
+
+    // Substring on name OR path, case-insensitive. Path matching is what makes a depth-2
+    // result reachable by its intermediate directory. No regex (an operator-supplied
+    // pattern is a footgun) and no fuzzy matching (unpredictable ordering on a pick list
+    // whose every entry is a full-trust grant).
+    const term = raw.toLowerCase();
+    const matches = remaining.filter(
+      (r) => r.name.toLowerCase().includes(term) || r.path.toLowerCase().includes(term),
+    );
+    if (matches.length === 0) {
+      // Never fall through to offering the full list — that IS the defect.
+      report(`no repo matches "${raw}"`);
+      continue;
+    }
+
+    // ponytail: no cap on the match set — a term matching 100 repos renders 100 choices and
+    // the operator narrows again. Cap it only if that ever actually bites.
+    const chosen = await p.checkbox({
+      message: `Which of the ${matches.length} repos matching "${raw}" attach to this mapping?`,
+      choices: repoChoices(matches),
+    });
+    for (const repoPath of chosen) {
+      if (selected.has(repoPath)) continue;
+      selected.add(repoPath);
+      printRepoTrustDisclosure(repoPath, report);
+    }
+    remaining = remaining.filter((r) => !selected.has(r.path));
+  }
+  return Array.from(selected);
 }
 
 // ---------------------------------------------------------------------------
