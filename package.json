@@ -45,7 +45,8 @@
     "build": "npm run clean && tsc && npm run assets",
     "dev": "tsx watch src/index.ts",
     "assets": "node -e \"require('fs').cpSync('src','dist/src',{recursive:true,filter:(f)=>!f.endsWith('.ts')})\"",
-    "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\""
+    "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
+    "uat:ingress": "tsx scripts/live-ingress-uat.ts"
   },
   "dependencies": {
     "@inquirer/prompts": "8.7.1",

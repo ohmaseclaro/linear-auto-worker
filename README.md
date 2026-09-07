@@ -112,7 +112,13 @@ npm run verify     # tsc + the full suite + the boot smoke — the canonical gat
 npm run typecheck
 npm run test
 npm run smoke      # boots the daemon against fakes and shuts it down
+npm run uat:ingress  # the same chain against a REAL ngrok tunnel (see below)
 ```
+
+`npm run uat:ingress` is the one live test that needs no Linear workspace. It opens a real
+tunnel with your own ngrok authtoken and drives a signed delivery from the public internet
+back into the receiver — proving what a fake tunnel structurally cannot. Linear stays faked,
+so it cannot reach a real workspace: no key is read, no webhook is registered.
 
 `npm run verify` compiles first and runs `dist/**/*.test.js`, because `node --test` cannot
 resolve `.js` specifiers inside `.ts` files and would otherwise run **zero tests**.
