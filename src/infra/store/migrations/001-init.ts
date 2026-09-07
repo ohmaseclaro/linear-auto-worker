@@ -50,6 +50,19 @@ CREATE TABLE IF NOT EXISTS runs (
   )),
 
   cancel_requested INTEGER NOT NULL DEFAULT 0,
+  -- RESERVED AND UNUSED. Nothing writes it and nothing reads it. It was where a
+  -- SIGINT-killed-but-resumable agent session was going to be marked so the next boot could
+  -- pass --resume; T108 chose a FRESH session id instead, because claude hard-errors on a
+  -- reused --session-id and a fresh session on a fresh suffixed branch is what D-11 already
+  -- designed for. The matching RepoRun.resumable field is DELETED; the COLUMN stays,
+  -- because dropping it would need a migration 002 for zero behaviour change.
+  --
+  -- It is dead by DISUSE, not structurally. Measured 2026-09-07: RunRow omits it, but
+  -- domain-store.ts's toRow is a generic key-copier and toRun is a spread, both behind
+  -- as-unknown-as casts, so asDomainStore().updateRun({resumable:true}) round-trips to
+  -- this column and reads back as 1. Re-adding the field type-checks clean. So the type
+  -- system is NOT what keeps this empty -- only the absence of a writer is.
+  -- (No backticks in this comment. The SQL lives in a template literal.)
   resumable        INTEGER NOT NULL DEFAULT 0,
   attempt          INTEGER NOT NULL DEFAULT 0,
   question_round   INTEGER NOT NULL DEFAULT 0,

@@ -72,6 +72,14 @@ interface RunBase {
   issueKey: string; // "ENG-42"
   issueTitle: string;
   issueUrl: string;
+  /**
+   * VESTIGIAL. Always 0: `fanout.ts` writes it once at insert and nothing ever increments
+   * it or reads it. It is the counter of the bounded `failed -> queued` auto-retry that
+   * OPS-04 / TRAPS T17 explicitly forbid building, so bounding anything by it would BE
+   * that retry, arriving through whichever door needed a limit. Left in place rather than
+   * deleted because removing it touches the migration, `RunRow`, `fanout.ts` twice and
+   * five test fixtures for no behaviour change. Do not use it (T108).
+   */
   attempt: number;
   questionRound: number;
   createdAt: number;
@@ -98,8 +106,6 @@ export interface RepoRun extends RunBase {
    * absent reads as "no cancel requested", which is the safe default.
    */
   cancelRequested?: boolean;
-  /** Set when restart recovery requeues a run whose child died with the worker. */
-  resumable?: boolean;
   /**
    * Gap D6. What the agent's session cost and how many tokens it moved, recorded when the
    * run finishes so the terminal notification can report them.
