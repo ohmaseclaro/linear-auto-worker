@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 6
+open_count: 7
 waived_count: 0
 fixed_count: 2
-total_count: 8
-last_updated: 2026-09-06T20:21:59.338Z
+total_count: 9
+last_updated: 2026-09-07T22:44:01.508Z
 ---
 
 # Broken Windows Ledger
@@ -23,6 +23,7 @@ last_updated: 2026-09-06T20:21:59.338Z
 | 6 | 07 | deviation | src/execution/verdict.ts |  | T73: 'partial' is unreachable from a live run - the run engine trusts the agent's self-reported status while execute-run.ts's evidence-based verdict (commits present in the worktree) is built but not on the live path; a timed-out run with real commits ships no draft PR | open |  | 2026-09-06T20:21:59.211Z |  |
 | 7 | 07 | unrun-verify | .planning/phases/07-integration-daemon-lifecycle/07-HUMAN-UAT.md |  | ROADMAP Phase 7 criteria 1 (assignment becomes a draft PR) and 5 (a question survives a restart) are UNVERIFIED - both need a real Linear workspace, a live ngrok tunnel and real gh; procedure written in 07-HUMAN-UAT.md | open |  | 2026-09-06T20:21:59.275Z |  |
 | 8 | 07 | stub | src/cli/daemon.ts |  | Nothing drives a periodic questions.sweep() or reconciliation poll: a question deadline is only enforced at the next boot and missed work only swept at boot (QA-05). Both functions are ready to be called on an interval | open |  | 2026-09-06T20:21:59.338Z |  |
+| 9 | 07 | deviation | scripts/boot-smoke.ts |  | T108's driving guard is proved only at unit level (run-engine.test.ts test 3). The boot smoke cannot falsify it: its second boot has no swept run (T107 correctly refuses SMK-1), so there is never a second driver for the filter to suppress regardless of the filter's presence | open |  | 2026-09-07T22:44:01.508Z |  |
 
 ````json
 [
@@ -120,6 +121,18 @@ last_updated: 2026-09-06T20:21:59.338Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-09-06T20:21:59.338Z",
+    "resolved_at": null
+  },
+  {
+    "id": 9,
+    "kind": "deviation",
+    "phase": "07",
+    "file": "scripts/boot-smoke.ts",
+    "line": null,
+    "description": "T108's driving guard is proved only at unit level (run-engine.test.ts test 3). The boot smoke cannot falsify it: its second boot has no swept run (T107 correctly refuses SMK-1), so there is never a second driver for the filter to suppress regardless of the filter's presence",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-07T22:44:01.508Z",
     "resolved_at": null
   }
 ]
