@@ -109,6 +109,13 @@ export interface BootOptions {
    * The same runner reaches the worktree manager and the deliverer, which already took it.
    */
   runCommand?: RunCommand;
+  /**
+   * How often the periodic tick runs, in milliseconds. Defaults to `TICK_INTERVAL_MS`.
+   *
+   * Injectable for one reason: a test cannot wait a minute to observe one tick. Nothing
+   * in the wizard writes it and no config key exposes it — see `TICK_INTERVAL_MS`.
+   */
+  tickMs?: number;
 }
 
 export interface DaemonHandle {
@@ -484,6 +491,22 @@ function createDaemonNotifier(o: {
  * no state of its own, since the engine transitions straight to `running` once the worktree
  * exists — one event per transition beats two events for one write.
  */
+/**
+ * How often the daemon sweeps question deadlines and re-polls Linear for missed work.
+ *
+ * Both sweeps existed from Phase 6 and, until now, ran **only at boot** — `questions.ts`'s
+ * own header said `sweep(now)` is "driven by the tick" and no tick was ever built (gap D4).
+ * The visible effect: a four-hour question deadline did nothing while the daemon stayed up,
+ * and the assumption was posted at the next restart instead. A webhook Linear failed to
+ * deliver was likewise invisible until a restart.
+ *
+ * One minute, and not configurable. `reconcile` is one issue query and `sweep` is a local
+ * SELECT, so sixty ticks an hour is nothing against Linear's 2,500 requests — and a knob
+ * here would be a knob whose wrong values are all worse. `tickMs` exists on `BootOptions`
+ * for tests only.
+ */
+export const TICK_INTERVAL_MS = 60_000;
+
 const NOTIFY_KIND: Partial<Record<RunState, 'picked_up' | 'agent_started' | 'question_asked'>> = {
   preparing: 'picked_up',
   running: 'agent_started',
@@ -747,7 +770,15 @@ export async function bootDaemon(opts: BootOptions = {}): Promise<DaemonHandle> 
   scheduler.start();
   /** The idempotence memo. See `shutdown` below. */
   let shuttingDown: Promise<void> | null = null;
-  log.info({ port, publicUrl, webhookId: registration.id }, 'daemon ready');
+
+  // ── 9. the periodic tick (gap D4) ──────────────────────────────────────────
+  // Step 7 above runs the same two sweeps exactly once, at boot. That is what made a
+  // question deadline meaningless on a daemon that stays up: `expiredQuestions` is a
+  // query, not a timer, so nothing asked it. This is the thing that asks.
+  const tickMs = opts.tickMs ?? TICK_INTERVAL_MS;
+  let ticking = false;
+  const ticker = setInterval(() => void tick(), tickMs);
+  log.info({ port, publicUrl, webhookId: registration.id, tickMs }, 'daemon ready');
 
   return {
     port,
@@ -781,6 +812,12 @@ export async function bootDaemon(opts: BootOptions = {}): Promise<DaemonHandle> 
     if (shuttingDown) return shuttingDown;
     shuttingDown = (async () => {
       log.info({ reason }, 'shutting down');
+
+      // 0. The tick, before anything else. It calls `reconcile`, which DISPATCHES work —
+      //    a tick firing after step 1 would hand the scheduler runs it has just been told
+      //    to stop claiming. `tick` also early-returns on `shuttingDown`, so a pass
+      //    already in flight when this line runs stops at its next await point.
+      clearInterval(ticker);
 
       // 1. Nothing new is claimed. Parked waiters stay parked and are marked below.
       scheduler.pause();
@@ -827,6 +864,47 @@ export async function bootDaemon(opts: BootOptions = {}): Promise<DaemonHandle> 
       log.info({ reason }, 'shutdown complete');
     })();
     return shuttingDown;
+  }
+
+  /**
+   * One pass of the periodic sweeps. Never throws, never overlaps itself.
+   *
+   * **Non-overlap is not politeness.** `reconcile` talks to Linear, so a slow or
+   * rate-limited call can outlast the interval; without the guard the second tick would
+   * start a second reconciliation against the same watermark and re-dispatch the same
+   * backlog. A skipped tick costs a minute; a doubled one costs duplicate runs.
+   *
+   * The two halves are caught separately, on purpose: a Linear outage must not stop local
+   * question deadlines from expiring, which is precisely the case where the daemon needs
+   * to keep making progress without the network.
+   *
+   * The `shuttingDown` half of the guard is, today, unreachable: `shutdown` clears the
+   * interval as its first statement, and a timer callback cannot interleave with the
+   * synchronous code that sets the memo. It is kept so that `tick` is safe to call from
+   * anywhere rather than only from the interval — said plainly here because an unreachable
+   * condition that reads like a live guard is how vacuous checks get written (T76). The
+   * `ticking` half is live and measured: without it, a held Linear call produced **11
+   * concurrent sweeps** in `tick.test.ts`.
+   */
+  async function tick(): Promise<void> {
+    if (ticking || shuttingDown) return;
+    ticking = true;
+    const at = Date.now();
+    try {
+      try {
+        const expired = await questions.sweep(at);
+        if (expired.length > 0) log.info({ expired: expired.length }, 'tick: questions expired');
+      } catch (err) {
+        log.warn({ err: String(err) }, 'tick: question sweep failed');
+      }
+      try {
+        await sweepMissedWork({ store, engine, scheduler, questions, linear, config, log }, at);
+      } catch (err) {
+        log.warn({ err: String(err) }, 'tick: missed-work reconciliation failed');
+      }
+    } finally {
+      ticking = false;
+    }
   }
 
   /**
