@@ -1,6 +1,6 @@
 # Traps
 
-One hundred and three footguns found while building this daemon, kept as a running ledger so no two
+One hundred and four footguns found while building this daemon, kept as a running ledger so no two
 parallel work streams had to rediscover the same one.
 
 **Every entry here was measured, not recalled.** Versions come from the npm registry, API
@@ -15,7 +15,7 @@ spawn processes, several of them will cost you an afternoon each.
 Measured against: `@linear/sdk@93.0.1`, `@ngrok/ngrok@1.7.0`, `better-sqlite3@13.0.3`,
 `execa@10.0.1`, Claude Code CLI `2.1.259`, `gh` `2.98.0`, Node `22.23.1`, macOS.
 
-The complete internal ledger — all 103 rows with per-phase attribution and the evidence for
+The complete internal ledger — all 104 rows with per-phase attribution and the evidence for
 each — is in [`.planning/TRAPS.md`](../.planning/TRAPS.md). This page is the subset that
 generalises.
 
@@ -137,8 +137,16 @@ app; it is a feature, not a configuration choice.
 **There is no non-personal Linear API key.** Keys are always personal to a user; they can be
 *restricted* (Read / Write / Admin / Create issues / Create comments, and to specific teams)
 but never elevated beyond what that user can already do. A "bot account" is therefore a
-second human-shaped member — with a seat cost — and it must be a workspace **admin** if your
-integration registers its own webhook.
+second human-shaped member, and it must be a workspace **admin** if your integration
+registers its own webhook. On Linear's **Free** plan every member is an admin automatically
+and there is no billing, which makes Free the cheapest correct home for a bot.
+
+**Suspending that bot account silently revokes its API key.** Billing counts *unsuspended*
+users, so suspending an idle bot is the obvious way to stop paying for its seat — and it
+invalidates the token immediately. The integration then fails 401 on every call, with
+nothing in its own logs naming the cause and nothing about it having changed. Converting the
+bot to a Guest does the same thing. If 401s ever appear from nowhere, check the bot's member
+status before you check anything else.
 
 ## ngrok
 

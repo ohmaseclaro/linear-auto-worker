@@ -158,7 +158,7 @@ and what is explicitly out of scope.
 
 ## The traps ledger
 
-[`docs/TRAPS.md`](docs/TRAPS.md) holds the **103 verified footguns** found building this —
+[`docs/TRAPS.md`](docs/TRAPS.md) holds the **104 verified footguns** found building this —
 each one measured against the real tool, not recalled. A sample:
 
 - `claude -p --permission-mode dontAsk` alone **denies every edit and exits 0** with
