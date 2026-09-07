@@ -13,6 +13,21 @@ import { Writable } from 'node:stream';
 const SECRET_KEY_PATTERN = /(token|secret|key|authorization)/i;
 
 /**
+ * Field names that CONTAIN a word from the pattern above and are not secrets.
+ *
+ * The pattern is a deliberate substring match, because over-redaction is the safe error
+ * for a log sink and under-redaction leaks a credential. It also means `tokensUsed` — a
+ * token COUNT — logged as `"[REDACTED]"`, which was caught the moment gap D6 gave it a
+ * non-zero value to report. The fix is an explicit exception list, not a looser pattern:
+ * anything new still fails closed.
+ *
+ * Add to this only for a field you can name and have checked. `issueKey` is deliberately
+ * absent — nothing logs it today (the notify path uses `issueIdentifier`), and an entry
+ * for a field with no call site is an assertion nobody is testing.
+ */
+const NOT_SECRET_KEYS: ReadonlySet<string> = new Set(['tokensUsed']);
+
+/**
  * TRAPS T48, closed by 07-06.
  *
  * The walker recursed over `Object.entries` with no cycle guard, so a genuinely circular
@@ -40,7 +55,8 @@ function redact(value: unknown, seen: WeakSet<object> = new WeakSet()): unknown 
   if (value && typeof value === 'object') {
     const out: Record<string, unknown> = {};
     for (const [key, val] of Object.entries(value as Record<string, unknown>)) {
-      out[key] = SECRET_KEY_PATTERN.test(key) ? '[REDACTED]' : redact(val, seen);
+      const isSecret = !NOT_SECRET_KEYS.has(key) && SECRET_KEY_PATTERN.test(key);
+      out[key] = isSecret ? '[REDACTED]' : redact(val, seen);
     }
     return out;
   }

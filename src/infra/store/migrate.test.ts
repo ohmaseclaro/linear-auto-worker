@@ -58,7 +58,14 @@ test('an empty database migrates to the latest version', () => {
 
   assert.equal(result.from, 0);
   assert.equal(result.to, LATEST);
-  assert.deepEqual([...result.applied], [LATEST]);
+  // Every version, not just the newest. Written as `[LATEST]` while there was exactly one
+  // migration, which happens to be the same list — and stops being so the moment a second
+  // one lands, as migration 002 did.
+  assert.deepEqual(
+    [...result.applied],
+    MIGRATIONS.map((m) => m.version),
+    'a fresh database must have every migration applied to it, in order',
+  );
   assert.equal(readUserVersion(db), LATEST);
 });
 
@@ -126,4 +133,30 @@ test('a state outside the nine literals is rejected', () => {
   migrate(db);
 
   assert.throws(() => insertRun(db, { state: 'parked' }), /CHECK|constraint/i);
+});
+
+// -- gap D6's migration ------------------------------------------------------
+
+test('an existing v1 database upgrades to v2 without losing its history', () => {
+  // The operator case: a daemon that has been running keeps its runs, its pending
+  // questions and its watermark across an upgrade. A migration that dropped and recreated
+  // `runs` would pass every other test in this file and lose a live ticket here.
+  const db = new DatabaseSync(':memory:') as unknown as MigratableDb;
+  migrate(db, [MIGRATIONS[0]!]);
+  db.exec(
+    `INSERT INTO runs (id, kind, issue_id, issue_key, issue_title, issue_url, state, created_at, updated_at)
+     VALUES ('old', 'repo', 'i', 'LAW-1', 't', 'u', 'delivered', 1, 1)`,
+  );
+
+  const result = migrate(db);
+  assert.deepEqual(result.applied, [2], 'only the migration it was missing');
+  assert.equal(result.from, 1);
+  assert.equal(result.to, LATEST);
+
+  const row = db
+    .prepare('SELECT id, state, cost_usd, tokens_used FROM runs WHERE id = ?')
+    .get('old') as { state: string; cost_usd: number; tokens_used: number } | undefined;
+  assert.equal(row?.state, 'delivered', 'the pre-existing run survived the upgrade');
+  assert.equal(row?.cost_usd, 0, 'a row from before the column reads as a free run, not null');
+  assert.equal(row?.tokens_used, 0);
 });

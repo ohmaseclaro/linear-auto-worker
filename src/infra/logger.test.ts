@@ -99,3 +99,42 @@ test('a circular object logged through the redaction walker does not throw and d
   assert.match(output, /self-referencing/);
   assert.match(output, /\[CIRCULAR\]/);
 });
+
+test('a token COUNT is not mistaken for a token (the D6 false positive)', () => {
+  // `SECRET_KEY_PATTERN` is a substring match, so `tokensUsed` matched `token` and every
+  // terminal log line reported `"tokensUsed":"[REDACTED]"`. Invisible while gap D6 had it
+  // hardcoded to `0`; the moment D6 gave it a real value, the value was unreadable.
+  const { lines } = captureStdout(() => {
+    createLogger([]).info({ tokensUsed: 61_626, costUsd: 1.23 }, 'run.terminal');
+  });
+  const output = lines.join('');
+  assert.match(output, /"tokensUsed":61626/, 'a token count is a number, not a credential');
+  assert.match(output, /"costUsd":1\.23/);
+});
+
+test('the exception list did not open a hole — secret-named fields still redact', () => {
+  // The whole risk of fixing the above by loosening the pattern instead of listing one
+  // exception. Over-redaction is the safe error for a log sink; these must stay redacted
+  // whether or not their value was ever registered.
+  const { lines } = captureStdout(() => {
+    const logger = createLogger([]);
+    logger.info(
+      {
+        apiKey: 'lin_api_never_print_me',
+        webhookSecret: 'shhh_never_print_me',
+        authtoken: 'ngrok_never_print_me',
+        authorization: 'bearer_never_print_me',
+      },
+      'still redacted',
+    );
+  });
+  const output = lines.join('');
+  for (const value of [
+    'lin_api_never_print_me',
+    'shhh_never_print_me',
+    'ngrok_never_print_me',
+    'bearer_never_print_me',
+  ]) {
+    assert.ok(!output.includes(value), `${value} reached the log`);
+  }
+});

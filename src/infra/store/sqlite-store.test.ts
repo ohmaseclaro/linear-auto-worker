@@ -1,12 +1,14 @@
-// RUSH mode: written against openStore()/runMigrations() (plan 01) and this
-// plan's own createSqliteStore(). NOT run in this session -- nothing is
-// installed (no node_modules). Verified by inspection only.
+// Originally written under RUSH mode against `openStore()`/`runMigrations()` with nothing
+// installed, and verified by inspection only. It runs for real now; `runMigrations` is gone
+// (there is one migration runner again — see `db.ts`).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { openStore, runMigrations } from './db.js';
+import { openStore } from './db.js';
+import { migrate } from './migrate.js';
+import { MIGRATIONS } from './migrations/index.js';
 import { createSqliteStore } from './sqlite-store.js';
 import type { RunRow, QuestionRow } from './sqlite-store.js';
 
@@ -56,10 +58,10 @@ function makeQuestion(overrides: Partial<QuestionRow> = {}): QuestionRow {
   };
 }
 
-test('runMigrations() twice against the same file is a no-op the second time (D-10)', () => {
+test('migrate() twice against the same file is a no-op the second time (D-10)', () => {
   const db = openStore(':memory:');
   const versionAfterOpen = db.pragma('user_version', { simple: true });
-  assert.doesNotThrow(() => runMigrations(db));
+  assert.doesNotThrow(() => migrate(db));
   const versionAfterSecondRun = db.pragma('user_version', { simple: true });
   assert.equal(versionAfterSecondRun, versionAfterOpen);
 });
@@ -211,4 +213,24 @@ test('three sequential writers against one WAL/busy-timeout handle complete with
     store.insertRun(makeRun({ id: 'run-w3' }));
   });
   assert.equal(store.listByState('queued').length, 3);
+});
+
+test('openStore applies EVERY migration in the list, not just the first', () => {
+  // The check that would have caught the real defect gap D6 walked into. `db.ts` carried a
+  // SECOND, duplicate migration runner with its own hardcoded `[migration001]`, and
+  // `openStore` used that one — so adding migration 002 to `migrations/index.ts`, the list
+  // `migrate.test.ts`'s eight cases exercise, changed nothing at all. `tsc` passed, every
+  // test passed, and the column did not exist.
+  const dir = mkdtempSync(join(tmpdir(), 'law-openstore-'));
+  const db = openStore(join(dir, 'store.db'));
+  try {
+    assert.equal(
+      db.pragma('user_version', { simple: true }),
+      MIGRATIONS[MIGRATIONS.length - 1]!.version,
+      'openStore left the database behind the newest migration — it is reading a different list',
+    );
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

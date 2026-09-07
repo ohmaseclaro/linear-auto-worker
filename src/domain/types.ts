@@ -100,6 +100,17 @@ export interface RepoRun extends RunBase {
   cancelRequested?: boolean;
   /** Set when restart recovery requeues a run whose child died with the worker. */
   resumable?: boolean;
+  /**
+   * Gap D6. What the agent's session cost and how many tokens it moved, recorded when the
+   * run finishes so the terminal notification can report them.
+   *
+   * Optional for the same reason `cancelRequested` is: rows inserted before the column
+   * existed (migration 002) read as absent, and `0` is the correct rendering of a run
+   * whose cost was never recorded — which is what the daemon reported for every run until
+   * these existed.
+   */
+  costUsd?: number;
+  tokensUsed?: number;
 }
 
 /**

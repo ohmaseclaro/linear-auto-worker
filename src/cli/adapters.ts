@@ -230,6 +230,32 @@ function denialPhrase(outcome: AgentRunOutcome): string {
  * Failure here is not fatal and must not be: if `git` cannot answer, the caller falls back
  * to trusting the agent, which is exactly the old behaviour and strictly no worse.
  */
+/**
+ * Gap D6. Every token the session moved, from the result event's `usage` block.
+ *
+ * All four counts, not just input + output. Measured on a real captured result event
+ * (`fixtures/stream-events.jsonl`): `input_tokens: 2, output_tokens: 4,
+ * cache_creation_input_tokens: 61520`. Reporting 6 for that run would be arithmetically
+ * true and completely useless — the number an operator wants is what the session moved,
+ * and it lives almost entirely in the cache columns.
+ *
+ * Unknown shapes read as 0 rather than throwing: this is a reporting field on the terminal
+ * path, and a run must never fail because Anthropic added a key.
+ */
+function usageTokens(usage: Record<string, unknown> | undefined): number {
+  if (!usage) return 0;
+  const keys = [
+    'input_tokens',
+    'output_tokens',
+    'cache_creation_input_tokens',
+    'cache_read_input_tokens',
+  ] as const;
+  return keys.reduce((total, key) => {
+    const value = usage[key];
+    return total + (typeof value === 'number' && Number.isFinite(value) ? value : 0);
+  }, 0);
+}
+
 async function gatherEvidence(
   deps: AgentRunnerDeps,
   worktreePath: string,
@@ -404,6 +430,22 @@ export function createAgentRunner(deps: AgentRunnerDeps): AgentRunner {
         spawn: deps.spawn,
         signal,
         onProgress: (update) => onProgress?.(req.runId, progressLine(update)),
+        // Gap D7. Persisted immediately rather than after the run, because the case the
+        // column exists for is the daemon dying mid-run — at which point "after" never
+        // happens.
+        onSpawn: (pid) => {
+          if (pid !== undefined) deps.store.updateRun(req.runId, { pid });
+        },
+      });
+
+      // Gap D6. `classifyOutcome` has read `total_cost_usd` since Phase 4 and the terminal
+      // notification threw it away, reporting `$0.0000` on every run because there was no
+      // column to read. Written here, on the way past, so it survives even for a run that
+      // is about to be classified `failed`: a run that burned twenty dollars and produced
+      // nothing is precisely the one an operator needs the number for.
+      deps.store.updateRun(req.runId, {
+        costUsd: outcome.resultEvent?.total_cost_usd ?? 0,
+        tokensUsed: usageTokens(outcome.resultEvent?.usage),
       });
 
       // The abort may have won the race inside `runAgent`, which reports the reap rather

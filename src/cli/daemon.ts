@@ -533,12 +533,15 @@ function toNotifyEvent(
       kind: 'terminal',
       // The four terminal RunStates ARE the four TerminalRunStates, in the same spelling.
       state: run.state as 'delivered' | 'partial' | 'failed' | 'cancelled',
-      // ponytail: zero, and honestly so — there is no cost or token column on `runs`, and
-      // inventing one here would be a schema change wearing a wiring change's clothes.
-      // Ceiling: Slack and the log report `$0.0000` on every run until the run row carries
-      // what `classifyOutcome` already computes. Recorded in WINDOWS.md.
-      costUsd: 0,
-      tokensUsed: 0,
+      // Gap D6, closed. These were hardcoded zeros with a comment saying the schema change
+      // needed to fix them was out of scope — so Slack, the Linear comment and the log all
+      // reported `$0.0000` on every run. Migration 002 added the columns and the agent
+      // runner writes them on the way past.
+      //
+      // `?? 0` is not defensive padding: rows created before migration 002 genuinely have
+      // no recorded cost, and zero is the honest rendering of that.
+      costUsd: run.costUsd ?? 0,
+      tokensUsed: run.tokensUsed ?? 0,
       ...(run.prUrl ? { prUrl: run.prUrl } : {}),
       ...(run.failureReason ?? detail ? { reason: run.failureReason ?? detail } : {}),
     };

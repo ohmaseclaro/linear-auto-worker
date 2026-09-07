@@ -1,5 +1,6 @@
 import type { Migration } from '../migrate.js';
 import { migration001 } from './001-init.js';
+import { migration002 } from './002-run-usage.js';
 
 /** Ascending by version. `migrate()` asserts that before applying anything. */
-export const MIGRATIONS: readonly Migration[] = [migration001];
+export const MIGRATIONS: readonly Migration[] = [migration001, migration002];

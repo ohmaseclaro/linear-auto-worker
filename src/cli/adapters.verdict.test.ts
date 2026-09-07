@@ -44,9 +44,18 @@ const config = {
   },
 } as unknown as Config;
 
-/** A store whose only job is to say the run is a repo-run in `o/r`. */
+/**
+ * A store whose only job is to say the run is a repo-run in `o/r`.
+ *
+ * `updateRun` is a sink rather than an omission: since gap D6/D7 the runner records the
+ * spawned pid and the session's cost on the way past, and a stub without it throws
+ * `deps.store.updateRun is not a function` in every case here. What those writes contain
+ * is `usage.test.ts`'s subject, against a real SQLite file; this file is only about the
+ * verdict, and asserting the writes here too would pin the same behaviour twice.
+ */
 const store = {
   getRun: () => ({ kind: 'repo', repoSlug: 'o/r' }),
+  updateRun: () => undefined,
 } as never;
 
 /** `git log --oneline main..HEAD` returns `commits` lines; `git status --porcelain` returns `dirty`. */

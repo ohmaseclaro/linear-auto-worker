@@ -1,34 +1,24 @@
 import Database from 'better-sqlite3';
-import { migration001 } from './migrations/001-init.js';
 
-export interface Migration {
-  version: number;
-  sql: string;
-}
-
-const MIGRATIONS: Migration[] = [migration001];
+import { migrate } from './migrate.js';
 
 /**
- * D-10/D-11: PRAGMA user_version plus numbered migration modules. Applying
- * this twice against the same file is a no-op the second time because every
- * candidate migration's version is already <= the stored user_version.
+ * The connection, and nothing else.
+ *
+ * This module used to carry a SECOND migration runner — its own `runMigrations`, its own
+ * `Migration` interface, and its own `MIGRATIONS = [migration001]` list — beside the one in
+ * `migrate.ts`. `migrate.ts` is the better of the two (it asserts strictly ascending
+ * versions, wraps each migration in an explicit BEGIN/COMMIT, and reports what it applied)
+ * and it had seven tests; it was also, until now, never called by anything in production.
+ *
+ * That is the parallel-build seam this project keeps producing, in its most dangerous
+ * shape: adding a migration to `migrations/index.ts` — the list the runner with the tests
+ * reads — would have done **nothing**, because `openStore` consulted the other list. The
+ * schema change would appear to land, `tsc` would pass, the tests would pass, and the
+ * column would not exist. Gap D6's migration 002 was written into that trap and found it.
+ *
+ * One runner, one list. Do not add a second.
  */
-export function runMigrations(db: Database.Database, migrations: Migration[] = MIGRATIONS): void {
-  const currentVersion = db.pragma('user_version', { simple: true }) as number;
-  const pending = migrations
-    .filter((migration) => migration.version > currentVersion)
-    .sort((a, b) => a.version - b.version);
-
-  for (const migration of pending) {
-    // A partial migration must never leave the pragma bumped without its SQL
-    // applied, or vice versa — both happen inside one transaction.
-    const applyMigration = db.transaction(() => {
-      db.exec(migration.sql);
-      db.pragma(`user_version = ${migration.version}`);
-    });
-    applyMigration();
-  }
-}
 
 /**
  * D-04/OPS-02: WAL mode and an explicit busy timeout are set before any table
@@ -38,6 +28,6 @@ export function openStore(dbPath: string): Database.Database {
   const db = new Database(dbPath);
   db.pragma('journal_mode = WAL');
   db.pragma('busy_timeout = 5000');
-  runMigrations(db);
+  migrate(db);
   return db;
 }

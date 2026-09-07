@@ -36,6 +36,17 @@ export interface RunRow {
   questionRound: number;
   prUrl: string | null;
   failureReason: string | null;
+  /**
+   * Gap D6. What the agent's session cost, off the result event's `total_cost_usd`, and
+   * how many tokens it moved (input + output + both cache counts — see `usageTokens` in
+   * `cli/adapters.ts`).
+   *
+   * Optional on the WRITE side only: both columns are `NOT NULL DEFAULT 0` (migration
+   * 002), so an insert that omits them is correct, and every read returns a number. Same
+   * shape as `cancelRequested`.
+   */
+  costUsd?: number;
+  tokensUsed?: number;
   createdAt: number | string;
   updatedAt: number | string;
 }

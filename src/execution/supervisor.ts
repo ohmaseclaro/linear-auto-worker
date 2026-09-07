@@ -111,6 +111,20 @@ export interface RunAgentInput {
    * `cancelled`.
    */
   signal?: AbortSignal;
+  /**
+   * Gap D7. The child's pid, the moment it exists.
+   *
+   * `runs.pid` was declared in the schema, written `null` at run creation, and never
+   * written again — a dead column. It costs nothing while shutdown is clean, because the
+   * reap goes through the in-process abort map and never needs to look one up. It costs
+   * the operator their only handle after an UNCLEAN exit, which is exactly when a stray
+   * `claude` process group is still holding a worktree and there is nothing left in the
+   * database to point at it.
+   *
+   * `undefined` is a real outcome and is passed through rather than swallowed: a spawn
+   * that reports no pid is the case `reap` already logs as unkillable.
+   */
+  onSpawn?: (pid: number | undefined) => void;
 }
 
 export interface AgentRunOutcome {
@@ -245,6 +259,8 @@ export async function runAgent(o: RunAgentInput): Promise<AgentRunOutcome> {
 
   const child = spawn('claude', o.args, { cwd: o.cwd, env: o.env });
   o.log.info({ pid: child.pid, sessionId: o.sessionId }, 'agent spawned');
+  // Before the first await below: a run reaped early must still have left its pid behind.
+  o.onSpawn?.(child.pid);
 
   let timedOut = false;
   let killedBy: EscalationStep | undefined;
