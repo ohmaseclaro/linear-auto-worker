@@ -89,6 +89,7 @@ function harness(): Harness {
   const issues: ListedIssue[] = [];
   const comments = new Map<string, ListedComment[]>();
   const failLinear = { on: false };
+  let engineRuns = 0;
 
   const config = {
     botUserId: BOT,
@@ -115,6 +116,16 @@ function harness(): Harness {
     },
     async handle(e: DomainEvent) {
       events.push(e);
+      // A real engine's `run.requested` arm INSERTS a run row. `reconcile` now reports
+      // `enqueued` by observing that row appear rather than by re-deriving the rule, so
+      // the fake has to model the insert or the report is dead here.
+      //
+      // It deliberately models NO guard — the guard is the engine's, and the whole point
+      // of T107 is that it lives in exactly one place. It is proven against the REAL
+      // engine end to end in `qa-roundtrip.test.ts`.
+      if (e.kind === 'run.requested') {
+        seedRun(store, { id: `r-engine-${++engineRuns}`, issueId: e.issueId, state: 'queued' });
+      }
     },
     async cancel() {},
     isCancelRequested: () => false,
@@ -407,17 +418,37 @@ test('a bot-assigned issue with no non-terminal run is enqueued (INTK-07)', asyn
   ]);
 });
 
-test('an issue that already has a non-terminal run is not enqueued again — three passes, one run', async () => {
+// T107. The poll no longer filters on its own — it DELEGATES, carrying its evidence class
+// on the event, and the engine is the single site that decides. These two cases pin that
+// delegation at the poll's own seam; that the engine then refuses is proven against the
+// REAL engine in `qa-roundtrip.test.ts` ('a delivered run is never re-run'), because this
+// harness's engine is a recorder with no guard and must not grow a second copy of one.
+test('an issue that already has a non-terminal run is still delegated, never filtered here', async () => {
   const h = harness();
   h.store.kvSet(POLL_WATERMARK_KEY, OLD);
   h.issues.push({ id: 'ISS-running', identifier: 'ENG-1', updatedAt: FRESH });
   seedRun(h.store, { state: 'running' });
 
   await reconcile(h.deps, NOW);
-  await reconcile(h.deps, NOW);
+
+  assert.deepEqual(h.events, [
+    { kind: 'run.requested', trigger: 'reconcile', issueId: 'ISS-running' },
+  ]);
+});
+
+test('a DELIVERED run for a still-assigned issue is delegated too, tagged `reconcile`', async () => {
+  const h = harness();
+  h.store.kvSet(POLL_WATERMARK_KEY, OLD);
+  h.issues.push({ id: 'ISS-delivered', identifier: 'ENG-2', updatedAt: FRESH });
+  seedRun(h.store, { state: 'delivered' });
+
   await reconcile(h.deps, NOW);
 
-  assert.deepEqual(h.events, []);
+  assert.deepEqual(
+    h.events,
+    [{ kind: 'run.requested', trigger: 'reconcile', issueId: 'ISS-delivered' }],
+    'the poll delegates and tags its evidence class; it does not re-grow a filter',
+  );
 });
 
 test('an issue below the watermark is not re-enqueued on the next pass', async () => {

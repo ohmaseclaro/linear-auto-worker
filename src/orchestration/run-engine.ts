@@ -827,11 +827,37 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
           // moments AFTER the boot sweep has already enqueued the same issue. Two runs is
           // two worktrees, two `claude` sessions and two pull requests for one ticket.
           //
-          // `reconcile()` carries its own copy of this check as an early-out that avoids a
-          // `getIssue` round-trip. This one is the load-bearing one, because it is the
-          // only one on the webhook path.
+          // This is the ONLY site that decides whether a `run.requested` is honoured.
+          // `reconcile()` used to carry a private copy of this check as an early-out; it
+          // was deleted rather than extended, because two implementations of one rule is
+          // this repo's most repeated defect and the copy saved nothing (this guard
+          // already runs before the `getIssue` below).
           if (store.findActiveRunByIssue(event.issueId).length > 0) {
             log.info({ issueId: event.issueId }, 'a run is already live for this issue; ignoring');
+            return;
+          }
+          // T107, and the reason `trigger` exists. The poll observes a STATE, not an act:
+          // "still assigned, still open" stays true forever, and the bot's own In Progress
+          // transition and Done comment bump `issue.updatedAt`, so the watermark cannot
+          // bound it either. A `delivered` run is terminal, so the liveness check above
+          // does not stop it — the poll re-requested a delivered ticket once a minute,
+          // opening a pull request and burning a paid session each time (observed on
+          // COD-2). For the poll, therefore, ANY prior run is disqualifying.
+          //
+          // OPS-04: one attempt per assignment. The operator's retry gesture is unassign
+          // then re-assign, which arrives on a webhook as `trigger: 'assignment'` — an ACT,
+          // with an actor, deduped by `Linear-Delivery` — and is deliberately still
+          // honoured against a terminal run.
+          //
+          // ponytail: if the daemon is DOWN across the whole unassign→reassign, both
+          // webhooks are lost and the next poll sees the prior run and skips. Recovery is
+          // to re-assign once with the daemon up. Losing one re-request while down is a
+          // missed action; the alternative opens a PR and spends money every minute.
+          if (event.trigger === 'reconcile' && store.findRunsByIssue(event.issueId).length > 0) {
+            log.info(
+              { issueId: event.issueId },
+              'poll observed an issue that has already been attempted; ignoring',
+            );
             return;
           }
           // Invariant 2: decide from the canonical issue, never from webhook body.

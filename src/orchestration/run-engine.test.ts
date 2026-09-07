@@ -468,11 +468,16 @@ test('nothing AUTOMATIC moves a run out of failed', async () => {
   );
 
   // A DELIBERATE re-request is a different thing, and it is the operator's only retry
-  // gesture: unassign, fix the repo, re-assign. The engine's guard is
-  // `findActiveRunByIssue`, which is about not running two sessions on one ticket AT ONCE —
-  // a terminal row is not a live one. This case originally listed `run.requested` among the
-  // levers that "may not" restart it and asserted one diagnosis while producing two; the
-  // guard against an automatic retry loop is the reconciliation watermark, not this check.
+  // gesture: unassign, fix the repo, re-assign. That arrives on a webhook as
+  // `trigger: 'assignment'`, and for an assignment the guard is `findActiveRunByIssue` —
+  // about not running two sessions on one ticket AT ONCE, and a terminal row is not a live
+  // one. This case originally listed `run.requested` among the levers that "may not"
+  // restart it and asserted one diagnosis while producing two.
+  //
+  // What guards against an AUTOMATIC retry loop is `trigger`, not the reconciliation
+  // watermark: the watermark is bumped by the bot's own writes and guards nothing (T107).
+  // A `trigger: 'reconcile'` request against this same failed run is refused; this one is
+  // honoured, and that difference is the whole point of the field.
   await h.engine.handle({ kind: 'run.requested', trigger: 'assignment', issueId: 'issue-1' });
   await h.engine.settle();
 

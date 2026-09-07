@@ -22,6 +22,8 @@ import type { AgentResult, Config, Logger } from '../domain/ports.js';
 import { createScheduler } from './scheduler.js';
 import { createRunEngine } from './run-engine.js';
 import { createQuestions } from './questions.js';
+import { POLL_WATERMARK_KEY, reconcile } from './recovery.js';
+import type { RecoveryDeps } from './recovery.js';
 
 const silent: Logger = {
   child: () => silent,
@@ -110,7 +112,7 @@ function harness(script: AgentResult[], issues: Array<typeof ISSUE> = [ISSUE]) {
   });
   questions = createQuestions({ store, engine, config: CONFIG, linear, log: silent });
 
-  return { store, scheduler, agent, worktrees, deliverer, linear, engine };
+  return { store, scheduler, agent, worktrees, deliverer, linear, engine, questions };
 }
 
 test('one run travels queued -> delivered through the Q&A detour, holding no slot while blocked', async () => {
@@ -204,4 +206,114 @@ test('an issue with no repo mapping is ignored rather than inserted half-formed'
 
   assert.equal(store.findActiveRunByIssue(unmapped.id).length, 0, 'no run row');
   assert.equal(agent.calls.length, 0, 'no agent spawned');
+});
+
+/**
+ * T107, the P0 this whole file's harness is here to catch: a ticket the daemon has
+ * already DELIVERED must never be re-run by the reconciliation poll.
+ *
+ * Observed live on COD-2 — PR opened, run `delivered`, and sixty seconds later the poll
+ * started a second run on the same ticket. Left alone it opens a pull request and burns a
+ * paid `claude` session every minute, forever. Two faults met: `findActiveRunByIssue`
+ * excludes terminal states so a `delivered` run blocks nothing, and the watermark cannot
+ * bound the poll either because the bot's OWN In Progress transition and Done comment bump
+ * `issue.updatedAt`.
+ *
+ * The second pass reproduces exactly that self-bump via `putIssue`, so neither pass is
+ * allowed to pass vacuously on the watermark.
+ */
+test('a delivered run is never re-run by the reconciliation poll (T107)', async () => {
+  const h = harness([COMPLETE]);
+
+  await h.engine.handle({ kind: 'run.requested', trigger: 'assignment', issueId: ISSUE.id });
+  await h.engine.settle();
+
+  assert.equal(h.store.findRunsByIssue(ISSUE.id).length, 1, 'one assignment, one run');
+  assert.equal(h.store.listByState('delivered').length, 1, 'and it reached delivered');
+
+  const deps: RecoveryDeps = {
+    store: h.store,
+    engine: h.engine,
+    scheduler: h.scheduler,
+    questions: h.questions,
+    linear: h.linear,
+    config: CONFIG,
+    log: silent,
+    now: () => Date.parse('2026-06-01T00:00:00.000Z'),
+  };
+
+  // The issue is still assigned to the bot and still open, so the poll still lists it.
+  assert.equal(
+    (await h.linear.listAssignedOpenIssues(CONFIG.botUserId)).length,
+    1,
+    'precondition: the delivered ticket is still assigned and still listed',
+  );
+
+  // Pass one. The watermark is unset (EPOCH) and ISSUE.updatedAt is 2026-01-01, so the
+  // issue CLEARS the watermark check — without this the test would pass vacuously against
+  // broken code and prove nothing (T71).
+  assert.equal(h.store.kvGet(POLL_WATERMARK_KEY), undefined, 'watermark starts unset');
+  const first = await reconcile(deps, Date.parse('2026-06-01T00:00:00.000Z'));
+  await h.engine.settle();
+  assert.equal(
+    h.store.findRunsByIssue(ISSUE.id).length,
+    1,
+    'pass one started no second run on the delivered ticket',
+  );
+  assert.deepEqual(first.enqueued, [], 'pass one enqueued nothing');
+
+  // Pass two, with the self-event reproduced: the bot's own writes bump `updatedAt`, which
+  // is what lifts the issue back over the watermark the first pass just advanced.
+  h.linear.putIssue({ ...ISSUE, updatedAt: '2026-03-01T00:00:00.000Z' });
+  const bumped = (await h.linear.listAssignedOpenIssues(CONFIG.botUserId))[0];
+  assert.ok(
+    bumped.updatedAt > h.store.kvGet(POLL_WATERMARK_KEY)!,
+    'precondition: the bot-bumped issue clears the watermark, so pass two is not vacuous',
+  );
+  const second = await reconcile(deps, Date.parse('2026-06-01T00:00:00.000Z'));
+  await h.engine.settle();
+  assert.equal(
+    h.store.findRunsByIssue(ISSUE.id).length,
+    1,
+    'still exactly one run: no second worktree, no second claude session, no second PR',
+  );
+  assert.deepEqual(second.enqueued, [], 'pass two enqueued nothing');
+});
+
+/**
+ * The other half of T107's delegation, and the guarantee `recovery.test.ts` used to make
+ * with its own private filter: an issue with a LIVE run is not re-run either. Three poll
+ * passes, each clearing the watermark exactly as the bot's own writes make them, one run.
+ */
+test('three poll passes over an issue with a live run still produce one run (T107)', async () => {
+  const h = harness([NEEDS_INPUT]);
+
+  await h.engine.handle({ kind: 'run.requested', trigger: 'assignment', issueId: ISSUE.id });
+  await h.engine.settle();
+  assert.equal(h.store.listByState('awaiting_answer').length, 1, 'the run is parked, not over');
+
+  const deps: RecoveryDeps = {
+    store: h.store,
+    engine: h.engine,
+    scheduler: h.scheduler,
+    questions: h.questions,
+    linear: h.linear,
+    config: CONFIG,
+    log: silent,
+    now: () => Date.parse('2026-06-01T00:00:00.000Z'),
+  };
+
+  for (const stamp of ['2026-02-01', '2026-03-01', '2026-04-01']) {
+    h.linear.putIssue({ ...ISSUE, updatedAt: `${stamp}T00:00:00.000Z` });
+    const watermark = h.store.kvGet(POLL_WATERMARK_KEY);
+    assert.ok(
+      watermark === undefined || `${stamp}T00:00:00.000Z` > watermark,
+      `pass ${stamp} must clear the watermark, or it proves nothing`,
+    );
+    const report = await reconcile(deps, Date.parse('2026-06-01T00:00:00.000Z'));
+    await h.engine.settle();
+    assert.deepEqual(report.enqueued, [], `pass ${stamp} enqueued nothing`);
+  }
+
+  assert.equal(h.store.findRunsByIssue(ISSUE.id).length, 1, 'three passes, one run');
 });

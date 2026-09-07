@@ -232,8 +232,8 @@ async function failRecovered(deps: RecoveryDeps, run: Run, at: number): Promise<
  *
  * `now` bounds the watermark: a Linear clock running ahead of ours must not
  * advance the watermark past our own present, because that skips a window.
- * Re-processing is cheap here (the no-active-run check below absorbs it) and a
- * skipped window is silently lost work.
+ * Re-processing is cheap here (the engine's guard absorbs it) and a skipped
+ * window is silently lost work.
  */
 export async function reconcile(deps: RecoveryDeps, now: number): Promise<ReconcileReport> {
   const { store, engine, questions, linear, config, log } = deps;
@@ -258,11 +258,18 @@ export async function reconcile(deps: RecoveryDeps, now: number): Promise<Reconc
     for (const issue of issues) {
       seen(issue.updatedAt);
       if (issue.updatedAt <= watermark) continue;
-      // Idempotence: three passes over one issue produce one run. This is also
-      // what makes re-covering a window on failure free.
-      if (store.findActiveRunByIssue(issue.id).length > 0) continue;
+      // Idempotence lives in the engine, at the ONE site that decides whether a
+      // `run.requested` is honoured, and `trigger: 'reconcile'` is what tells it
+      // this request came from an observed state rather than from an act (T107).
+      // This loop used to hold a private copy of the engine's live-run check as
+      // an early-out; it was the wrong predicate for this producer and a second
+      // implementation of one rule, so it is deleted rather than extended.
+      //
+      // The bookkeeping below therefore OBSERVES what the engine did instead of
+      // re-deriving why -- one rule, one site.
+      const before = store.findRunsByIssue(issue.id).length;
       await engine.handle({ kind: 'run.requested', trigger: 'reconcile', issueId: issue.id });
-      report.enqueued.push(issue.id);
+      if (store.findRunsByIssue(issue.id).length > before) report.enqueued.push(issue.id);
     }
 
     // --- half two: answers whose webhook never arrived (03-CONTEXT D-05) ----
