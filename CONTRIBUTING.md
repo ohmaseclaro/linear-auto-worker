@@ -12,9 +12,14 @@ npm run verify
 ```
 
 `npm run verify` is the whole gate: clean, `tsc`, copy non-TS assets, run every test, then
-boot the daemon against fakes and shut it down. It takes well under a minute and needs no
-credentials, no network, and no Linear workspace. **A pull request is expected to leave it
-green**, and CI runs exactly the same command.
+boot the daemon against fakes and shut it down. It takes about 45 seconds on a laptop and
+needs no credentials, no network, and no Linear workspace. **A pull request is expected to
+leave it green**, and CI runs exactly the same command.
+
+That last claim is enforced rather than trusted: CI runs deliberately unauthenticated, and
+it is verifiable locally by putting a `gh` shim that exits 1 first on your `PATH` — the gate
+stays 511/511. It did not always: two integration suites used to boot the daemon without a
+fake command runner and were quietly passing on the author's `gh` login. See T91.
 
 If `verify` fails on a fresh clone before you have changed anything, that is a bug — please
 open an issue rather than working around it.
