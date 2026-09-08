@@ -23,6 +23,8 @@
  *   8. The router re-fetched the canonical issue rather than trusting the delivery body.
  *   9. A `queued` run and its genesis `run_events` row are in the database — through the
  *      real store, against the real schema (T53).
+ *  9b. The `law say` Unix socket is LISTENING at 0600 inside a 0700 directory, and it
+ *      ANSWERS — proved by a real `sendInjection`, not by a file existing (T-VOH-01/05).
  *  10. Shutdown runs BACKWARDS: the tunnel closes while the server is still accepting, the
  *      port refuses connections afterwards, a second shutdown is safe, and a run left in
  *      flight is requeued with a shutdown reason that is durable on disk (OPS-05, D-06).
@@ -30,6 +32,7 @@
  * Exits 0 on success, 1 with a readable diagnosis on any failure.
  */
 import * as net from 'node:net';
+import { existsSync, statSync } from 'node:fs';
 import { randomBytes, randomUUID } from 'node:crypto';
 
 import {
@@ -53,6 +56,7 @@ import { issuePayload, signed } from '../src/ingress/fixtures.js';
 import { KEY_ID, KEY_SECRET, WEBHOOK_LABEL } from '../src/ingress/registrar.js';
 import { createSqliteStore } from '../src/infra/store/sqlite-store.js';
 import { openStore } from '../src/infra/store/db.js';
+import { sendInjection, socketPath } from '../src/execution/inject.js';
 import type { RunCommandResult } from '../src/execution/execute-run.js';
 import type { Run } from '../src/domain/ports.js';
 
@@ -135,6 +139,33 @@ async function main(): Promise<void> {
     check(
       tunnel.probes[0] === daemon.port,
       `the tunnel's TCP probe reached the bound port (HOOK-01: bind before tunnel)`,
+    );
+
+    // ── the `law say` channel (T-VOH-01) ─────────────────────────────────────
+    // The mode is the ENTIRE authentication story for a channel that writes into an agent
+    // running `--permission-mode dontAsk` inside the operator's real clones, so it is
+    // asserted on the booted daemon and not only in a unit test.
+    const sock = socketPath(workspace.dir);
+    check(existsSync(sock), `the law say socket exists at ${sock}`);
+    check(
+      (statSync(sock).mode & 0o777) === 0o600,
+      `the say socket is 0600 (got ${(statSync(sock).mode & 0o777).toString(8)})`,
+    );
+    check(
+      (statSync(workspace.dir).mode & 0o777) === 0o700,
+      `the daemon directory is 0700 (got ${(statSync(workspace.dir).mode & 0o777).toString(8)})`,
+    );
+    // A file can exist without anything listening on it. This is what proves the daemon is
+    // SERVING: an unknown run id must come back as a refusal, not as a hang or a crash.
+    const refused = await sendInjection({
+      root: workspace.dir,
+      runId: 'no-such-run',
+      text: 'hi',
+    });
+    check(refused.ok === false, 'the say socket answered a request for an unknown run');
+    check(
+      refused.ok === false && refused.error.length > 0,
+      'and the refusal carries a reason the operator can act on',
     );
 
     // The webhook reconcile — the one boot step that mutates workspace configuration, and

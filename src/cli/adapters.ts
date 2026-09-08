@@ -22,6 +22,7 @@ import { buildChildEnv } from '../execution/agent-env.js';
 import { deliver as deliverPullRequest } from '../execution/deliver.js';
 import { defaultRunCommand, type RunCommand } from '../execution/execute-run.js';
 import type { ProgressUpdate } from '../execution/event-router.js';
+import type { Injector } from '../execution/inject.js';
 import { openRunLog } from '../execution/run-log.js';
 import { runAgent, type AgentRunOutcome, type AgentSpawn } from '../execution/supervisor.js';
 import { classifyOutcome, type WorktreeEvidence } from '../execution/verdict.js';
@@ -192,6 +193,12 @@ function worktreeFromStore(deps: ExecutionAdapterDeps, runId: RunId): Worktree |
 export interface AgentRunnerDeps extends ExecutionAdapterDeps {
   /** Injected so the run-path test can script a session with no `claude` on PATH. */
   spawn?: AgentSpawn;
+  /**
+   * `law say`'s registry. Optional because the two adapter tests that predate it construct
+   * this without one; the daemon always passes the real thing (`daemon.ts`'s injection-seam
+   * rule — it crosses no boundary this machine cannot cross, so it is never a double).
+   */
+  injector?: Injector;
 }
 
 /** One progress update, flattened to the one line a log record carries. */
@@ -457,6 +464,7 @@ export function createAgentRunner(deps: AgentRunnerDeps): AgentRunner {
       // even a session the router refuses on its first event leaves its `system/init`
       // behind — that is the run whose evidence an operator actually needs.
       const runLog = openRunLog(daemonDirOf(deps.config), req.runId);
+      let unregister: (() => void) | undefined;
       try {
         const outcome = await runAgent({
           cwd: req.cwd,
@@ -470,6 +478,12 @@ export function createAgentRunner(deps: AgentRunnerDeps): AgentRunner {
           // T113: the brief no longer travels in argv. `runAgent` writes it to the child's
           // stdin as an NDJSON `user` message immediately after the spawn.
           prompt: req.prompt,
+          // `law say`. Registered synchronously, inside `runAgent`, immediately after the
+          // prompt is written — so the window an operator can speak into is the whole time
+          // the agent is working and not a moment less.
+          onInput: (send) => {
+            unregister = deps.injector?.register(req.runId, send);
+          },
           maxRunMs: toggles.maxRunMs,
           log: deps.log.child({ runId: req.runId, sessionId: req.sessionId }),
           spawn: deps.spawn,
@@ -529,6 +543,10 @@ export function createAgentRunner(deps: AgentRunnerDeps): AgentRunner {
       } finally {
         // In a `finally` so a throwing run still flushes what it managed to say.
         runLog.close();
+        // The registry entry goes too. This is the outer half of FLAG-C(b): `runAgent`
+        // already closed stdin the moment the run ended, so a `send` between there and
+        // here fails honestly rather than lying; this just stops the map growing.
+        unregister?.();
       }
     },
   };

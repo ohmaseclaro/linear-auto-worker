@@ -3,6 +3,7 @@ import { parseArgs } from 'node:util';
 import { runDoctor, runSetupWizard } from './wizard/index.js';
 import { bootDaemon, installSignalHandlers } from './daemon.js';
 import { runStatus } from './status.js';
+import { runSay } from './say.js';
 import { runWatch } from './watch.js';
 
 const USAGE = `law — turn Linear issues assigned to your bot into pull requests
@@ -23,6 +24,10 @@ commands:
   watch [target]   Follow a run's activity live, or replay a finished one. With no target
                    it follows the single active run; otherwise give an issue key
                    (LAW-123) or the first 4+ characters of a run id.
+  say <target> <text…>
+                   Speak to a running agent mid-flight. The text is queued to the
+                   agent's stdin over a local socket the tunnel cannot reach; watch
+                   it land with "law watch". Use -- before text starting with a dash.
 
 options:
   -h, --help       Show this message.
@@ -87,6 +92,18 @@ async function main(): Promise<number> {
       return runStatus();
     case 'watch':
       return runWatch({ ...(positionals[1] !== undefined ? { target: positionals[1] } : {}) });
+    case 'say': {
+      // Joined rather than requiring quotes: `law say LAW-1 stop and run the tests` is what
+      // an operator types. `parseArgs` THROWS on an unknown option (T88), so text starting
+      // with a dash needs `--`; USAGE says so.
+      const text = positionals.slice(2).join(' ').trim();
+      if (positionals[1] === undefined || text.length === 0) {
+        console.error('usage: law say <target> <text…>\n');
+        console.error(USAGE);
+        return 1;
+      }
+      return runSay({ target: positionals[1], text });
+    }
     default:
       console.error(`unknown command: ${command}\n`);
       console.error(USAGE);

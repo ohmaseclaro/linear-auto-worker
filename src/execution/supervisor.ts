@@ -511,6 +511,13 @@ export async function runAgent(o: RunAgentInput): Promise<AgentRunOutcome> {
   await Promise.race([completed, reaped]);
   clearTimeout(timer);
   clearTimeout(ackTimer);
+  // FLAG-C(b). The run is over — close the injection window HERE, not in whatever `finally`
+  // the caller gets round to. A child can die without ever emitting a `result` (a crash, a
+  // reap), which leaves `stdinEnded` false: `write()` would then succeed against a dead
+  // pipe, EPIPE would surface asynchronously, and `law say` would already have told the
+  // operator the message was accepted. Flipping the flag at the one place that knows the
+  // run has ended makes every later `send` return false honestly.
+  endStdin();
   o.signal?.removeEventListener('abort', onAbort);
   parser.flush();
 

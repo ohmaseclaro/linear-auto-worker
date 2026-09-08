@@ -66,6 +66,7 @@ import {
 } from './adapters.js';
 import type { AgentSpawn } from '../execution/supervisor.js';
 import { pruneRunLogs, RUN_LOG_TTL_MS } from '../execution/run-log.js';
+import { createInjector, serveInjections, socketPath } from '../execution/inject.js';
 import { nonTerminalStates } from '../orchestration/recovery.js';
 import { canTransition, holdsSlot, isTerminal } from '../domain/state-machine.js';
 import type { RepoRun, RunState } from '../domain/types.js';
@@ -538,7 +539,12 @@ export async function bootDaemon(opts: BootOptions = {}): Promise<DaemonHandle> 
   const adapterDeps = { store, config, log, index, runCommand };
 
   const worktrees = createWorktreeManager(adapterDeps);
-  const agent = opts.agent ?? createAgentRunner({ ...adapterDeps, spawn: opts.spawn });
+  // Constructed REAL, in every caller including the boot smoke. `BootOptions` gains no
+  // fifth slot: the injector and its socket cross neither a process boundary this machine
+  // cannot cross nor a network one, so the rule at the top of this file says they are not
+  // an injection seam. (T-VOH-01: they must never become an HTTP route either.)
+  const injector = createInjector();
+  const agent = opts.agent ?? createAgentRunner({ ...adapterDeps, spawn: opts.spawn, injector });
   const deliverer = opts.deliverer ?? createDeliverer(adapterDeps);
 
   // P5, closed. `event-router.ts` has routed `task_summary` / `post_turn_summary` into a
@@ -722,10 +728,18 @@ export async function bootDaemon(opts: BootOptions = {}): Promise<DaemonHandle> 
   // Step 7 above runs the same two sweeps exactly once, at boot. That is what made a
   // question deadline meaningless on a daemon that stays up: `expiredQuestions` is a
   // query, not a timer, so nothing asked it. This is the thing that asks.
+  // ── 8c. the `law say` socket ───────────────────────────────────────────────
+  // After the HTTP server binds and after the scheduler starts: a socket that accepts an
+  // injection for a run nothing can dispatch is a message with nowhere to go.
+  const sayServer = await serveInjections({ injector, root, log });
+
   const tickMs = opts.tickMs ?? TICK_INTERVAL_MS;
   let ticking = false;
   const ticker = setInterval(() => void tick(), tickMs);
-  log.info({ port, publicUrl, webhookId: registration.webhookId, tickMs }, 'daemon ready');
+  log.info(
+    { port, publicUrl, webhookId: registration.webhookId, tickMs, saySocket: socketPath(root) },
+    'daemon ready',
+  );
 
   return {
     port,
@@ -796,6 +810,9 @@ export async function bootDaemon(opts: BootOptions = {}): Promise<DaemonHandle> 
       await within(tunnel.close(), 5_000, 'close tunnel', log);
       await new Promise<void>((resolve) => server.close(() => resolve()));
       server.closeAllConnections();
+      // The `law say` socket closes with the server, and UNLINKS its path — a leftover
+      // file is what the next boot's stale-socket probe has to reason about (T-VOH-05).
+      await sayServer.close();
 
       // 6. Mark what was in flight — BEFORE the store closes, which is the whole reason
       //    this step is here and not earlier.
