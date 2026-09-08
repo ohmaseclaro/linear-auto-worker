@@ -1,7 +1,7 @@
 # Traps
 
-One hundred and nine footguns found while building this daemon, kept as a running ledger so no two
-parallel work streams had to rediscover the same one.
+One hundred and eighteen footguns found while building this daemon, kept as a running ledger
+so no two parallel work streams had to rediscover the same one.
 
 **Every entry here was measured, not recalled.** Versions come from the npm registry, API
 surfaces from reading the installed package's `.d.ts`, CLI behaviour from running the CLI,
@@ -15,7 +15,7 @@ spawn processes, several of them will cost you an afternoon each.
 Measured against: `@linear/sdk@93.0.1`, `@ngrok/ngrok@1.7.0`, `better-sqlite3@13.0.3`,
 `execa@10.0.1`, Claude Code CLI `2.1.259`, `gh` `2.98.0`, Node `22.23.1`, macOS.
 
-The complete internal ledger — all 109 rows with per-phase attribution and the evidence for
+The complete internal ledger — all 118 rows with per-phase attribution and the evidence for
 each — is in [`.planning/TRAPS.md`](../.planning/TRAPS.md). This page is the subset that
 generalises.
 
@@ -419,6 +419,28 @@ The reason it survived a whole packaging pass here: `--help` had been "tested" b
 `node dist/src/cli/index.js --help`, which needs no executable bit at all. **Test a CLI by
 invoking it the way the operator will** — through the name on their PATH — or you are
 testing a different program than the one you shipped.
+
+That argument applies to error messages too. **An error that names your options is only
+useful if the options are typeable — and the test for it is a round trip, not a string
+match.** This tool's "which run did you mean?" listing printed `issueKey repoSlug state`
+while the matcher accepted only an id, an issue key, or a 4+ character id prefix. The
+moment one ticket mapped to two repos, both candidates shared the issue key, so every line
+led with the same token and retyping it reproduced the identical error — a dead end in
+precisely the case disambiguation exists for. The doc comment above the function said the
+output was "typeable straight back in".
+
+The fixture half is the sharper lesson. The two-repo case was already in the test file —
+two active runs, one key, two repos — and it asserted that both repo slugs appeared in the
+error. The construction was there; the property was not. **A test that checks what an error
+SAYS cannot see that the error is unusable as INPUT.** Split the message, take each line's
+first token, feed it back into the same resolver, and require one run per token: that
+assertion needs nobody to have thought about sibling runs, and it catches the next variant
+too. It also caught a second copy of the naming rule one line away, in the `law watch`
+command the success message suggests.
+
+The other reason it survived: every fixture in the suite gave a mapping one repo, so the
+multi-repo shape the product advertises had never been constructed at all. A monoculture of
+fixtures is a monoculture of bugs you can find.
 
 ## What only a live run finds
 
