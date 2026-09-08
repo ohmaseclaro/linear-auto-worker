@@ -112,9 +112,10 @@ Items acknowledged and carried forward from previous milestone close:
 |----|------|----------|---------|-----------|
 | 260907-szl | Worktree base must be the remote-tracking ref, not the local branch | P1 | `acf02b2`, `8891a3f`, `dcd047c` | 2026-09-07 |
 | 260907-voh | `law watch` and `law say` — live run observability and mid-flight interaction | P2 | `24bf09c`, `9712297`, `7e97c67`, `5ffc811`, `22c857d` | 2026-09-07 |
+| 260908-bms | `ALLOWED_TOOLS` under-grants (Skill, Read) and the probe that would prove it crashes | P1 | `c81df58`, `2c0b700`, `988b037` | 2026-09-08 |
 
 ## Session Continuity
 
-Last session: 2026-09-07T23:59:00.000Z
-Stopped at: Completed quick task 260907-voh (`law watch` / `law say`; prompt now on stdin)
+Last session: 2026-09-08T00:00:00.000Z
+Stopped at: Completed quick task 260908-bms (allowlist widened to six names, probe at zero denials)
 Resume file: None
