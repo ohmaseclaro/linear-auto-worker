@@ -113,9 +113,10 @@ Items acknowledged and carried forward from previous milestone close:
 | 260907-szl | Worktree base must be the remote-tracking ref, not the local branch | P1 | `acf02b2`, `8891a3f`, `dcd047c` | 2026-09-07 |
 | 260907-voh | `law watch` and `law say` — live run observability and mid-flight interaction | P2 | `24bf09c`, `9712297`, `7e97c67`, `5ffc811`, `22c857d` | 2026-09-07 |
 | 260908-bms | `ALLOWED_TOOLS` under-grants (Skill, Read) and the probe that would prove it crashes | P1 | `c81df58`, `2c0b700`, `988b037` | 2026-09-08 |
+| 260908-crx | The disambiguation listing prints a field that is not a target, so ambiguity is a dead end | P1 | `e51a388`, `4691669`, `527d325` | 2026-09-08 |
 
 ## Session Continuity
 
 Last session: 2026-09-08T00:00:00.000Z
-Stopped at: Completed quick task 260908-bms (allowlist widened to six names, probe at zero denials)
+Stopped at: Completed quick task 260908-crx (every ambiguity-listing line is now a target; 661/661 + smoke)
 Resume file: None

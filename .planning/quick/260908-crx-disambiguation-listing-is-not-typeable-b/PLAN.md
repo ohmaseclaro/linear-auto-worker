@@ -120,15 +120,21 @@ runTarget(run, all) -> string      // the shortest thing an operator can type to
                                    // exactly this run, given every run in the store
 ```
 
-Two branches, and each one is literally a clause of `matches()`:
+**CORRECTED DURING EXECUTION.** As first drafted, both branches decided uniqueness with a
+hand-written scan over ONE field, while `matches()` has three clauses — leaving two reachable
+gaps (a branch-1 issue key that is also another run's id prefix, and a run whose id is a strict
+prefix of another's). Uniqueness is therefore decided by **`matches()` itself**: a candidate
+token is accepted only when `all.filter((r) => matches(r, token)).length === 1`.
 
-1. **The issue key**, when `run.issueKey` is non-null and no OTHER run in `all` carries the
-   same key compared case-insensitively (the comparison must match `matches()`'s, which is
-   case-insensitive at `:40`). Friendly, and accepted by the issue-key clause.
-2. **Otherwise an id prefix** `run.id.slice(0, L)`, where `L` is the smallest length from
-   `MIN_PREFIX` upward at which no other run's id shares that prefix. Accepted by the
-   prefix clause because `L >= MIN_PREFIX` and the value is a prefix of `run.id` — both
-   conditions hold by the way the string is built, not because two constants agree.
+Two branches, and each one is literally a clause of `matches()`, with that one uniqueness test
+applied to both:
+
+1. **The issue key**, when `run.issueKey` is non-null and `matches()` accepts exactly one run
+   for it. Friendly, and accepted by the issue-key clause by construction.
+2. **Otherwise an id prefix** `run.id.slice(0, L)`, growing `L` from `MIN_PREFIX` until
+   `matches()` accepts exactly one run. Accepted by the prefix clause because `L >= MIN_PREFIX`
+   and the value is a prefix of `run.id` — both conditions hold by the way the string is built,
+   not because two constants agree.
 
 `MIN_PREFIX` stays declared exactly once and is read by both `runTarget` and `matches`. That
 is constraint 1 discharged: there is one floor, one function that emits, and the emitted
@@ -200,9 +206,13 @@ copy of the naming rule into a consumer of the one rule. `watch.ts:183` destruct
 - **Never `mock.method`** (T88).
 - Tests colocated in `src/` as `*.test.ts`.
 - **Falsify every new check** (T71/T76) and paste the RED text actually seen.
-- The round-trip tests MUST go RED against today's unmodified `resolve-run.ts`. If one passes
-  before the fix, the fixture is not reproducing sibling runs — repair the fixture, never
-  weaken the assertion.
+- The round-trip tests over the SIBLING shape (fixture A) and the ambiguous-target path MUST go
+  RED against today's unmodified `resolve-run.ts`. If either passes before the fix, the fixture
+  is not reproducing sibling runs — repair the fixture, never weaken the assertion.
+- **Fixture B is expected GREEN at HEAD, and must not be "repaired".** Two ACTIVE runs sharing
+  `o/api` with DISTINCT keys `LAW-1`/`LAW-2` already round-trip by construction — distinct keys
+  are already unique targets. B is a NON-REGRESSION proving the id-prefix branch closes the
+  same-repo ambiguity without a `repoSlug` matcher branch; it is not a falsification.
 </constraints>
 
 <tasks>
@@ -424,9 +434,11 @@ copy of the naming rule into a consumer of the one rule. `watch.ts:183` destruct
 </commits>
 
 <success_criteria>
-1. The round-trip property is asserted over BOTH listings and three fixtures, and **each was
-   observed RED against unmodified `resolve-run.ts`** with the failure text pasted. A test
-   that only asserts the new format does not satisfy this.
+1. The round-trip property is asserted over BOTH listings and three fixtures. The two that CAN
+   fail — the sibling shape (fixture A) and the ambiguous-target path — were **observed RED
+   against unmodified `resolve-run.ts`** with the failure text pasted; fixture B is green at HEAD
+   by construction (see `<constraints>`). A test that only asserts the new format does not
+   satisfy this.
 2. The two-repo sibling fixture exists — two ACTIVE runs, one `issueKey`, two `repoSlug`s —
    and the operator reaches exactly one of them using only a token the tool printed.
 3. `npm run verify` green: 660/660 (or the exact number the runner prints, stated) plus the
