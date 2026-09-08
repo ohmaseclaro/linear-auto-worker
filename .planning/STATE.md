@@ -8,7 +8,7 @@ status: milestone_complete
 stopped_at: v1.0 shipped, published, and live-verified end to end
 last_updated: "2026-09-07T23:59:00.000Z"
 last_activity: 2026-09-07
-last_activity_desc: "Quick task 260907-szl: worktree branches off the remote-tracking ref (T112)"
+last_activity_desc: "Quick task 260907-voh: `law watch` / `law say`, prompt on stdin (T113-T115)"
 progress:
   total_phases: 8
   completed_phases: 8
@@ -111,9 +111,10 @@ Items acknowledged and carried forward from previous milestone close:
 | ID | Task | Severity | Commits | Completed |
 |----|------|----------|---------|-----------|
 | 260907-szl | Worktree base must be the remote-tracking ref, not the local branch | P1 | `acf02b2`, `8891a3f`, `dcd047c` | 2026-09-07 |
+| 260907-voh | `law watch` and `law say` — live run observability and mid-flight interaction | P2 | `24bf09c`, `9712297`, `7e97c67`, `5ffc811`, `22c857d` | 2026-09-07 |
 
 ## Session Continuity
 
 Last session: 2026-09-07T23:59:00.000Z
-Stopped at: Completed quick task 260907-szl (worktree base = remote-tracking ref)
+Stopped at: Completed quick task 260907-voh (`law watch` / `law say`; prompt now on stdin)
 Resume file: None
