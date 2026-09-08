@@ -6,9 +6,9 @@ current_phase: 8
 current_phase_name: Setup Wizard & Safety Pass
 status: milestone_complete
 stopped_at: v1.0 shipped, published, and live-verified end to end
-last_updated: "2026-09-07T23:45:00.000Z"
+last_updated: "2026-09-07T23:59:00.000Z"
 last_activity: 2026-09-07
-last_activity_desc: Live UAT re-run confirmed the T107 and T108 fixes on the real path
+last_activity_desc: "Quick task 260907-szl: worktree branches off the remote-tracking ref (T112)"
 progress:
   total_phases: 8
   completed_phases: 8
@@ -106,8 +106,14 @@ Items acknowledged and carried forward from previous milestone close:
 | Resume semantics | An interrupted run resumes as a fresh attempt on a new branch (`-2` suffix) rather than continuing the original branch; the spent `--session-id` cannot be reused. Abandoned worktree and local branch are pruned at the next boot, verified live. | Accepted as designed | 2026-09-07 |
 | Cleanup timing | Worktree pruning is deferred to the next boot rather than running at delivery, so a long-lived daemon accumulates delivered worktrees until restart. | Open, low priority | 2026-09-07 |
 
+## Quick Tasks Completed
+
+| ID | Task | Severity | Commits | Completed |
+|----|------|----------|---------|-----------|
+| 260907-szl | Worktree base must be the remote-tracking ref, not the local branch | P1 | `acf02b2`, `8891a3f`, `dcd047c` | 2026-09-07 |
+
 ## Session Continuity
 
-Last session: 2026-09-06T18:45:00.366Z
-Stopped at: Completed 07-04-PLAN.md
+Last session: 2026-09-07T23:59:00.000Z
+Stopped at: Completed quick task 260907-szl (worktree base = remote-tracking ref)
 Resume file: None
