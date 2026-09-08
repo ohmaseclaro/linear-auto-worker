@@ -148,3 +148,82 @@ test('a finished run resolves when nothing live shares its key', () => {
   assert.equal(result.run.state, 'delivered');
   store.close();
 });
+
+// ---------------------------------------------------------------------------------------
+// The round trip. Every line the listing prints must itself be a target that resolves to
+// exactly ONE run, and different lines must resolve to different runs — otherwise the
+// error that exists to disambiguate is a dead end. Asserting the FORMAT of the listing
+// cannot see this defect; only feeding the output back in as input can.
+// ---------------------------------------------------------------------------------------
+
+/** Resolves every line of an ambiguity listing back through the resolver. Returns the ids. */
+function roundTrip(store: Store, target?: string): string[] {
+  const result = resolveRunTarget(store, target);
+  assert.ok('error' in result, 'expected an ambiguity listing, got a run');
+  const lines = result.error.split('\n').slice(1); // drop the header
+  assert.ok(lines.length > 1, `expected several candidates, got:\n${result.error}`);
+  const ids = lines.map((line) => {
+    const token = line.trim().split(/\s+/)[0] as string;
+    const back = resolveRunTarget(store, token);
+    assert.ok(
+      'run' in back,
+      `the listing printed \`${token}\`; feeding it back gave: ` +
+        `${'error' in back ? back.error : ''}`,
+    );
+    return back.run.id;
+  });
+  assert.equal(
+    new Set(ids).size,
+    ids.length,
+    `two printed lines resolved to the SAME run: ${ids.join(', ')}`,
+  );
+  return ids;
+}
+
+const SIBLINGS = [
+  row({
+    id: 'a1b2c3d4-1111-4111-8111-000000000001',
+    issueKey: 'COD-9',
+    repoSlug: 'dzfweb/miracle-shop',
+  }),
+  row({
+    id: 'e5f6a7b8-2222-4222-8222-000000000002',
+    issueKey: 'COD-9',
+    repoSlug: 'ohmaseclaro/api',
+  }),
+];
+
+test('ambiguous target: every line the listing prints resolves to exactly one run', () => {
+  // One ticket mapped to two repos is two ACTIVE runs sharing an issue key —
+  // `config.ts:50` allows it and `status.ts:43-48` documents it. Retyping the key must
+  // not reproduce the identical error.
+  const store = storeWith(...SIBLINGS);
+  const ids = roundTrip(store, 'COD-9');
+  assert.equal(ids.length, 2);
+  store.close();
+});
+
+test('no target: every line the listing prints resolves to exactly one run (siblings)', () => {
+  const store = storeWith(...SIBLINGS);
+  const ids = roundTrip(store);
+  assert.equal(ids.length, 2);
+  store.close();
+});
+
+test('no target: the same holds for two runs sharing a REPO across two tickets', () => {
+  // The mirror image. Distinct keys already round-trip, so this passes at HEAD by
+  // construction — it is the non-regression proving the id-prefix branch closes the
+  // same-repo ambiguity without adding `repoSlug` as a fourth accepted target form.
+  const store = storeWith(
+    row({ id: 'c1c1c1c1-3333-4333-8333-000000000003', issueKey: 'LAW-1', repoSlug: 'o/api' }),
+    row({
+      id: 'd2d2d2d2-4444-4444-8444-000000000004',
+      issueKey: 'LAW-2',
+      repoSlug: 'o/api',
+      state: 'preparing',
+    }),
+  );
+  const ids = roundTrip(store);
+  assert.equal(ids.length, 2);
+  store.close();
+});
