@@ -19,8 +19,11 @@
  *
  * Pass: exit 0, zero permission denials, the required GSD skills present, the echoed
  * permission mode matching, and at least one new commit in the throwaway repository.
- * Fail: it prints every denied tool name with its decision_reason_type and tool_input.
- * THAT LIST IS THE ANSWER — add those names to `ALLOWED_TOOLS` in
+ * Fail: it prints ONE entry per distinct refusal — the two denial sources report the same
+ * refusals with different fields, so `pickDenials` unions them on `tool_use_id` instead of
+ * concatenating (which double-counted) — always with the tool name and the reason, and
+ * with `input:` only when a source carried one. The `suggested:` line is reached whatever
+ * fields a denial carries. THAT LIST IS THE ANSWER — add those names to `ALLOWED_TOOLS` in
  * `src/execution/agent-args.ts` and run it again.
  */
 import { randomUUID } from 'node:crypto';
@@ -38,7 +41,8 @@ import {
   userMessageLine,
 } from '../src/execution/agent-args.js';
 import { buildChildEnv } from '../src/execution/agent-env.js';
-import { REQUIRED_GSD_SKILLS } from '../src/execution/event-router.js';
+import { REQUIRED_GSD_SKILLS, pickDenials } from '../src/execution/event-router.js';
+import type { PermissionDenial } from '../src/execution/event-router.js';
 import { makeLineParser } from '../src/execution/stream-parser.js';
 
 /**
@@ -59,12 +63,6 @@ const PROBE_PROMPT = [
   '',
   'End your turn with the JSON result your schema requires.',
 ].join('\n');
-
-interface Denial {
-  tool_name?: string;
-  decision_reason_type?: string;
-  tool_input?: unknown;
-}
 
 function fail(message: string): never {
   console.error(`\nFAIL: ${message}`);
@@ -113,7 +111,12 @@ async function main(): Promise<void> {
   let numTurns: number | undefined;
   let subtype: string | undefined;
   let isError: boolean | undefined;
-  const denials: Denial[] = [];
+  // TWO lists, never one. The `system/permission_denied` events and the result event's
+  // `permission_denials[]` describe the SAME refusals with DIFFERENT fields, so pushing
+  // both into one array reported every refusal twice. `pickDenials` — the product's own
+  // rule, imported rather than re-derived — unions them on `tool_use_id`.
+  const fromEvents: PermissionDenial[] = [];
+  let fromResult: PermissionDenial[] | undefined;
   const badLines: string[] = [];
 
   const parser = makeLineParser(
@@ -128,7 +131,7 @@ async function main(): Promise<void> {
         console.log(`init: ${skills?.length ?? 0} skills, permissionMode=${permissionMode}`);
       }
       if (e['type'] === 'system' && e['subtype'] === 'permission_denied') {
-        denials.push(e as Denial);
+        fromEvents.push(e as unknown as PermissionDenial);
         console.log(`DENIED ${String(e['tool_name'])} (${String(e['decision_reason_type'])})`);
       }
       if (e['type'] === 'result') {
@@ -136,7 +139,7 @@ async function main(): Promise<void> {
         isError = e['is_error'] as boolean | undefined;
         costUsd = e['total_cost_usd'] as number | undefined;
         numTurns = e['num_turns'] as number | undefined;
-        for (const d of (e['permission_denials'] as Denial[] | undefined) ?? []) denials.push(d);
+        fromResult = e['permission_denials'] as PermissionDenial[] | undefined;
       }
     },
     (line) => badLines.push(line)
@@ -164,6 +167,8 @@ async function main(): Promise<void> {
   parser.flush();
   const { exitCode } = await child;
 
+  const denials = pickDenials(fromEvents, fromResult);
+
   const after = (await git('rev-list', '--count', 'HEAD')).stdout.trim();
   const newCommits = Number(after) - Number(before);
 
@@ -180,7 +185,12 @@ async function main(): Promise<void> {
     console.error('ALLOWED_TOOLS in src/execution/agent-args.ts and run this again:\n');
     for (const d of denials) {
       console.error(`  ${d.tool_name}  reason=${d.decision_reason_type}`);
-      console.error(`      input: ${JSON.stringify(d.tool_input).slice(0, 300)}`);
+      // `JSON.stringify(undefined)` returns the VALUE `undefined`, so `.slice` on it threw
+      // here and killed the script before the `suggested:` line below — the one line it
+      // exists to print. A denial seen only as an event carries no `tool_input` at all, so
+      // absence is a NORMAL case and gets a skipped line, never an error path.
+      const input = JSON.stringify(d.tool_input);
+      if (input !== undefined) console.error(`      input: ${input.slice(0, 300)}`);
     }
     console.error(`\n  suggested: ${[...new Set(denials.map((d) => d.tool_name))].join(' ')}`);
     console.error(`\nprobe repository left in place for inspection: ${repo}`);

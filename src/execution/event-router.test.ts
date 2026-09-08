@@ -13,6 +13,7 @@ import { dirname, join } from 'node:path';
 import {
   makeEventRouter,
   assertSessionUsable,
+  pickDenials,
   REQUIRED_GSD_SKILLS,
 } from './event-router.js';
 import type { ProgressUpdate, PermissionDenial, SystemInitEvent } from './event-router.js';
@@ -225,6 +226,52 @@ test('each system/permission_denied increments the tally and records tool_name a
   assert.equal(denials[0]?.decision_reason_type, 'mode');
   assert.equal(denials[1]?.tool_name, 'Bash');
   assert.equal(denials[1]?.decision_reason_type, 'subcommandResults');
+});
+
+// --- pickDenials: the two-source union ------------------------------------------------
+
+// The shapes below are the ones measured on the COD-7 run (2026-09-08): the SAME
+// `tool_use_id` reported twice, once by a `system/permission_denied` event carrying
+// `decision_reason_type` and no `tool_input`, once by `result.permission_denials[]`
+// carrying `tool_input` and no `decision_reason_type`.
+test('pickDenials reports one entry per tool_use_id and keeps the field each source alone carries', () => {
+  const fromEvents: PermissionDenial[] = [
+    { tool_name: 'Skill', tool_use_id: 'toolu_01V2', tool_input: undefined, decision_reason_type: 'mode' },
+    { tool_name: 'Read', tool_use_id: 'toolu_01Un', tool_input: undefined, decision_reason_type: 'mode' },
+  ];
+  const fromResult: PermissionDenial[] = [
+    { tool_name: 'Skill', tool_use_id: 'toolu_01V2', tool_input: { command: 'graphify' } },
+    { tool_name: 'Read', tool_use_id: 'toolu_01Un', tool_input: { file_path: 'README.md' } },
+  ];
+
+  const picked = pickDenials(fromEvents, fromResult);
+
+  // Two refusals, not four: concatenating the sources is the double count.
+  assert.equal(picked.length, 2);
+  assert.deepEqual(
+    picked.map((d) => d.tool_name),
+    ['Skill', 'Read']
+  );
+  // Both diagnostic fields survive — that is what a union buys over a preference.
+  assert.equal(picked[0]?.decision_reason_type, 'mode');
+  assert.deepEqual(picked[0]?.tool_input, { command: 'graphify' });
+  assert.equal(picked[1]?.decision_reason_type, 'mode');
+  assert.deepEqual(picked[1]?.tool_input, { file_path: 'README.md' });
+});
+
+test('pickDenials falls back to each source alone, and to [] when the result event is absent', () => {
+  const eventOnly: PermissionDenial[] = [
+    { tool_name: 'Skill', tool_use_id: 'toolu_01V2', tool_input: undefined, decision_reason_type: 'mode' },
+  ];
+  const resultOnly: PermissionDenial[] = [
+    { tool_name: 'Read', tool_use_id: 'toolu_01Un', tool_input: { file_path: 'x' } },
+  ];
+
+  // A REAPED run has no result event at all — the events are the only witness.
+  assert.deepEqual(pickDenials(eventOnly, undefined), eventOnly);
+  // A run whose events were unparsable still reports what the result carried.
+  assert.deepEqual(pickDenials([], resultOnly), resultOnly);
+  assert.deepEqual(pickDenials([], undefined), []);
 });
 
 // --- The result event: structured_output, never a second parse ------------------------

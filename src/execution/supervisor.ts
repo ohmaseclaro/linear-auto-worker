@@ -8,7 +8,7 @@
 import { execa } from 'execa';
 import type { Logger } from '../infra/logger.js';
 import { userMessageLine } from './agent-args.js';
-import { makeEventRouter } from './event-router.js';
+import { makeEventRouter, pickDenials } from './event-router.js';
 import type { AgentResultEvent, PermissionDenial, ProgressUpdate } from './event-router.js';
 import { makeLineParser } from './stream-parser.js';
 
@@ -528,11 +528,10 @@ export async function runAgent(o: RunAgentInput): Promise<AgentRunOutcome> {
     exitCode,
     sessionId: o.sessionId,
     resultEvent,
-    // Prefer the ROUTER's tally over the result event's (07-CONTEXT P5). A run the
-    // supervisor reaped has no result event at all, so reading only
-    // `resultEvent.permission_denials` reports zero denials for exactly the runs whose
-    // denials explain why they had to be reaped.
-    denials: router.denials.length > 0 ? [...router.denials] : (resultEvent?.permission_denials ?? []),
+    // The two-source rule lives in `pickDenials` (event-router.ts) so the probe can call
+    // the same function instead of re-deriving it. See its comment for why this is a
+    // union keyed on tool_use_id and not a concatenation.
+    denials: pickDenials(router.denials, resultEvent?.permission_denials),
     badLines,
     timedOut,
     tokensUsed: router.tokensUsed,
