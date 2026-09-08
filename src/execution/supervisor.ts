@@ -125,6 +125,17 @@ export interface RunAgentInput {
    * that reports no pid is the case `reap` already logs as unkillable.
    */
   onSpawn?: (pid: number | undefined) => void;
+  /**
+   * Every parsed stream event, in emission order, BEFORE the router sees it.
+   *
+   * The ordering is load-bearing, not stylistic: `router.route` THROWS on a session it
+   * refuses (`assertSessionUsable`), and the refused session is precisely the one whose
+   * `system/init` an operator needs to look at — a hook placed after the route call
+   * records nothing for exactly the runs that need a record. Unparseable lines come
+   * through here too, as `{type:'law.badline', line}`, so a malformed stream is visible in
+   * `law watch` and not only in pino.
+   */
+  onEvent?: (event: unknown) => void;
 }
 
 export interface AgentRunOutcome {
@@ -250,9 +261,15 @@ export async function runAgent(o: RunAgentInput): Promise<AgentRunOutcome> {
   const badLines: string[] = [];
   const router = makeEventRouter({ log: o.log, onProgress: o.onProgress });
   const parser = makeLineParser(
-    (event) => router.route(event),
+    (event) => {
+      // BEFORE `route`, deliberately. See `RunAgentInput.onEvent`: `route` throws on a
+      // session it refuses, and that session's `system/init` is the one worth keeping.
+      o.onEvent?.(event);
+      router.route(event);
+    },
     (line) => {
       badLines.push(line);
+      o.onEvent?.({ type: 'law.badline', line });
       o.log.warn({ line: line.slice(0, 200) }, 'unparseable agent stream line');
     }
   );

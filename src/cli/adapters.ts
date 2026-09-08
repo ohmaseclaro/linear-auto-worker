@@ -22,6 +22,7 @@ import { buildChildEnv } from '../execution/agent-env.js';
 import { deliver as deliverPullRequest } from '../execution/deliver.js';
 import { defaultRunCommand, type RunCommand } from '../execution/execute-run.js';
 import type { ProgressUpdate } from '../execution/event-router.js';
+import { openRunLog } from '../execution/run-log.js';
 import { runAgent, type AgentRunOutcome, type AgentSpawn } from '../execution/supervisor.js';
 import { classifyOutcome, type WorktreeEvidence } from '../execution/verdict.js';
 import { prepareWorktree, reconcileWorktrees, removeWorktree } from '../execution/worktree.js';
@@ -471,62 +472,72 @@ export function createAgentRunner(deps: AgentRunnerDeps): AgentRunner {
             ...(remaining !== undefined ? { maxBudgetUsd: remaining } : {}),
           });
 
-      const outcome = await runAgent({
-        cwd: req.cwd,
-        args,
-        // The allowlist FIRST (D-15 / T28 / AGNT-11), then the run's own `LAW_*` labels.
-        // `buildChildEnv` starts from an empty object, so neither `LINEAR_API_KEY` nor
-        // `NGROK_AUTHTOKEN` can reach the child by omission — and `req.env` carries only
-        // run metadata, never a credential.
-        env: { ...buildChildEnv(req.runId), ...req.env },
-        sessionId: req.sessionId,
-        maxRunMs: toggles.maxRunMs,
-        log: deps.log.child({ runId: req.runId, sessionId: req.sessionId }),
-        spawn: deps.spawn,
-        signal,
-        onProgress: (update) => onProgress?.(req.runId, progressLine(update)),
-        // Gap D7. Persisted immediately rather than after the run, because the case the
-        // column exists for is the daemon dying mid-run — at which point "after" never
-        // happens.
-        onSpawn: (pid) => {
-          if (pid !== undefined) deps.store.updateRun(req.runId, { pid });
-        },
-      });
+      // T-VOH-02. The per-run activity trace `law watch` reads. Opened before the spawn so
+      // even a session the router refuses on its first event leaves its `system/init`
+      // behind — that is the run whose evidence an operator actually needs.
+      const runLog = openRunLog(daemonDirOf(deps.config), req.runId);
+      try {
+        const outcome = await runAgent({
+          cwd: req.cwd,
+          args,
+          // The allowlist FIRST (D-15 / T28 / AGNT-11), then the run's own `LAW_*` labels.
+          // `buildChildEnv` starts from an empty object, so neither `LINEAR_API_KEY` nor
+          // `NGROK_AUTHTOKEN` can reach the child by omission — and `req.env` carries only
+          // run metadata, never a credential.
+          env: { ...buildChildEnv(req.runId), ...req.env },
+          sessionId: req.sessionId,
+          maxRunMs: toggles.maxRunMs,
+          log: deps.log.child({ runId: req.runId, sessionId: req.sessionId }),
+          spawn: deps.spawn,
+          signal,
+          onProgress: (update) => onProgress?.(req.runId, progressLine(update)),
+          // Gap D7. Persisted immediately rather than after the run, because the case the
+          // column exists for is the daemon dying mid-run — at which point "after" never
+          // happens.
+          onSpawn: (pid) => {
+            if (pid !== undefined) deps.store.updateRun(req.runId, { pid });
+          },
+          onEvent: (e) => runLog.write(e),
+        });
 
-      // Gap D6. `classifyOutcome` has read `total_cost_usd` since Phase 4 and the terminal
-      // notification threw it away, reporting `$0.0000` on every run because there was no
-      // column to read. Written here, on the way past, so it survives even for a run that
-      // is about to be classified `failed`: a run that burned twenty dollars and produced
-      // nothing is precisely the one an operator needs the number for.
-      //
-      // ACCUMULATED, not assigned. One run is one row but can be several `claude`
-      // sessions: every answered question resumes the run through this same function, and
-      // `total_cost_usd` is that SESSION's cost, not the run's. Assigning would silently
-      // report only the last session, so a run that asked three questions would under-report
-      // by however much the first three sessions cost — the runs that cost the most being
-      // exactly the ones it would under-report the worst.
-      const priorRun = deps.store.getRun(req.runId);
-      const prior =
-        priorRun?.kind === 'repo'
-          ? { costUsd: priorRun.costUsd ?? 0, tokensUsed: priorRun.tokensUsed ?? 0 }
-          : { costUsd: 0, tokensUsed: 0 };
-      deps.store.updateRun(req.runId, {
-        costUsd: prior.costUsd + (outcome.resultEvent?.total_cost_usd ?? 0),
-        tokensUsed: prior.tokensUsed + usageTokens(outcome.resultEvent?.usage),
-      });
+        // Gap D6. `classifyOutcome` has read `total_cost_usd` since Phase 4 and the terminal
+        // notification threw it away, reporting `$0.0000` on every run because there was no
+        // column to read. Written here, on the way past, so it survives even for a run that
+        // is about to be classified `failed`: a run that burned twenty dollars and produced
+        // nothing is precisely the one an operator needs the number for.
+        //
+        // ACCUMULATED, not assigned. One run is one row but can be several `claude`
+        // sessions: every answered question resumes the run through this same function, and
+        // `total_cost_usd` is that SESSION's cost, not the run's. Assigning would silently
+        // report only the last session, so a run that asked three questions would under-report
+        // by however much the first three sessions cost — the runs that cost the most being
+        // exactly the ones it would under-report the worst.
+        const priorRun = deps.store.getRun(req.runId);
+        const prior =
+          priorRun?.kind === 'repo'
+            ? { costUsd: priorRun.costUsd ?? 0, tokensUsed: priorRun.tokensUsed ?? 0 }
+            : { costUsd: 0, tokensUsed: 0 };
+        deps.store.updateRun(req.runId, {
+          costUsd: prior.costUsd + (outcome.resultEvent?.total_cost_usd ?? 0),
+          tokensUsed: prior.tokensUsed + usageTokens(outcome.resultEvent?.usage),
+        });
 
-      // The abort may have won the race inside `runAgent`, which reports the reap rather
-      // than a verdict. A cancelled run is not a failed one.
-      if (signal.aborted) return { status: 'cancelled' };
+        // The abort may have won the race inside `runAgent`, which reports the reap rather
+        // than a verdict. A cancelled run is not a failed one.
+        if (signal.aborted) return { status: 'cancelled' };
 
-      // TRAPS T73. `toAgentResult` alone trusts `result.structured_output` verbatim, so an
-      // agent that says `complete` having written nothing IS complete as far as the engine
-      // can tell — the single silent failure research is most emphatic about (Pitfall 3:
-      // judge by evidence in the worktree, never by exit code or self-report). The
-      // evidence-based classifier existed in `verdict.ts` from Phase 4 and nothing on the
-      // live path called it. Gather the worktree facts and let it decide.
-      const evidence = await gatherEvidence(deps, req.cwd, repoSlug);
-      return toAgentResult(outcome, evidence);
+        // TRAPS T73. `toAgentResult` alone trusts `result.structured_output` verbatim, so an
+        // agent that says `complete` having written nothing IS complete as far as the engine
+        // can tell — the single silent failure research is most emphatic about (Pitfall 3:
+        // judge by evidence in the worktree, never by exit code or self-report). The
+        // evidence-based classifier existed in `verdict.ts` from Phase 4 and nothing on the
+        // live path called it. Gather the worktree facts and let it decide.
+        const evidence = await gatherEvidence(deps, req.cwd, repoSlug);
+        return toAgentResult(outcome, evidence);
+      } finally {
+        // In a `finally` so a throwing run still flushes what it managed to say.
+        runLog.close();
+      }
     },
   };
 }

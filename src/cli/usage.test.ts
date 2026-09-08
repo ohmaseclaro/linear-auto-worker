@@ -34,6 +34,11 @@ const silent = {
 } as never;
 
 const config = {
+  // T94: the fixture is widened, never the production code. `worktreeRoot` is REQUIRED by
+  // the config schema and this fixture simply omitted it; `createAgentRunner` now derives
+  // the run-log directory from it the same way it has always derived the worktree
+  // directory. A throwaway temp path keeps the trace out of the operator's real root.
+  worktreeRoot: join(tmpdir(), `law-runlog-fixture-${process.pid}`, 'worktrees'),
   concurrency: 3,
   maxTurns: 40,
   defaults: {

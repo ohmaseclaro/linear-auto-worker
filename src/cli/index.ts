@@ -3,6 +3,7 @@ import { parseArgs } from 'node:util';
 import { runDoctor, runSetupWizard } from './wizard/index.js';
 import { bootDaemon, installSignalHandlers } from './daemon.js';
 import { runStatus } from './status.js';
+import { runWatch } from './watch.js';
 
 const USAGE = `law — turn Linear issues assigned to your bot into pull requests
 
@@ -19,9 +20,15 @@ commands:
                    webhook, then process assigned issues until interrupted.
   status           Show queued and in-flight runs, read straight from the store. Works
                    whether or not the daemon is running.
+  watch [target]   Follow a run's activity live, or replay a finished one. With no target
+                   it follows the single active run; otherwise give an issue key
+                   (LAW-123) or the first 4+ characters of a run id.
 
 options:
   -h, --help       Show this message.
+
+the activity "watch" renders is plain NDJSON at
+~/.linear-auto-worker/runs/<runId>.jsonl — readable with jq and kept for 7 days.
 
 config lives in ~/.linear-auto-worker/ (config.json, .env at 0600, the SQLite database
 and logs). Only LINEAR_API_KEY and NGROK_AUTHTOKEN are ever prompted for.`;
@@ -78,6 +85,8 @@ async function main(): Promise<number> {
     }
     case 'status':
       return runStatus();
+    case 'watch':
+      return runWatch({ ...(positionals[1] !== undefined ? { target: positionals[1] } : {}) });
     default:
       console.error(`unknown command: ${command}\n`);
       console.error(USAGE);

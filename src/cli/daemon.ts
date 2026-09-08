@@ -65,6 +65,7 @@ import {
   mappingIndex,
 } from './adapters.js';
 import type { AgentSpawn } from '../execution/supervisor.js';
+import { pruneRunLogs, RUN_LOG_TTL_MS } from '../execution/run-log.js';
 import { nonTerminalStates } from '../orchestration/recovery.js';
 import { canTransition, holdsSlot, isTerminal } from '../domain/state-machine.js';
 import type { RepoRun, RunState } from '../domain/types.js';
@@ -588,6 +589,17 @@ export async function bootDaemon(opts: BootOptions = {}): Promise<DaemonHandle> 
     return [] as string[];
   });
   if (pruned.length > 0) log.info({ pruned }, 'pruned worktrees with no non-terminal run');
+
+  // ── 3c. stale run logs, same never-fatal shape (T-VOH-03) ─────────────────
+  // A 45-minute GSD run's activity trace is large and its value is short-lived; keeping
+  // them forever is a slow disk leak holding raw agent output (T-VOH-02). Never fatal for
+  // the same reason as the worktree collection above.
+  try {
+    const prunedLogs = pruneRunLogs(root, RUN_LOG_TTL_MS, Date.now());
+    if (prunedLogs.length > 0) log.info({ count: prunedLogs.length }, 'pruned stale run logs');
+  } catch (err: unknown) {
+    log.warn({ err: String(err) }, 'run log pruning failed; continuing');
+  }
 
   // The signing secret is OURS (HOOK-03 / 03-02 D-03): generated locally, persisted to kv
   // before any remote call, and never read back from Linear. Generating-and-persisting here

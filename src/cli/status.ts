@@ -16,10 +16,9 @@ import { defaultRoot } from '../infra/config.js';
 import { openStore } from '../infra/store/db.js';
 import { createSqliteStore, type QuestionRow, type RunRow } from '../infra/store/sqlite-store.js';
 import { HOLDS_SLOT, TERMINAL } from '../domain/types.js';
-
-/** Non-terminal states, newest work first. Mirrors `recovery.nonTerminalStates()` without
- *  importing the recovery module, which pulls in the whole orchestration graph. */
-const ACTIVE = ['queued', 'preparing', 'running', 'awaiting_answer', 'delivering'] as const;
+// Moved to `resolve-run.ts` when `law watch` and `law say` needed the same list. Three
+// copies of the non-terminal states is how they drift; this file imports the one.
+import { ACTIVE } from './resolve-run.js';
 
 /** How many finished runs to show once there is nothing in flight. */
 const RECENT_LIMIT = 5;
