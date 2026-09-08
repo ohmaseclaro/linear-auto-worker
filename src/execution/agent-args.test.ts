@@ -18,6 +18,7 @@ import {
   PERMISSION_PROMPTS,
   buildClaudeArgs,
   buildResumeArgs,
+  userMessageLine,
   type ClaudeArgsInput,
 } from './agent-args.js';
 
@@ -34,7 +35,6 @@ const MAX_TURNS = 40;
 function input(over: Partial<ClaudeArgsInput> = {}): ClaudeArgsInput {
   return {
     sessionId: SESSION,
-    prompt: 'implement the ticket',
     schema: SCHEMA,
     maxTurns: MAX_TURNS,
     ...over,
@@ -127,31 +127,46 @@ test('--permission-prompts is none, because nobody is present to answer one', ()
   }
 });
 
-test('argv-array safety: a hostile prompt reaches the array as exactly one entry', () => {
-  // This is what makes injection from a Linear issue title structurally impossible rather
-  // than filtered. No shell is involved anywhere on this path, so quoting is not a
-  // concern that exists — but only for as long as the prompt stays a single entry.
+test('T99, relocated and STRENGTHENED: a hostile prompt appears NOWHERE in argv', () => {
+  // This assertion used to read `after(nasty, '-p') === hostile` — the prompt was the
+  // value of `-p` and the claim was that it stayed exactly one array entry, so no shell
+  // quoting boundary existed to break.
+  //
+  // Since T113 the prompt does not travel in argv AT ALL: it is an NDJSON `user` message on
+  // the child's stdin. The control did not stop mattering, it moved — so it is re-pointed
+  // here at the stronger claim the new shape supports, and its companion at the stdin seam
+  // lives in `supervisor.test.ts` ("the prompt reaches the child on STDIN"). A control that
+  // moves without being re-asserted silently stops checking anything.
   const hostile = 'line one\n"quoted"; $(rm -rf /) `whoami` --bare';
-  const plain = buildClaudeArgs(input({ prompt: 'plain' }));
-  const nasty = buildClaudeArgs(input({ prompt: hostile }));
-
-  assert.equal(nasty.length, plain.length);
-  assert.equal(after(nasty, '-p'), hostile);
-  assert.equal(count(nasty, hostile), 1);
+  const args = buildClaudeArgs(input());
+  assert.ok(
+    !args.some((a) => a.includes(hostile)),
+    'the prompt must not reach argv in any form',
+  );
+  // And nothing may follow the bare `-p` and be eaten as its optional value (M3).
+  assert.equal(args[args.length - 1], '-p');
+  assert.equal(count(args, '-p'), 1);
 });
 
-test('T57: buildResumeArgs keeps -p, drops --session-id, keeps the rest', () => {
+test('T57: buildResumeArgs keeps a BARE -p, drops --session-id, keeps the rest', () => {
   // The plan and the research both said "replace -p with --resume". Taken literally the
   // worker resumes the session and then says NOTHING to it — the human's answer never
   // arrives and the whole Q&A feature is inert while every log line looks healthy.
-  // --session-id is the flag that actually hard-errors on reuse:
-  // "Session ID <uuid> is already in use.", exit 1, empty stdout.
-  const answer = 'use the existing migration runner';
-  const args = buildResumeArgs(input({ prompt: answer }));
+  //
+  // T113 moved the answer off argv and onto stdin, so the half of this test that asserted
+  // `after(args, '-p') === answer` cannot live here any more. It moved to
+  // `supervisor.test.ts` ("a resumed session is TOLD the answer, on stdin") rather than
+  // being deleted. What stays here is the flag shape the resume depends on.
+  const args = buildResumeArgs(input());
 
   assert.equal(after(args, '--resume'), SESSION);
   assert.ok(!args.includes('--session-id'), 'a spent session id is a hard error on reuse');
-  assert.equal(after(args, '-p'), answer, 'without -p the resumed session is never told the answer');
+  assert.equal(args[args.length - 1], '-p', '--input-format only works with --print');
+  assert.equal(
+    after(args, '-p'),
+    undefined,
+    'a VALUE on -p is silently discarded under --input-format and the session then hangs (M2)',
+  );
 
   // The resumed turn is still a supervised, schema-constrained, non-interactive turn.
   assert.equal(after(args, '--permission-mode'), PERMISSION_MODE);
@@ -160,12 +175,54 @@ test('T57: buildResumeArgs keeps -p, drops --session-id, keeps the rest', () => 
   assert.ok(args.includes('--json-schema'));
 });
 
+test('T113: both paths carry --input-format stream-json and --replay-user-messages', () => {
+  for (const [name, build] of BOTH) {
+    const args = build(input());
+    assert.equal(after(args, '--input-format'), 'stream-json', name);
+    assert.equal(count(args, '--replay-user-messages'), 1, name);
+    // The receipt is what turns a discarded prompt into a sentence instead of 45 minutes
+    // of silence, so it is not optional on either path.
+  }
+});
+
+test('T113/M3: -p is LAST and carries no value, on BOTH builders', () => {
+  for (const [name, build] of BOTH) {
+    const args = build(input());
+    assert.equal(args[args.length - 1], '-p', `${name}: -p must be last`);
+    assert.equal(after(args, '-p'), undefined, `${name}: -p must carry no value`);
+  }
+});
+
+test('userMessageLine is the exact envelope measured working on the real binary (M3)', () => {
+  const line = userMessageLine('do the thing');
+  assert.ok(line.endsWith('\n'), 'NDJSON: one message, one line');
+  assert.deepEqual(JSON.parse(line), {
+    type: 'user',
+    message: { role: 'user', content: [{ type: 'text', text: 'do the thing' }] },
+  });
+});
+
+test('a hostile message survives as exactly one JSON string in the envelope', () => {
+  const hostile = 'line one\n"quoted"; $(rm -rf /) `whoami` --bare';
+  const parsed = JSON.parse(userMessageLine(hostile)) as {
+    message: { content: Array<{ text: string }> };
+  };
+  assert.equal(parsed.message.content.length, 1);
+  assert.equal(parsed.message.content[0]?.text, hostile);
+});
+
 test('the fresh and resumed paths agree on every flag value they share', () => {
   // The drift is invisible until a resumed session silently produces nothing, which is to
   // say until an answered question silently produces nothing.
   const fresh = buildClaudeArgs(input());
   const resumed = buildResumeArgs(input());
-  for (const flag of ['--output-format', '--permission-mode', '--permission-prompts', '--json-schema']) {
+  for (const flag of [
+    '--output-format',
+    '--input-format',
+    '--permission-mode',
+    '--permission-prompts',
+    '--json-schema',
+  ]) {
     assert.equal(after(resumed, flag), after(fresh, flag), flag);
   }
   const a = fresh.indexOf('--allowedTools');

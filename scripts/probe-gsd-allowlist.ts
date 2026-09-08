@@ -35,6 +35,7 @@ import {
   ALLOWED_TOOLS,
   PERMISSION_MODE,
   buildClaudeArgs,
+  userMessageLine,
 } from '../src/execution/agent-args.js';
 import { buildChildEnv } from '../src/execution/agent-env.js';
 import { REQUIRED_GSD_SKILLS } from '../src/execution/event-router.js';
@@ -89,10 +90,17 @@ async function main(): Promise<void> {
   // its own copy of the flag list or its own environment verifies nothing about the thing
   // that ships.
   const sessionId = randomUUID();
+  // T113: the prompt is no longer an argv value — it is written to stdin below. `scripts/`
+  // is NOT in tsconfig's `include`, so nothing would have told you if this were missed.
   const args = buildClaudeArgs({
     sessionId,
-    prompt: PROBE_PROMPT,
     schema: AGENT_RESULT_JSON_SCHEMA,
+    // PRE-EXISTING SILENT BREAK, found while making the T113 edit: `maxTurns` became a
+    // REQUIRED field of `ClaudeArgsInput` at the release pass and this call was never
+    // updated, so the probe has not type-checked since. That is exactly the failure mode
+    // the constraint warns about — `scripts/` is outside tsconfig's `include`, so the
+    // compiler says nothing. 40 is `Config.maxTurns`'s shipped default.
+    maxTurns: 40,
   });
   const env = buildChildEnv(`probe-${sessionId}`);
 
@@ -143,6 +151,12 @@ async function main(): Promise<void> {
     buffer: false,
     reject: false,
   });
+  // The whole session, in one write, before anything is read. Under `--input-format
+  // stream-json` a child with nothing on stdin sits silent until its deadline (M2/T113);
+  // the EOF is what ends it (M8).
+  child.stdin?.write(userMessageLine(PROBE_PROMPT));
+  child.stdin?.end();
+
   if (child.stdout) {
     child.stdout.setEncoding('utf8');
     for await (const chunk of child.stdout) parser.push(chunk as string);

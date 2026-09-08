@@ -18,6 +18,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, test } from 'node:test';
+import { PassThrough } from 'node:stream';
 
 import { createAgentRunner, mappingIndex } from './adapters.js';
 import { openStore } from '../infra/store/db.js';
@@ -109,6 +110,7 @@ function sessionReporting(costUsd: number, usage: Record<string, number> | undef
       })}\n`;
     })(),
     stderr: (async function* () {})(),
+    stdin: new PassThrough(),
     kill: () => true,
     pid: SPAWN_PID,
     then: (r: (v: { exitCode: number }) => void) => r({ exitCode: 0 }),
@@ -191,6 +193,63 @@ test('D6: a resumed run ACCUMULATES cost across its sessions', async () => {
   const run = store.getRun(RUN_ID)!;
   assert.equal(run.costUsd, 3.75, 'two sessions on one run cost the sum of both');
   assert.equal(run.tokensUsed, 300);
+});
+
+test('T114/M6: two results in ONE session store the LAST cost and the SUM of the tokens', async () => {
+  // Different from the D6 case above, which is about cost across SEPARATE `runner.run()`
+  // calls (an answered question resuming the run). This is about several results WITHIN
+  // one call — what streaming input makes possible and what `law say` produces.
+  //
+  // The two numbers behave OPPOSITELY (M6, measured): `total_cost_usd` is cumulative for
+  // the session, `usage` is per message. Getting them backwards is T95 in both directions
+  // at once.
+  store.updateRun(RUN_ID, { costUsd: 0, tokensUsed: 0 });
+  const runner = createAgentRunner({
+    store: store as never,
+    config,
+    log: silent,
+    index: mappingIndex(config),
+    runCommand: gitWithCommits as never,
+    spawn: (() => ({
+      stdout: (async function* () {
+        yield `${JSON.stringify({
+          type: 'system',
+          subtype: 'init',
+          session_id: 's',
+          permissionMode: 'dontAsk',
+          skills: ['gsd-execute-phase', 'gsd-plan-phase', 'gsd-verify-work'],
+        })}\n`;
+        yield `${JSON.stringify({
+          type: 'result',
+          subtype: 'success',
+          is_error: false,
+          structured_output: { status: 'complete', summary: 'one', prTitle: 't', prBody: 'b' },
+          total_cost_usd: 0.5398,
+          usage: { input_tokens: 4, cache_read_input_tokens: 51_165 },
+          permission_denials: [],
+        })}\n`;
+        yield `${JSON.stringify({
+          type: 'result',
+          subtype: 'success',
+          is_error: false,
+          structured_output: { status: 'complete', summary: 'two', prTitle: 't', prBody: 'b' },
+          total_cost_usd: 0.5693,
+          usage: { input_tokens: 2, cache_read_input_tokens: 51_211 },
+          permission_denials: [],
+        })}\n`;
+      })(),
+      stderr: (async function* () {})(),
+      stdin: new PassThrough(),
+      pid: SPAWN_PID,
+      then: (r: (v: { exitCode: number }) => void) => r({ exitCode: 0 }),
+    })) as never,
+  });
+  await runner.run(request, new AbortController().signal);
+
+  const run = store.getRun(RUN_ID)!;
+  assert.equal(run.costUsd, 0.5693, 'the LAST result IS the session total — never summed');
+  assert.notEqual(run.costUsd, 1.1091, 'summing the cumulative figure double-counts (M6)');
+  assert.equal(run.tokensUsed, 102_382, 'usage is per message and must be summed (M6)');
 });
 
 test('D6: a result event with no usage block adds zero, not NaN', async () => {

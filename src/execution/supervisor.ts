@@ -7,6 +7,7 @@
  */
 import { execa } from 'execa';
 import type { Logger } from '../infra/logger.js';
+import { userMessageLine } from './agent-args.js';
 import { makeEventRouter } from './event-router.js';
 import type { AgentResultEvent, PermissionDenial, ProgressUpdate } from './event-router.js';
 import { makeLineParser } from './stream-parser.js';
@@ -20,6 +21,10 @@ import { makeLineParser } from './stream-parser.js';
  * makes that mistake a compile error instead of a runtime one, and is what lets a test
  * script the whole supervision path with two async generators.
  *
+ * `stdin` was added by T113 and is the ONE addition this interface has taken. It is
+ * required because the prompt no longer travels in argv — it is written here, as an NDJSON
+ * `user` message, immediately after the spawn. `kill` is still absent, on purpose.
+ *
  * Note what is NOT on this interface: the handle's own `kill` method. T29 measured it —
  * even with `detached: true` it killed the child, ORPHANED the grandchild, and left this
  * promise PERMANENTLY PENDING, because the survivor holds the stdout pipe open. Omitting
@@ -29,6 +34,7 @@ export interface AgentSubprocess extends PromiseLike<{ exitCode?: number | undef
   pid?: number | undefined;
   stdout: AsyncIterable<unknown> | null;
   stderr: AsyncIterable<unknown> | null;
+  stdin: NodeJS.WritableStream | null;
 }
 
 export type AgentSpawn = (
@@ -74,6 +80,31 @@ export type EscalationStep = 'SIGINT' | 'SIGTERM' | 'SIGKILL';
  */
 export const DEFAULT_MAX_RUN_MS = 45 * 60_000;
 
+/**
+ * How long a spawned session has to acknowledge itself before it is presumed hung.
+ *
+ * The M2/T113 failure — `-p` discarded under `--input-format stream-json`, session hangs
+ * forever — is invisible to `npm run verify`: the only instrument that can see it is the
+ * human-run `scripts/probe-stream-input.ts`, which nothing runs on a schedule. Our own
+ * regressions are contained by the suite; a VENDOR regression (the CLI ships a new major
+ * roughly weekly) is not. Without this deadline such a change would reproduce M2 on every
+ * run, the log would look healthy, no gate would fire, and the operator would find out 45
+ * minutes later.
+ *
+ * Acknowledgement is either a `system/init` or any replayed `user` event. Both are things
+ * a live session produces within a few seconds — measured on CLI 2.1.263 at 2.6s to init
+ * and 4.2s to the first echo, on a cold start with 113 skills — and a hung one produces
+ * neither, ever.
+ *
+ * 60 SECONDS, chosen deliberately. The measurement bounds it from below: the hook burst
+ * landed in 0.7s and then nothing arrived for the full 90s the probe waited. 60s is ~85x
+ * the observed hook latency — far past any cold start, a slow `SessionStart` hook chain or
+ * a loaded machine — while being 1/45th of the default `maxRunMs`. Erring long is the
+ * safer error here because the penalty for a false positive is reaping real work; erring
+ * much longer forfeits the point of the deadline.
+ */
+export const AGENT_ACK_TIMEOUT_MS = 60_000;
+
 /** Grace after SIGINT before escalating. Pattern 6's measured figure. */
 export const SIGINT_GRACE_MS = 15_000;
 /** Grace after SIGTERM before the un-catchable one. */
@@ -87,8 +118,30 @@ export interface RunAgentInput {
   /** From `buildChildEnv()`. */
   env: NodeJS.ProcessEnv;
   sessionId: string;
+  /**
+   * The brief. REQUIRED, because since T113 it no longer travels in argv — it is written to
+   * the child's stdin as an NDJSON `user` message immediately after the spawn.
+   */
+  prompt: string;
+  /**
+   * `law say`. Called once, synchronously, right after the prompt is written, with a
+   * `send` that writes one more message into the LIVE session.
+   *
+   * `send` returns `false` rather than throwing, for anything: stdin already ended, a dead
+   * pipe, a child that never had one. It NEVER throws — the caller is a socket handler in
+   * the daemon and a throw there would take down more than the message.
+   *
+   * The injection window is spawn -> first `result`. See the stdin-close rule below.
+   */
+  onInput?: (send: (text: string) => boolean) => void;
   /** `MappingToggles.maxRunMs`. Non-positive falls back to `DEFAULT_MAX_RUN_MS`. */
   maxRunMs: number;
+  /**
+   * FLAG-A. Defaults to `AGENT_ACK_TIMEOUT_MS`; a parameter for exactly the reason
+   * `maxRunMs` is one — a deadline that can only be reached by waiting it out in real time
+   * is a deadline no test can drive, and an untested reap ladder is worse than none.
+   */
+  ackTimeoutMs?: number;
   log: Logger;
   spawn?: AgentSpawn;
   /** Injected so the escalation is a state machine a test can drive deterministically. */
@@ -151,6 +204,18 @@ export interface AgentRunOutcome {
   badLines: string[];
   /** AGNT-08. The verdict reads this to classify a truncated run as `partial`. */
   timedOut: boolean;
+  /**
+   * M6. Summed across EVERY result in the session (per message), against `total_cost_usd`
+   * which is cumulative and must be taken from the last one. See `EventRouter.tokensUsed`.
+   */
+  tokensUsed: number;
+  /**
+   * T113. How many `user`-role events the CLI emitted. A SUPERSET of the messages the
+   * daemon wrote (see `EventRouter.userEchoes`); what matters is zero versus non-zero.
+   * Zero, on a run that also produced no result, IS the M2 signature — the prompt was
+   * never consumed.
+   */
+  userEchoes: number;
   /** Which escalation step the group finally died to. Undefined if it was never killed. */
   killedBy?: EscalationStep;
 }
@@ -195,6 +260,10 @@ const defaultIsAlive: IsAlive = (pid) => {
 };
 
 const defaultSleep: Sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function isResultEvent(event: unknown): boolean {
+  return typeof event === 'object' && event !== null && (event as { type?: unknown }).type === 'result';
+}
 
 function toText(chunk: unknown): string {
   if (typeof chunk === 'string') return chunk;
@@ -260,12 +329,33 @@ export async function runAgent(o: RunAgentInput): Promise<AgentRunOutcome> {
 
   const badLines: string[] = [];
   const router = makeEventRouter({ log: o.log, onProgress: o.onProgress });
+  // Assigned once the child exists; the parser closes over them, and the parser is built
+  // first because `spawn` needs nothing from it.
+  let endStdin: () => void = () => undefined;
+  let onAgentAck: () => void = () => undefined;
+
   const parser = makeLineParser(
     (event) => {
       // BEFORE `route`, deliberately. See `RunAgentInput.onEvent`: `route` throws on a
       // session it refuses, and that session's `system/init` is the one worth keeping.
       o.onEvent?.(event);
+      // T114 — THE TERMINAL RULE, and the trap this whole task is built around.
+      //
+      // `result` is NOT terminal and must never become one. Under streaming input the CLI
+      // emits one result per USER MESSAGE (M4), so an injected `law say` produces a second
+      // one; treating the first as "the run is over" ships a pull request after turn one
+      // while the agent is still working. The run ends when the PROCESS EXITS —
+      // `Promise.race([completed, reaped])` below, unchanged.
+      //
+      // The ONE thing a result decides is when stdin closes, and closing here is what makes
+      // today's semantics survive: a run that sends one message gets one result (M4), stdin
+      // closes, the child hits EOF (M8) and exits, exactly as before. A message written
+      // BEFORE this close is still delivered — pipe bytes precede EOF — so the operator's
+      // correction gets its turn and its result, and `routed.result` is last-wins (M10).
+      if (isResultEvent(event)) endStdin();
       router.route(event);
+      // FLAG-A, live. Either signal means a real session is on the other end of the pipe.
+      if (router.routed.init !== undefined || router.userEchoes > 0) onAgentAck();
     },
     (line) => {
       badLines.push(line);
@@ -278,6 +368,53 @@ export async function runAgent(o: RunAgentInput): Promise<AgentRunOutcome> {
   o.log.info({ pid: child.pid, sessionId: o.sessionId }, 'agent spawned');
   // Before the first await below: a run reaped early must still have left its pid behind.
   o.onSpawn?.(child.pid);
+
+  /**
+   * T113. The prompt, on stdin, SYNCHRONOUSLY and before any await — the same
+   * before-the-first-await rule `onSpawn` above follows, and for a sharper reason: this is
+   * the only thing that makes the session do anything at all. Under `--input-format
+   * stream-json` a session with nothing on stdin sits silent until its deadline (M2).
+   *
+   * A failure here is a hard failure of the run, not a warning. It is logged at error and
+   * the run is left to reach the no-result path, which now names the cause.
+   */
+  let stdinEnded = false;
+  function writeLine(line: string): boolean {
+    if (stdinEnded || !child.stdin) return false;
+    try {
+      // A `false` return is BACKPRESSURE, not failure — the bytes are buffered and will be
+      // flushed. Only the stream's async `'error'` event means the write was lost, and by
+      // then this call has long returned. Reporting backpressure as failure would tell the
+      // operator their message was dropped when it was in fact delivered.
+      child.stdin.write(line);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  if (!writeLine(userMessageLine(o.prompt))) {
+    o.log.error(
+      { sessionId: o.sessionId },
+      'could not write the prompt to the agent stdin — the session will produce nothing (T113)',
+    );
+  }
+
+  // `law say`. The window this opens is spawn -> first `result`; see the stdin close below.
+  o.onInput?.((text: string) => writeLine(userMessageLine(text)));
+
+  // M8: EOF on stdin is what ends the session — measured, clean exit 0 within 0.6s, and
+  // nothing else terminated it in 90 seconds. Idempotent: the first result closes it and
+  // every subsequent one is a no-op.
+  endStdin = (): void => {
+    if (stdinEnded) return;
+    stdinEnded = true;
+    try {
+      child.stdin?.end();
+    } catch {
+      /* already gone; the child is about to exit anyway */
+    }
+  };
 
   let timedOut = false;
   let killedBy: EscalationStep | undefined;
@@ -313,6 +450,25 @@ export async function runAgent(o: RunAgentInput): Promise<AgentRunOutcome> {
     timedOut = true;
     void beginEscalation('deadline');
   }, maxRunMs);
+
+  /**
+   * FLAG-A / T113. The M2 containment that does not depend on anybody remembering to run a
+   * probe. See `AGENT_ACK_TIMEOUT_MS` for why it exists and why the number is what it is.
+   *
+   * Deliberately NOT setting `timedOut`: that flag means "the maxRunMs deadline reaped a
+   * run that was working", and the verdict reads it to ship committed work as `partial`.
+   * A session that never acknowledged its prompt has done nothing and committed nothing;
+   * it reaches the no-result path, where `userEchoes === 0` names the cause exactly.
+   */
+  const ackTimer = setTimeout(() => {
+    o.log.error(
+      { sessionId: o.sessionId, afterMs: o.ackTimeoutMs ?? AGENT_ACK_TIMEOUT_MS },
+      'the agent produced neither a system/init nor a replayed prompt — presuming the stdin ' +
+        'delivery failed (T113/M2) and reaping now rather than at maxRunMs',
+    );
+    void beginEscalation('no-agent-ack');
+  }, o.ackTimeoutMs ?? AGENT_ACK_TIMEOUT_MS);
+  onAgentAck = (): void => clearTimeout(ackTimer);
 
   // Not `timedOut`: a cancelled run is not a truncated one, and the verdict reads that
   // flag to decide `partial` (T61).
@@ -354,6 +510,7 @@ export async function runAgent(o: RunAgentInput): Promise<AgentRunOutcome> {
   // Completion is whichever of the two finishes first, never the promise alone.
   await Promise.race([completed, reaped]);
   clearTimeout(timer);
+  clearTimeout(ackTimer);
   o.signal?.removeEventListener('abort', onAbort);
   parser.flush();
 
@@ -371,6 +528,8 @@ export async function runAgent(o: RunAgentInput): Promise<AgentRunOutcome> {
     denials: router.denials.length > 0 ? [...router.denials] : (resultEvent?.permission_denials ?? []),
     badLines,
     timedOut,
+    tokensUsed: router.tokensUsed,
+    userEchoes: router.userEchoes,
     killedBy,
   };
 }

@@ -10,6 +10,8 @@
  * being silently ignored (they carry no assertion and no progress signal this phase
  * owns) — a run log consumer can read them straight off the parser's `onEvent` if a
  * future phase wants the tool-use trace; duplicating them here is not this module's job.
+ * `user` gained a COUNTER and nothing more (T113): the count is the delivery receipt, the
+ * content still belongs to whoever reads `onEvent`.
  */
 import { LawError } from '../domain/errors.js';
 import type { Logger } from '../infra/logger.js';
@@ -92,6 +94,33 @@ export interface AgentResultEvent {
   usage?: Record<string, unknown>;
 }
 
+/**
+ * Gap D6, moved here from `cli/adapters.ts` so the per-message tally has ONE
+ * implementation. Every token the session moved, from a result event's `usage` block.
+ *
+ * All four counts, not just input + output. Measured on a real captured result event
+ * (`fixtures/stream-events.jsonl`): `input_tokens: 2, output_tokens: 4,
+ * cache_creation_input_tokens: 61520`. Reporting 6 for that run would be arithmetically
+ * true and completely useless — the number an operator wants is what the session moved,
+ * and it lives almost entirely in the cache columns.
+ *
+ * Unknown shapes read as 0 rather than throwing: this is a reporting field on the terminal
+ * path, and a run must never fail because Anthropic added a key.
+ */
+export function usageTokens(usage: Record<string, unknown> | undefined): number {
+  if (!usage) return 0;
+  const keys = [
+    'input_tokens',
+    'output_tokens',
+    'cache_creation_input_tokens',
+    'cache_read_input_tokens',
+  ] as const;
+  return keys.reduce((total, key) => {
+    const value = usage[key];
+    return total + (typeof value === 'number' && Number.isFinite(value) ? value : 0);
+  }, 0);
+}
+
 export interface RoutedRun {
   init?: SystemInitEvent;
   result?: AgentResultEvent;
@@ -109,6 +138,37 @@ export interface EventRouter {
    * run that produced nothing for no stated reason.
    */
   readonly denials: readonly PermissionDenial[];
+  /**
+   * M6, and it is T95 pointed BOTH ways at once. Under streaming input a session emits one
+   * result per user message, and the two numbers on those results behave OPPOSITELY:
+   *
+   *   - `total_cost_usd` is CUMULATIVE for the session (measured 0.5398 -> 0.5693 ->
+   *     0.5991 across three results). Take the LAST one; summing it over-reports.
+   *   - `usage` is PER MESSAGE (`input_tokens` 4 -> 2 -> 2 while
+   *     `cache_read_input_tokens` climbed 51165 -> 51211 -> 51394). SUM it; taking the last
+   *     one under-reports a session the operator talked to.
+   *
+   * Getting them backwards is T95 in both directions simultaneously, which is why the sum
+   * lives here — one implementation, beside the events it sums.
+   */
+  readonly tokensUsed: number;
+  /**
+   * T113. How many `user`-role events have been seen (`--replay-user-messages`, M11).
+   *
+   * This is the daemon's only POSITIVE receipt that a message written to the child's stdin
+   * was actually consumed. Zero echoes on a run that also produced no result is the exact
+   * signature of M2 — the prompt silently discarded, the session hanging — and it is what
+   * turns 45 minutes of mystery into one sentence. `supervisor.ts` also reads it LIVE, as
+   * half of its agent-acknowledgement deadline.
+   *
+   * It is a SUPERSET of "messages the daemon wrote", and deliberately so. Measured live on
+   * CLI 2.1.263 (`scripts/probe-stream-input.ts`, 2026-09-07): three written messages
+   * produced NINE `user` events — the operator's text, an internal
+   * `[structured-output-enforce]` turn, and an empty tool-result turn, per message. Do not
+   * read this as a message count. Read it as what it is used for: any `user` event at all
+   * means a live session consumed something, and none means nothing was ever consumed.
+   */
+  readonly userEchoes: number;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -175,6 +235,7 @@ export interface MakeEventRouterOptions {
 export function makeEventRouter(o: MakeEventRouterOptions): EventRouter {
   const routed: RoutedRun = {};
   const denials: PermissionDenial[] = [];
+  const tally = { tokensUsed: 0, userEchoes: 0 };
   const assertOptions: AssertSessionUsableOptions = {
     expectedPermissionMode: o.expectedPermissionMode,
     requiredSkills: o.requiredSkills,
@@ -183,12 +244,30 @@ export function makeEventRouter(o: MakeEventRouterOptions): EventRouter {
   return {
     routed,
     denials,
+    get tokensUsed(): number {
+      return tally.tokensUsed;
+    },
+    get userEchoes(): number {
+      return tally.userEchoes;
+    },
     route(event: unknown): void {
       if (!isRecord(event)) return;
       const type = event['type'];
       const subtype = event['subtype'];
 
+      if (type === 'user') {
+        // Count only. Nothing is stored: the content belongs to the run log, which reads
+        // it straight off the parser's `onEvent`, and duplicating it here is what this
+        // module's header forbids.
+        tally.userEchoes += 1;
+        return;
+      }
+
       if (type === 'system' && subtype === 'init') {
+        // M9: a SECOND `system/init` is emitted for every subsequent user message, carrying
+        // the same session_id, permissionMode and skill list. `assertSessionUsable`
+        // therefore re-runs per message. That is intended and harmless (the values are
+        // identical) — but any code assuming exactly one init per session is wrong.
         const init = event as unknown as SystemInitEvent;
         routed.init = init;
         o.log.debug({ skills: init.skills?.length, mode: init.permissionMode }, 'agent init');
@@ -239,7 +318,18 @@ export function makeEventRouter(o: MakeEventRouterOptions): EventRouter {
         // T31: `structured_output` is captured as the object the event already carries.
         // The string field beside it (`result`) is never read and never JSON.parse'd —
         // that would be duplicated work and a second, unnecessary failure mode.
+        //
+        // T114. This handler RECORDS and never terminates. Under `--input-format
+        // stream-json` a result arrives per USER MESSAGE (M4), not per run: an injected
+        // `law say` produces a second one, and LAST WINS is the correct outcome because
+        // the operator's correction is what should govern the verdict (M10). The run ends
+        // when the CHILD PROCESS EXITS. Making this event terminal ships a pull request
+        // after turn one while the agent is still working; `supervisor.test.ts` goes RED
+        // at `'turn one'` if anyone tries.
         routed.result = event as unknown as AgentResultEvent;
+        tally.tokensUsed += usageTokens(
+          (event as { usage?: Record<string, unknown> }).usage,
+        );
         return;
       }
 

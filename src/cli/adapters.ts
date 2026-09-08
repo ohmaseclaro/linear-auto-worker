@@ -231,32 +231,6 @@ function denialPhrase(outcome: AgentRunOutcome): string {
  * Failure here is not fatal and must not be: if `git` cannot answer, the caller falls back
  * to trusting the agent, which is exactly the old behaviour and strictly no worse.
  */
-/**
- * Gap D6. Every token the session moved, from the result event's `usage` block.
- *
- * All four counts, not just input + output. Measured on a real captured result event
- * (`fixtures/stream-events.jsonl`): `input_tokens: 2, output_tokens: 4,
- * cache_creation_input_tokens: 61520`. Reporting 6 for that run would be arithmetically
- * true and completely useless — the number an operator wants is what the session moved,
- * and it lives almost entirely in the cache columns.
- *
- * Unknown shapes read as 0 rather than throwing: this is a reporting field on the terminal
- * path, and a run must never fail because Anthropic added a key.
- */
-function usageTokens(usage: Record<string, unknown> | undefined): number {
-  if (!usage) return 0;
-  const keys = [
-    'input_tokens',
-    'output_tokens',
-    'cache_creation_input_tokens',
-    'cache_read_input_tokens',
-  ] as const;
-  return keys.reduce((total, key) => {
-    const value = usage[key];
-    return total + (typeof value === 'number' && Number.isFinite(value) ? value : 0);
-  }, 0);
-}
-
 async function gatherEvidence(
   deps: AgentRunnerDeps,
   worktreePath: string,
@@ -346,10 +320,19 @@ export function toAgentResult(
   }
   const event = outcome.resultEvent;
   if (!event) {
+    // T113. No result AND no replayed echo is the M2 signature exactly: the prompt was
+    // written and never consumed, so the session sat there producing nothing. That one
+    // clause is the difference between a diagnosis and a 45-minute mystery — and it is
+    // what the `no-agent-ack` deadline in `supervisor.ts` surfaces after 60 seconds
+    // instead of 45 minutes.
+    const undelivered =
+      outcome.userEchoes === 0
+        ? ' and never echoed the prompt back — the stdin delivery failed'
+        : '';
     return {
       status: 'crashed',
       exitCode: outcome.exitCode ?? -1,
-      stderrTail: `the agent produced no result event${denialPhrase(outcome)}`,
+      stderrTail: `the agent produced no result event${undelivered}${denialPhrase(outcome)}`,
     };
   }
 
@@ -459,14 +442,12 @@ export function createAgentRunner(deps: AgentRunnerDeps): AgentRunner {
       const args = req.resume
         ? buildResumeArgs({
             sessionId: req.sessionId,
-            prompt: req.prompt,
             schema: AGENT_RESULT_JSON_SCHEMA,
             maxTurns: deps.config.maxTurns,
             ...(remaining !== undefined ? { maxBudgetUsd: remaining } : {}),
           })
         : buildClaudeArgs({
             sessionId: req.sessionId,
-            prompt: req.prompt,
             schema: AGENT_RESULT_JSON_SCHEMA,
             maxTurns: deps.config.maxTurns,
             ...(remaining !== undefined ? { maxBudgetUsd: remaining } : {}),
@@ -486,6 +467,9 @@ export function createAgentRunner(deps: AgentRunnerDeps): AgentRunner {
           // run metadata, never a credential.
           env: { ...buildChildEnv(req.runId), ...req.env },
           sessionId: req.sessionId,
+          // T113: the brief no longer travels in argv. `runAgent` writes it to the child's
+          // stdin as an NDJSON `user` message immediately after the spawn.
+          prompt: req.prompt,
           maxRunMs: toggles.maxRunMs,
           log: deps.log.child({ runId: req.runId, sessionId: req.sessionId }),
           spawn: deps.spawn,
@@ -518,8 +502,16 @@ export function createAgentRunner(deps: AgentRunnerDeps): AgentRunner {
             ? { costUsd: priorRun.costUsd ?? 0, tokensUsed: priorRun.tokensUsed ?? 0 }
             : { costUsd: 0, tokensUsed: 0 };
         deps.store.updateRun(req.runId, {
+          // The LAST result's `total_cost_usd` IS the session total (M6) — it is cumulative
+          // across the results WITHIN one session. So `prior.costUsd + ...` is correct and
+          // must NOT be "fixed" into summing every result: that double-counts the session.
           costUsd: prior.costUsd + (outcome.resultEvent?.total_cost_usd ?? 0),
-          tokensUsed: prior.tokensUsed + usageTokens(outcome.resultEvent?.usage),
+          // The opposite for tokens, and both additions are needed because they add
+          // different things. `outcome.tokensUsed` is already summed ACROSS the results in
+          // one session (usage is per message, M6); `prior.tokensUsed +` accumulates that
+          // across the several SESSIONS one run can have. `usage.test.ts`'s `a resumed run
+          // ACCUMULATES` case asserts the outer addition at 300 — do not drop it.
+          tokensUsed: prior.tokensUsed + outcome.tokensUsed,
         });
 
         // The abort may have won the race inside `runAgent`, which reports the reap rather

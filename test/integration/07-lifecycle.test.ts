@@ -134,6 +134,9 @@ function detachedGrandchildSpawn(seen: SpawnRecord) {
       pid: child.pid,
       stdout,
       stderr: child.stderr as AsyncIterable<unknown> | null,
+      // T113: the prompt travels here now. This case is about the reap ladder against a
+      // real process tree, so it passes the real child's stdin straight through.
+      stdin: child.stdin as NodeJS.WritableStream | null,
       then: (onOk, onErr) => (child as PromiseLike<{ exitCode?: number | undefined }>).then(onOk, onErr),
     } satisfies AgentSubprocess;
   };
