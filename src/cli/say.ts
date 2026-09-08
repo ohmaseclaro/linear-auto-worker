@@ -77,7 +77,10 @@ export async function runSay(deps: SayDeps): Promise<number> {
     // the CLI replaying the message back (`--replay-user-messages`, M11), which shows up in
     // `law watch` as a `»` line. Claiming "sent" would be claiming something this process
     // cannot know.
-    print(`queued to ${label(run)} — \`law watch ${run.issueKey ?? run.id.slice(0, 8)}\` to see it land`);
+    // The watch argument comes from the RESOLVER (`resolved.target`), not from a second
+    // copy of the naming rule: under sibling runs of one ticket, `run.issueKey` is
+    // ambiguous and suggesting it would hand the operator back the dead end he just hit.
+    print(`queued to ${label(run)} — \`law watch ${resolved.target}\` to see it land`);
     return 0;
   } finally {
     db.close();
