@@ -487,6 +487,22 @@ comment directly above the fetch stated the correct intent, word for word — a 
 fork off whatever the operator last happened to have pulled. The comment was right and the
 line below it did the opposite, and the comment is what stopped anyone reading the line.
 
+**An allowlist that under-grants is invisible in every signal the system emits.** The
+spawned agent's `--allowedTools` was `Write Edit Bash`. On a real delivered ticket the agent
+was refused `Skill` and `Read` — reason `mode` — and simply routed around both: it read files
+with `head` and `cat` through `Bash`, did the work, and shipped a correct pull request. Exit
+code 0, PR opened, Linear comment posted, test gate green. **Every signal the product
+produces said success**, and the only witness was the run's own event log. This is the worst
+shape a bug can take here, because there is nothing to notice: under-granting does not fail,
+it just quietly makes the product do less, and the less it does still looks like enough.
+
+The generalisation is about what a test can and cannot claim. A unit test on that constant
+pins its VALUE — that nobody edited it — and can never establish its SUFFICIENCY. Only a live
+probe that spawns the real binary under the product's own child environment can say the list
+is wide enough, and that answer expires: an unknown tool name in `--allowedTools` is accepted
+SILENTLY rather than rejected, so a vendor-side rename narrows the grant with no error
+anywhere. Re-run the probe after every CLI upgrade.
+
 ## The one that cost the most
 
 **A security control that is only tested in its own module is not known to be wired.**
@@ -519,3 +535,19 @@ Two of them turned out to be vacuous: a grep gate matched the word `SIGTERM` in 
 so deleting the actual signal handler still passed it; a fake command runner returning exit 0
 to everything answered "yes" to every probe, including
 `git show-ref --verify --quiet refs/heads/<branch>`, which is supposed to be a question.
+
+The next sentence of that argument is worse: **an instrument that has never been RUN is not
+known to work either, and the one here crashed while printing its own conclusion.** The
+allowlist probe existed for exactly one question and nothing had ever executed it. When it
+finally was, it named one denied tool and then died on `JSON.stringify(undefined)` — which
+returns the *value* `undefined`, so `.slice(0, 300)` threw — and the single line the whole
+script exists to produce was never reached. The same root cause hid a second defect: two
+different sources report the same refusal with different fields, and the probe concatenated
+them, so it reported twice as many denials as there were.
+
+Two habits come out of it. Exercise an instrument's FAILURE path on real data, not just its
+happy path — the repaired probe was deliberately run once against the un-widened allowlist,
+before anything was widened, precisely so the reporting path that had crashed was the path
+under test. And where the product already owns a rule, the instrument should CALL it rather
+than re-derive it; a probe carrying its own copy of a rule verifies its copy, not the thing
+that ships.

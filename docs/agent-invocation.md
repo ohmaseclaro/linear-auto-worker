@@ -16,7 +16,7 @@ code.
 |---|---|
 | `-p` (bare, LAST) | Non-interactive. It carries **no value** and it is the **last** argv entry. Both halves are load-bearing — see "The prompt travels on stdin" below. |
 | `--permission-mode dontAsk` | `claude` starts in **Manual** mode and denies every edit while still exiting 0. An explicit mode is mandatory. |
-| `--allowedTools Write Edit Bash` | **Not optional.** Measured on CLI 2.1.259: `dontAsk` *alone* denies `Write` with `decision_reason_type: "mode"`, creates nothing, and exits 0 with `is_error: false`. The mode and the allowlist ship together or the product silently produces nothing. |
+| `--allowedTools Write Edit Bash Read Skill Task` | **Not optional**, and the mode and the allowlist ship together — measured on CLI 2.1.259, `dontAsk` *alone* denies `Write` with `decision_reason_type: "mode"`, creates nothing, and exits 0 with `is_error: false`. These six names were **verified against a real GSD run on 2026-09-08, CLI 2.1.263**, at zero denials. The previous three denied `Skill` and `Read`, and the agent routed around both through `Bash` and still shipped a PR — nothing reported it. A CLI upgrade invalidates the measurement: re-run the probe. |
 | `--output-format stream-json` | Structured progress events, so the worker can report to Linear as the run proceeds. |
 | `--input-format stream-json` | The prompt (and anything `law say` adds later) arrives on the child's **stdin** as NDJSON, not in argv. This is what makes it possible to speak to a session that is already working. |
 | `--replay-user-messages` | Every message written to stdin is echoed back as a `user` event. Two jobs: it is the daemon's only positive receipt that a message was consumed, and it is what puts the operator's own words into `law watch` beside the agent's reply. |
@@ -87,12 +87,19 @@ depends on. With it, every run silently produces generic, non-GSD work and exits
 
 ## Running the allowlist probe
 
-The allowlist is verified sufficient for a file write and a four-command git chain. It is
-**not** verified against a real GSD phase run, which also reaches for `Task`, `Skill`,
-`Glob`, `Grep` and `TodoWrite`. Until the probe below has passed once, `ALLOWED_TOOLS` is
-an assumption whose failure mode is a run that produces nothing and reports success.
+The allowlist **has** been verified against a real GSD run: 2026-09-08, CLI 2.1.263, zero
+denials, GSD skills present, one commit, 11 turns and $0.51. `Read`, `Skill` and `Task` were
+added as a direct result — the previous `Write Edit Bash` denied `Skill` and `Read` with
+`decision_reason_type: "mode"` on a delivered ticket, and the agent substituted `head`/`cat`
+through `Bash` and shipped a correct PR regardless, so exit code, PR, Linear comment and the
+test gate all reported success. `Glob`, `Grep` and `TodoWrite` are deliberately NOT granted:
+this CLI does not have them.
 
-This is a **milestone integration-gate item**, run by a human, once, after `npm install`:
+**A CLI upgrade invalidates that measurement.** An unknown name in `--allowedTools` is
+accepted silently rather than rejected, so a vendor-side rename or removal narrows the grant
+without producing a single error. Nothing in the product can see that — only this probe can.
+
+Run it by a human, after `npm install` and after every CLI upgrade:
 
 ```
 npx tsx scripts/probe-gsd-allowlist.ts
@@ -105,10 +112,13 @@ arguments and the environment by calling the product's own `buildClaudeArgs` and
 - **Pass** — exits 0. Zero permission denials, the required GSD skills present in
   `system/init`, `permissionMode` echoed back as `dontAsk`, and at least one new commit in
   the throwaway repository. The temp directory is deleted.
-- **Fail** — exits 1 and prints every denied tool with its `decision_reason_type` and
-  `tool_input`, followed by a suggested list. **Add those names to `ALLOWED_TOOLS` in
-  `src/execution/agent-args.ts` and run it again.** The temp directory is left in place so
-  you can look at what the agent did and did not manage to do.
+- **Fail** — exits 1 and prints **one entry per distinct refusal**, followed by a suggested
+  list. Every entry carries the tool name and its `decision_reason_type`; the `input:` line
+  appears only when a source carried a `tool_input`, because the two denial sources report
+  the same refusal with different fields (which is also why the report is a union keyed on
+  `tool_use_id` and not a concatenation — concatenating double-counted). **Add those names to
+  `ALLOWED_TOOLS` in `src/execution/agent-args.ts` and run it again.** The temp directory is
+  left in place so you can look at what the agent did and did not manage to do.
 
 It costs real money and takes minutes, so it is a script rather than a test: it imports
 nothing from `node:test`, and it lives outside `src/`, which is the only directory `tsc`
