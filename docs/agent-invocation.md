@@ -14,19 +14,64 @@ code.
 
 | Flag | Why |
 |---|---|
-| `-p <prompt>` | Non-interactive. The prompt is a single argv entry, so a Linear issue title cannot break out of it — there is no shell anywhere on this path. |
+| `-p` (bare, LAST) | Non-interactive. It carries **no value** and it is the **last** argv entry. Both halves are load-bearing — see "The prompt travels on stdin" below. |
 | `--permission-mode dontAsk` | `claude` starts in **Manual** mode and denies every edit while still exiting 0. An explicit mode is mandatory. |
 | `--allowedTools Write Edit Bash` | **Not optional.** Measured on CLI 2.1.259: `dontAsk` *alone* denies `Write` with `decision_reason_type: "mode"`, creates nothing, and exits 0 with `is_error: false`. The mode and the allowlist ship together or the product silently produces nothing. |
 | `--output-format stream-json` | Structured progress events, so the worker can report to Linear as the run proceeds. |
+| `--input-format stream-json` | The prompt (and anything `law say` adds later) arrives on the child's **stdin** as NDJSON, not in argv. This is what makes it possible to speak to a session that is already working. |
+| `--replay-user-messages` | Every message written to stdin is echoed back as a `user` event. Two jobs: it is the daemon's only positive receipt that a message was consumed, and it is what puts the operator's own words into `law watch` beside the agent's reply. |
 | `--verbose` | Mandatory with `stream-json`. Omitting it is a hard startup error, not a warning. |
 | `--session-id <uuid>` | Pre-assigned by the worker and persisted to the run row **before** the spawn, so an answered question can resume the right session. Never parsed back out of the stream — 16 hook events precede `system/init`. |
 | `--json-schema <schema>` | The final turn must be a JSON object matching `src/domain/agent-result.ts`. The parsed value arrives on `result.structured_output`. |
 | `--permission-prompts none` | Nobody is present to answer a prompt. Redundant with the mode today; it guards a future change of default. |
 
-The resume path (`buildResumeArgs`, used when a human answers a question) keeps `-p` and
-drops `--session-id`. Both halves matter: without `-p` the session resumes and is never
-told the answer, and reusing a spent session id is a hard error — `Session ID <uuid> is
-already in use.`, exit 1.
+The resume path (`buildResumeArgs`, used when a human answers a question) keeps the bare
+`-p` and drops `--session-id`. Both halves matter: without `--print` the input format does
+not apply at all, and reusing a spent session id is a hard error — `Session ID <uuid> is
+already in use.`, exit 1. The answer itself travels on stdin, like every other message.
+
+## The prompt travels on stdin
+
+The prompt is **not in argv**. It is written to the child's stdin, synchronously and before
+anything is read, as one NDJSON line:
+
+```json
+{"type":"user","message":{"role":"user","content":[{"type":"text","text":"…"}]}}
+```
+
+`src/execution/agent-args.ts` defines that envelope once (`userMessageLine`) and both the
+supervisor and `law say` import it.
+
+**Why `-p` is still passed, bare, and last.** `--input-format` only works alongside
+`--print`, so the flag stays. It carries no value because a value there is **silently
+discarded and the session then hangs forever** — measured on CLI 2.1.263 as eight hook
+events in 0.7 seconds followed by ninety seconds of complete silence. It is last because an
+option following a bare `-p` can be eaten as its optional value.
+
+This strengthens rather than weakens the containment claim the old `-p <prompt>` row made.
+Hostile ticket text used to be one argv entry that no shell ever saw; now it does not reach
+the argument array at all. It crosses into the child as a JSON string inside the envelope
+above, so there is no quoting boundary in either direction.
+
+## When stdin closes, and what that decides
+
+**On the first `result` event, the daemon closes the child's stdin. That is the only thing
+a `result` decides.**
+
+The run itself ends when the **process exits**, exactly as it always has. A `result` is per
+user message, not per run: a session the operator talks to emits one per message, and
+`routed.result` is last-wins, so the operator's correction governs the verdict.
+
+The consequence to know is the injection window: **spawn → first `result`**. That is the
+whole time the agent is working, and it is when `law say` can reach it. A message written
+before the close is still delivered — pipe bytes precede EOF — so the agent reads it, takes
+another turn, emits another result, and only then exits. Once the turn has ended, `law say`
+refuses with one clear line and the Linear comment path takes over.
+
+**If nothing comes back within 60 seconds**, the daemon presumes the delivery failed and
+reaps the session rather than waiting out `maxRunMs`. "Nothing" means neither a
+`system/init` nor any replayed message — both of which a live session produces within a few
+seconds (measured: 2.6s to init, 4.2s to the first echo, cold, with 113 skills).
 
 ## The flag that must never be added
 

@@ -720,8 +720,15 @@ repositories (`dzfweb/miracle-shop`, `lgabrielneves/kardun`).
       `num_turns` 3/2/2 with `--max-turns 4`, so the turn budget is per message too), and the
       asymmetry that comes with it: `total_cost_usd` is CUMULATIVE for the session while
       `usage` is per message — take the last cost, sum the tokens, and getting it backwards
-      is T95 in both directions at once. Failure mode: any code that treats `result` as "the
-      run is over" delivers a pull request after turn one while the agent is still working.
+      is T95 in both directions at once. TWO DIFFERENT failure modes, and the plan
+      originally conflated them. (a) If OUR code makes `result` terminal, it delivers a pull
+      request after turn one while the agent is still working — that is what the anti-trap
+      test guards. (b) If **M4 itself** is false (a CLI that emits a result per INTERNAL
+      turn), the daemon is immune to (a) — `routed.result` is last-wins and nothing resolves
+      early — but it would close stdin on an internal-turn result, EOF the child mid-work,
+      and truncate the run into a `partial`. No unit test can see (b), because the suite
+      scripts the stream; `scripts/probe-stream-input.ts` is its only instrument.
+      [Corrected during execution — FLAG-B.]
       Correct move: the run ends when the PROCESS EXITS; the daemon closes stdin on the first
       result and that is the only thing `result` decides. Record the anti-trap test and its
       RED text at `'turn one'`. Add M9 (a second `system/init` per message) in the same row.

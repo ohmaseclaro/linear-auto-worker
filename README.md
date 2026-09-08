@@ -57,8 +57,30 @@ law setup            # guided setup, ending with the webhook registered and work
 law setup --doctor   # inspect/repair webhook registrations (per-item confirmation to delete)
 law start            # run the daemon until interrupted
 law status           # queued and in-flight runs
+law watch [target]   # follow a run's activity live, or replay a finished one
+law say <target> …   # speak to a running agent mid-flight
 law --help
 ```
+
+### Watching a run, and talking to it
+
+A spawned run is otherwise a black box for up to 45 minutes between pickup and pull request.
+
+```bash
+law watch                       # the single active run
+law watch LAW-123               # by issue key, or by the first 4+ characters of a run id
+law say LAW-123 stop and run the tests before you commit
+law say LAW-123 -- --draft is fine, keep going
+```
+
+`law watch` follows a durable per-run event log at
+`~/.linear-auto-worker/runs/<runId>.jsonl` — plain NDJSON, one parsed stream event per
+line, so `jq` reads it too. It shows the agent's text and tool calls, and it shows your own
+words back (prefixed `»`) once the agent has consumed them, which is how you know a
+`law say` landed.
+
+`law say` needs no quotes: everything after the target is joined with spaces. Text that
+*starts* with a dash needs `--` first, because the argument parser rejects unknown options.
 
 ## Configuration
 
@@ -143,6 +165,23 @@ Honest list:
   against everything the run has already spent across all its sessions; `maxTurns` is a
   fresh budget for each session, because answering a question is new work. Hitting either
   ships whatever is committed as a draft PR rather than discarding it.
+- **`law say` only works while the agent's turn is still running.** The window is spawn →
+  the agent's first result. Once it has answered — including when it has answered with a
+  question — the channel refuses with one clear line and points you at the Linear comment
+  path, which is the durable one. `law say` prints `queued to …`, not "sent": it can tell
+  you the message was accepted by the pipe, not that the agent read it. `law watch` is what
+  shows you it landed.
+- **The say channel is a local Unix socket, deliberately not reachable from the tunnel.**
+  `~/.linear-auto-worker/say.sock`, mode 0600 in a 0700 directory. It is never an HTTP route
+  and must never become one: the receiver is published to the open internet through ngrok,
+  and this channel writes straight into an agent running with write access to your private
+  clones.
+- **Run activity logs are kept 7 days and capped at 64 MiB per run.** They contain **raw
+  agent output** — anything the agent read, including a `.env` it happened to `cat` — and
+  deliberately bypass the log redaction, because a redacted trace is not a trace. They are
+  mode 0600, readable by your user only, never transmitted anywhere, and never attached to a
+  PR body, a Linear comment or a Slack message. `law watch` prints to your terminal and
+  nowhere else.
 - **macOS-first.** CI runs Ubuntu and macOS on Node 22 and 24, but the ngrok config path and
   the SIGINT process-group behaviour were both measured on macOS only.
 
@@ -159,7 +198,7 @@ and what is explicitly out of scope.
 
 ## The traps ledger
 
-[`docs/TRAPS.md`](docs/TRAPS.md) holds the **109 verified footguns** found building this —
+[`docs/TRAPS.md`](docs/TRAPS.md) holds the **115 verified footguns** found building this —
 each one measured against the real tool, not recalled. A sample:
 
 - `claude -p --permission-mode dontAsk` alone **denies every edit and exits 0** with

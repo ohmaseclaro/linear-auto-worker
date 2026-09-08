@@ -70,6 +70,56 @@ be handed what is left. Decide before the spawn — and when you stop, judge the
 evidence in its worktree, so work already committed ships as a draft instead of being thrown
 away for running out of money.
 
+**Under `--input-format stream-json`, a value passed to `-p` is silently discarded and the
+session then hangs forever.** Measured on CLI 2.1.263 with stdin held open and nothing
+written: eight `system/hook_started` and eight `system/hook_response` events arrived inside
+0.7 seconds, and then nothing at all for ninety seconds — no `system/init`, no assistant
+turn, no result — until the process was SIGKILLed. If your daemon has a wall-clock deadline,
+every run burns the whole of it producing nothing while the log looks perfectly healthy.
+Keep `-p` (the input format only works alongside `--print`), pass it **last and with no
+value**, and write the prompt as one NDJSON `user` message on the child's stdin. Last
+matters: an option following a bare `-p` can be eaten as its optional value. Add
+`--replay-user-messages` and you get a positive receipt that the message was consumed —
+which is the difference between diagnosing this in a sentence and not diagnosing it at all.
+A deadline on that receipt is worth more than the receipt: a session that produces neither a
+`system/init` nor any replayed message within a minute has not started, and reaping it then
+turns a vendor-side regression from forty-five silent minutes into one loud one.
+
+**A `result` event is per USER MESSAGE, not per run — so it is not the terminal event.**
+Three messages written to one session produced three results (`num_turns` 3/3/3 under
+`--max-turns 4`, so the turn budget is per message too), each with its own
+`structured_output`, all carrying the same `session_id`. A second `system/init` is emitted
+per message as well. The run ends when the **process exits**, and the only thing a result
+should decide is when you close stdin. Treat it as terminal and you deliver a pull request
+after turn one while the agent is still working. The subtler failure is the one that arrives
+if this measurement ever stops holding: a CLI that emitted a result per *internal* turn
+would not make a last-wins daemon ship early — it would make it close stdin mid-work, EOF
+the child, and truncate a healthy run into a partial one. No scripted-stream test can see
+that; only re-measuring against the real binary can.
+
+**Two numbers on those results behave oppositely, and both are easy to get backwards.**
+`total_cost_usd` is **cumulative for the session** — measured 0.391886 → 0.434957 →
+0.478395 across three results — so take the last one and never sum it. `usage` is **per
+message** — `input_tokens` stayed at 4 each time while `cache_read_input_tokens` climbed
+36972 → 74262 → 74807 — so sum it, or a session the operator talked to under-reports what it
+moved. One value per session, one value per message, sitting side by side in the same event.
+
+**`--remote-control` accepts the flag, exits 0, and does nothing under `--print`.** Its help
+text says it starts an *interactive* session, which is precisely what `-p` is not. Passed
+alongside `-p --output-format stream-json --verbose` it produced no `remote` substring
+anywhere in the stream, no key matching `/remote/i` among `system/init`'s twenty-four, no
+state under `~/.claude` and no session registered at account level. It is not the control
+channel; streaming input is.
+
+**But do not conclude from that there is no control surface — `system/init` hands you one
+on every run.** The same measurement found `messaging_socket_path` pointing at
+`/tmp/cc-socks/<pid>.sock`, with the directory `drwx------` and the sockets `srw-------`:
+the CLI already runs a per-session Unix socket at exactly the trust level a local tool would
+want. This project does not use it and did not probe its protocol — it writes to the child's
+stdin instead, which is measured and sufficient. Recorded because the next person who wants
+a control channel will reach for `--remote-control`, find a no-op, and stop one line short
+of the thing that might actually work.
+
 **An MCP long-poll "ask the human" tool does not block the agent.** Claude Code backgrounds
 a main-conversation MCP call after roughly two minutes and the agent proceeds without the
 answer. The only reliable question mechanism is exit-and-`--resume`: the agent ends its turn
