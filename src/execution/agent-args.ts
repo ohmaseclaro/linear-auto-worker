@@ -41,14 +41,37 @@ export const PERMISSION_MODE = 'dontAsk';
  * session ends up with a narrower grant than the session it resumes, and that drift is
  * invisible until an answered question silently produces nothing.
  *
- * OPEN, and it matters (04-CONTEXT D-01 amended): this set is verified sufficient for a
- * file write and a four-command git chain with zero denials, but a real GSD phase run also
- * reaches for Task, Skill, Glob, Grep and TodoWrite. **Under-granting reproduces the
- * silent-nothing failure exactly.** `scripts/probe-gsd-allowlist.ts` is the thing that
- * settles it; it is a milestone integration-gate item, run by a human, never a plan gate.
- * Until it has passed once, this array is an assumption.
+ * **Under-granting reproduces the silent-nothing failure exactly**, and worse, it can
+ * reproduce it while everything reports success.
+ *
+ * MEASURED 2026-09-08 on CLI 2.1.263 by `scripts/probe-gsd-allowlist.ts` (T116, T117):
+ *
+ * - `Skill` and `Read` were REFUSED with `decision_reason_type: "mode"` on a real
+ *   delivered run (COD-7 -> dzfweb/miracle-shop). The agent substituted `head`/`cat`
+ *   through `Bash` and still shipped a correct PR — so exit code, the pull request, the
+ *   Linear comment and `npm run verify` ALL reported success while the agent was being
+ *   refused. The run's own event log was the only witness.
+ * - `Task` is granted so GSD's skills can delegate to their planner/executor/checker
+ *   subagents; refused, every GSD skill degrades to the parent doing everything inline,
+ *   which is the same invisible degradation. Those subagents run INSIDE the parent
+ *   `claude` process, so they consume no slot of the global session cap. What bounds them
+ *   is turns and dollars — and only turns are bounded on a default install: `maxBudgetUsd`
+ *   is `.optional()` (`infra/config.ts`), the wizard writes none (`config-writer.test.ts`
+ *   asserts `'maxBudgetUsd' in config === false`) and `adapters.ts` only spreads
+ *   `--max-budget-usd` when it is defined. So unless the operator configured a budget,
+ *   there is NO dollar ceiling. Whether either bound reaches inside a subagent is
+ *   unmeasured — T114 established the turn budget is per user message, and nothing has
+ *   measured whether subagent turns draw on the parent's `num_turns`.
+ * - `Glob`, `Grep` and `TodoWrite` are NOT granted: this CLI does not have them (the
+ *   daemon's own `buildChildEnv` run enumerated 30 tools, none of those three). An unknown
+ *   name in `--allowedTools` is accepted SILENTLY — measured, not an error — so a granted
+ *   name the vendor later renames or removes narrows this list without a single error
+ *   anywhere. RE-RUN THE PROBE AFTER A CLI UPGRADE; nothing else can see that.
+ *
+ * The test beside this constant pins its VALUE and can never establish its SUFFICIENCY.
+ * Only `scripts/probe-gsd-allowlist.ts`, against a real GSD run, can.
  */
-export const ALLOWED_TOOLS: readonly string[] = ['Write', 'Edit', 'Bash'];
+export const ALLOWED_TOOLS: readonly string[] = ['Write', 'Edit', 'Bash', 'Read', 'Skill', 'Task'];
 
 /** D-03 / T3. Paired with `--verbose` below; see the comment there. */
 export const OUTPUT_FORMAT = 'stream-json';

@@ -73,7 +73,7 @@ test('T1/T27: the permission mode and its allowlist ship together, never apart',
     assert.ok(at >= 0, `${name}: the allowlist is absent — the mode alone produces nothing`);
     assert.deepEqual(
       args.slice(at + 1, at + 1 + ALLOWED_TOOLS.length),
-      ['Write', 'Edit', 'Bash'],
+      [...ALLOWED_TOOLS],
       `${name}: each tool must be its own argv entry, not one space-joined string`
     );
   }
@@ -275,4 +275,12 @@ test('a resumed session is capped exactly like a fresh one', () => {
       `${flag} differs between a fresh and a resumed session`,
     );
   }
+});
+
+test('ALLOWED_TOOLS holds exactly the six names a real GSD run was measured to need', () => {
+  // This pins the VALUE of the array. It can never establish its SUFFICIENCY — a green
+  // assertion here says only that nobody edited the constant, not that the list is wide
+  // enough for a GSD run. Only `scripts/probe-gsd-allowlist.ts`, which spawns a real
+  // `claude`, can say that, and it did on 2026-09-08 against CLI 2.1.263.
+  assert.deepEqual(ALLOWED_TOOLS, ['Write', 'Edit', 'Bash', 'Read', 'Skill', 'Task']);
 });

@@ -2,12 +2,18 @@
  * Settle the one open question of Phase 4: is `ALLOWED_TOOLS` wide enough for a REAL GSD
  * run? (04-CONTEXT D-01 as amended, TRAPS T27.)
  *
- * `--allowedTools "Write" "Edit" "Bash"` is verified sufficient for a file write plus a
- * four-command git chain under `--permission-mode dontAsk`, with zero denials. It is NOT
- * verified against a GSD phase run, which also reaches for Task, Skill, Glob, Grep and
- * TodoWrite. Under-granting reproduces the silent-nothing failure exactly: the agent is
- * refused every tool it needs, creates nothing, and the process exits 0 with
- * is_error:false. That is the single highest-value verification left in this phase.
+ * SETTLED 2026-09-08 on CLI 2.1.263, by this script: the six-name allowlist
+ * (Write Edit Bash Read Skill Task) ran a real GSD-shaped task to ZERO denials, GSD skills
+ * present, mode echoed, one new commit — 11 turns, $0.507. The three names it was widened
+ * by got there the hard way: the previous list denied `Skill` and `Read` with
+ * `decision_reason_type:"mode"` on a delivered run, and the agent routed around both
+ * through `Bash` and still shipped a correct PR. Under-granting reproduces the
+ * silent-nothing failure exactly: the agent is refused, creates nothing (or quietly less),
+ * and the process exits 0 with is_error:false.
+ *
+ * A CLI UPGRADE INVALIDATES THAT MEASUREMENT. An unknown name in `--allowedTools` is
+ * accepted silently rather than rejected, so a vendor-side rename narrows the grant with no
+ * error anywhere. Re-run this after every upgrade; nothing else can see it.
  *
  * WHY THIS IS A SCRIPT AND NOT A TEST. It spawns a real `claude`, costs real money (the
  * cached GSD system prompt alone measured $0.25 for a one-word reply) and takes minutes.
