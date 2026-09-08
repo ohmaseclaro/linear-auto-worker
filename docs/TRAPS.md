@@ -424,6 +424,19 @@ exactly like broken ingress. And **worktrees are pruned at the next boot, not at
 so a running daemon accumulates delivered worktrees; that briefly looked like a leak from the
 interrupted attempt, and is not one.
 
+**A fetch updates remote-tracking refs only, so code that fetches and then names a bare
+branch has not refreshed anything.** The worktree preparation fetched `origin` and then
+branched from `baseBranch` — the string `"main"`, straight out of `config.json`. A bare name
+is `refs/heads/main`, the local branch, and `git fetch` moves `refs/remotes/origin/main` and
+nothing else. Every run forked off whatever the operator last pulled. Two of the three mapped
+clones were level with their remote, so nothing showed; the third, `kardun`, sat 18 commits
+behind its own `origin/main`, because it is checked out on `production` and its local `main`
+only moves on an explicit fetch of that ref. A run there would have opened a pull request
+against a base 18 commits stale. What kept this alive for a whole milestone is that the
+comment directly above the fetch stated the correct intent, word for word — a run must not
+fork off whatever the operator last happened to have pulled. The comment was right and the
+line below it did the opposite, and the comment is what stopped anyone reading the line.
+
 ## The one that cost the most
 
 **A security control that is only tested in its own module is not known to be wired.**
