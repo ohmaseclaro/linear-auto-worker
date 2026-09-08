@@ -65,13 +65,14 @@ function withRepoMutex<T>(repoPath: string, fn: () => Promise<T>): Promise<T> {
 /** Bounded so a pathological run of collisions cannot loop forever forking `git`. */
 const MAX_BRANCH_SUFFIX_ATTEMPTS = 50;
 
-async function branchExists(runCommand: RunCommand, repoPath: string, branch: string): Promise<boolean> {
-  const result = await runCommand(
-    'git',
-    ['-C', repoPath, 'show-ref', '--verify', '--quiet', `refs/heads/${branch}`],
-    { reject: false }
-  );
+/** One probe for every namespace. Takes a FULL ref; `--quiet` means exit code IS the answer. */
+async function refExists(runCommand: RunCommand, repoPath: string, ref: string): Promise<boolean> {
+  const result = await runCommand('git', ['-C', repoPath, 'show-ref', '--verify', '--quiet', ref], { reject: false });
   return result.exitCode === 0;
+}
+
+async function branchExists(runCommand: RunCommand, repoPath: string, branch: string): Promise<boolean> {
+  return refExists(runCommand, repoPath, `refs/heads/${branch}`);
 }
 
 /**
@@ -106,15 +107,26 @@ function isUnderRoot(candidate: string, root: string): boolean {
  */
 export async function prepareWorktree(o: PrepareWorktreeInput): Promise<PreparedWorktree> {
   return withRepoMutex(o.repoPath, async () => {
-    // Fetch before branching so a run does not fork off whatever the operator last
-    // happened to have pulled. Not fatal: a base that already exists locally is enough to
-    // work offline, and refusing to work offline would be worse than a stale base.
+    // Fetch, then branch off the REMOTE-TRACKING ref — not the bare base name. T112: a
+    // fetch advances `refs/remotes/<remote>/<base>` and never moves `refs/heads/<base>`,
+    // so branching from the bare name forks off whatever the operator last pulled and
+    // makes the fetch inert. Measured live: one clone sat 18 commits behind its own
+    // origin/main because it was checked out on another branch.
+    const remote = o.remote ?? 'origin';
     try {
-      await o.runCommand('git', ['-C', o.repoPath, 'fetch', '--quiet', o.remote ?? 'origin']);
+      await o.runCommand('git', ['-C', o.repoPath, 'fetch', '--quiet', remote]);
     } catch {
       // ponytail: swallowed on purpose — see comment above. Nothing to log to here; the
       // caller's own logger already records the surrounding run.
     }
+
+    // Falling back to the bare name is REQUIRED, not a nicety, for two reasons: a clone
+    // with no remote at all, and an offline run whose fetch just failed. Refusing to work
+    // in either case would be worse than a stale base. Do not "tighten" this into a hard
+    // failure. The probed ref string itself is what gets checked out, so there is no
+    // second resolution step where the probe and the checkout could disagree.
+    const remoteRef = `refs/remotes/${remote}/${o.base}`;
+    const base = (await refExists(o.runCommand, o.repoPath, remoteRef)) ? remoteRef : o.base;
 
     // D-11 / AGNT-01: a colliding branch name is suffixed, never reused. The capital-B
     // force variant of the create flag resets an existing branch to the base commit and
@@ -132,7 +144,7 @@ export async function prepareWorktree(o: PrepareWorktreeInput): Promise<Prepared
     }
 
     try {
-      await o.runCommand('git', ['-C', o.repoPath, 'worktree', 'add', '-b', branch, worktreePath, o.base]);
+      await o.runCommand('git', ['-C', o.repoPath, 'worktree', 'add', '-b', branch, worktreePath, base]);
     } catch (cause) {
       throw new WorktreeError(`failed to create worktree at ${worktreePath}`, { cause });
     }
