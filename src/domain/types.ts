@@ -324,7 +324,6 @@ export interface ConfigPaths {
   /** Mode 0600. The two secrets live here and never in `config.json` (D-08). */
   envFile: string;
   dbFile: string;
-  logDir: string;
   worktreeRoot: string;
 }
 
@@ -333,7 +332,7 @@ export interface ConfigPaths {
  * directory (`os.homedir()` — never `process.env.HOME`, which is unset in some spawned
  * contexts) because `src/domain/` imports nothing, not even node builtins.
  *
- * Config, secrets, database, logs and worktrees together under one root is what lets the
+ * Config, secrets, database, run logs and worktrees together under one root is what lets the
  * daemon run from any working directory, keeps state out of any repo by accident, and
  * puts it where a `git clean` cannot reach.
  */
@@ -345,7 +344,6 @@ export function configPaths(homeDir: string): ConfigPaths {
     configFile: `${root}/config.json`,
     envFile: `${root}/.env`,
     dbFile: `${root}/store.db`,
-    logDir: `${root}/logs`,
     worktreeRoot: `${root}/worktrees`,
   };
 }
@@ -364,10 +362,28 @@ export const CONFIG_ROOT = DEFAULT_PATHS.root;
 export const CONFIG_PATH = DEFAULT_PATHS.configFile;
 export const ENV_PATH = DEFAULT_PATHS.envFile;
 export const DB_PATH = DEFAULT_PATHS.dbFile;
-// ponytail: `logDir` lives on ConfigPaths, and the run engine needs only the
-// resolved default. Thread a whole ConfigPaths if the root ever stops being
-// `~/.linear-auto-worker` — this is the same DEFAULT_PATHS, not a second guess.
-export const LOG_DIR = DEFAULT_PATHS.logDir;
+
+/**
+ * The daemon dir, derived from the configured worktree root — which `configPaths()` builds
+ * as `${root}/worktrees`, so the parent IS the root.
+ *
+ * One derivation, two consumers: `adapters.ts` opens the run log under it and
+ * `run-engine.ts` quotes that same file to the operator in a failure comment. There used
+ * to be a second answer, `LOG_DIR` = `~/.linear-auto-worker/logs`, and it was WRONG:
+ * nothing ever created or wrote that directory, while `openRunLog` wrote
+ * `~/.linear-auto-worker/runs/<id>.jsonl`. The failure comment quoted the fiction for a
+ * whole milestone. A declared path nothing writes is the same defect as an optional
+ * parameter nothing sets — a plausible value with no producer, and a green build (T120).
+ *
+ * POSIX string work rather than `path.dirname`, so `src/domain/` keeps importing nothing
+ * outside itself but `node:os`, matching `configPaths()`'s hand-rolled join above.
+ */
+export function daemonDirOf(config: { worktreeRoot: string }): string {
+  const trimmed = config.worktreeRoot.replace(/\/+$/, '');
+  const at = trimmed.lastIndexOf('/');
+  if (at < 0) return '.';
+  return at === 0 ? '/' : trimmed.slice(0, at);
+}
 
 // ── Bot comment markers ──────────────────────────────────────────────────────
 //

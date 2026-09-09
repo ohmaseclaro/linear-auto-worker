@@ -346,7 +346,9 @@ function issueN(n: number) {
 function multiRepoConfig(concurrency: number): Config {
   return {
     operatorUserId: 'operator-1',
-    logDir: '/home/op/.linear-auto-worker/logs',
+    // T94: widen the fixture, never the production code. `worktreeRoot` is REQUIRED by
+    // Config, and `logPathFor` now derives the run log path from it (T120).
+    worktreeRoot: '/home/op/.linear-auto-worker/worktrees',
     defaults: {
       concurrency,
       questionTimeoutMs: 4 * 60 * 60 * 1000,

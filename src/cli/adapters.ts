@@ -16,7 +16,7 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 
 import { parseAgentResult } from '../domain/agent-result.js';
-import { resolveToggles } from '../domain/types.js';
+import { daemonDirOf, resolveToggles } from '../domain/types.js';
 import { AGENT_RESULT_JSON_SCHEMA, buildClaudeArgs, buildResumeArgs } from '../execution/agent-args.js';
 import { buildChildEnv } from '../execution/agent-env.js';
 import { deliver as deliverPullRequest } from '../execution/deliver.js';
@@ -35,6 +35,7 @@ import type {
   Deliverer,
   Logger,
   MappingToggles,
+  PrBodySource,
   PullRequest,
   RepoMapping,
   RunId,
@@ -76,16 +77,6 @@ export interface ExecutionAdapterDeps {
   index: ReadonlyMap<string, string>;
   /** Injected so a test can drive `git` / `gh` without either installed. */
   runCommand?: RunCommand;
-}
-
-/**
- * `${daemonDir}/worktrees/${repoSlug}/${branch}` is what `prepareWorktree` builds, so the
- * daemon dir it must be handed is the PARENT of the configured worktree root. Deriving it
- * rather than passing the config root separately is what keeps the two from drifting: a
- * worktree root moved in `config.json` moves the worktrees with it.
- */
-function daemonDirOf(config: Config): string {
-  return path.dirname(config.worktreeRoot);
 }
 
 export function createWorktreeManager(deps: ExecutionAdapterDeps): WorktreeManager {
@@ -564,7 +555,7 @@ export function createDeliverer(deps: ExecutionAdapterDeps): Deliverer {
     async deliver(
       wt: Worktree,
       repo: RepoMapping,
-      pr: { title: string; body: string; draft?: boolean },
+      pr: { title: string; prBody: PrBodySource; draft?: boolean },
     ): Promise<PullRequest> {
       const toggles = togglesFor(deps.config, deps.index, repo.repoSlug);
       const result = await deliverPullRequest({
@@ -575,7 +566,7 @@ export function createDeliverer(deps: ExecutionAdapterDeps): Deliverer {
         ownerRepo: repo.repoSlug,
         defaultBranch: repo.baseBranch,
         title: pr.title,
-        body: pr.body,
+        prBody: pr.prBody,
         // A caller-forced draft wins over the mapping's toggle; it is only ever set to
         // `true`, for a `partial` run (T73). Normal deliveries omit it and get the toggle.
         draft: pr.draft ?? toggles.draftPr,

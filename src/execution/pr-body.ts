@@ -4,22 +4,16 @@
  * Pure rendering — this file runs nothing and reaches nothing. The worker owns the template
  * (DELV-01): a body the agent writes is a body that is missing on the runs that went worst.
  */
+import type { PrBodySource } from '../domain/ports.js';
 import { sanitizeUntrustedText } from './prompt.js';
 
-export interface PrBodyInput {
-  /** e.g. `ENG-412`. */
-  ticketIdentifier?: string;
-  ticketUrl?: string;
-  /** The agent's validated `structured_output.summary`. Untrusted text. */
-  summary?: string;
-  /** What the worker ran, verbatim. */
-  testCommand?: string;
-  /** What happened. `undefined` renders as an explicit "not run", never as a blank. */
-  testResult?: string;
-  /** The agent's own account of what it left alone. Untrusted text. */
-  didNotDo?: string;
-  runLogPath?: string;
-  verdict?: 'delivered' | 'partial';
+/**
+ * The renderer's input. Every field is optional here because the renderer's whole job is
+ * to say something honest about a field that is missing — but a CALLER is held to
+ * `PrBodySource`, whose ticket fields are required. That asymmetry is deliberate: it is
+ * what stops `{}` from compiling at the call site and rendering "(no ticket recorded)".
+ */
+export interface PrBodyInput extends Partial<PrBodySource> {
   /** From `runPrePushGates`. Non-empty means the body OPENS with the flag. */
   ciPaths?: readonly string[];
 }

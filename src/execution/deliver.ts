@@ -17,7 +17,8 @@ import * as path from 'node:path';
 import { DeliveryError } from '../domain/errors.js';
 import type { RunCommand } from './execute-run.js';
 import { runPrePushGates } from './gates.js';
-import { renderPrBody, type PrBodyInput } from './pr-body.js';
+import type { PrBodySource } from '../domain/ports.js';
+import { renderPrBody } from './pr-body.js';
 import { sanitizeUntrustedText } from './prompt.js';
 
 export interface DeliverInput {
@@ -32,13 +33,15 @@ export interface DeliverInput {
   remote?: string;
   title: string;
   /**
-   * A pre-rendered body. The tracer's (04-01) call shape, kept so `execute-run.ts` compiles
-   * unchanged. Superseded by `prBody`: a body rendered by the CALLER cannot carry the CI
-   * flag, because the gates that produce it have not run yet at that point.
+   * REQUIRED. The worker templates the body here, after the gates (DELV-03, DELV-08).
+   *
+   * There used to be a `body?: string` beside this, justified as "kept so `execute-run.ts`
+   * compiles unchanged" — `execute-run.ts` does not call `deliver`. It was optional, every
+   * caller supplied only it, and the `??` below turned "nobody wired the structured body"
+   * into a valid render. Deleted, not deprecated: an optional parameter is a dead parameter
+   * until the gate proves a caller sets it, and required makes `tsc` that gate (T120).
    */
-  body?: string;
-  /** Preferred. The worker templates the body here, after the gates (DELV-03, DELV-08). */
-  prBody?: Omit<PrBodyInput, 'ciPaths'>;
+  prBody: PrBodySource;
   draft: boolean;
   /** A `partial` run is always a draft, whatever the mapping toggle says. */
   verdict?: 'delivered' | 'partial';
@@ -102,7 +105,7 @@ export async function deliver(o: DeliverInput): Promise<DeliveryResult> {
   }
 
   // 5. `--body-file` needs a real path, so the body lands on disk first.
-  const body = renderPrBody({ ...(o.prBody ?? { summary: o.body }), ciPaths: gates.ciPaths });
+  const body = renderPrBody({ ...o.prBody, ciPaths: gates.ciPaths });
   const bodyPath = path.join(tmpdir(), `law-pr-body-${randomUUID()}.md`);
   await writeFile(bodyPath, body, 'utf8');
 

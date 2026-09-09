@@ -94,7 +94,8 @@ function harness(): Harness {
   const config = {
     botUserId: BOT,
     operatorUserId: 'operator',
-    logDir: '/logs',
+    // T94: widen the fixture, never the production code. See fanout.test.ts.
+    worktreeRoot: '/home/op/.linear-auto-worker/worktrees',
     defaults: { concurrency: 3, baseBranch: 'main', questionFlow: true },
     mappings: {},
   } as unknown as Config;

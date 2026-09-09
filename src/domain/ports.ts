@@ -298,6 +298,36 @@ export interface PullRequest {
   number: number;
 }
 
+/**
+ * What a CALLER must supply for the PR body. The renderer adds `ciPaths` itself, from the
+ * gates, which have not run when the caller builds this.
+ *
+ * **The three required fields are the fix, and requiring the object is not enough.** Every
+ * field of the renderer's input is optional, so a merely-required `prBody` is satisfied by
+ * `{}` — which renders `(no ticket recorded)` again, the exact defect. Requiring the three
+ * that actually carry the ticket makes `tsc` the gate rather than a reviewer (T120).
+ *
+ * Declared HERE, not imported from `src/execution/`: this is a cross-layer boundary, which
+ * is what this file is for, and `src/domain/` imports nothing outside itself. `pr-body.ts`
+ * derives its own input from this.
+ */
+export interface PrBodySource {
+  /** e.g. `ENG-412`. Also the PR title's prefix, so the two cannot name different tickets. */
+  ticketIdentifier: string;
+  ticketUrl: string;
+  /** The agent's validated `structured_output`. Untrusted text; the renderer fences it. */
+  summary: string;
+  /** What the worker ran, verbatim. Nothing in this repository runs a test command today. */
+  testCommand?: string;
+  /** What happened. `undefined` renders as an explicit "not run", never as a blank. */
+  testResult?: string;
+  /** The agent's own account of what it left alone. Untrusted text. */
+  didNotDo?: string;
+  /** `runLogPath(daemonDirOf(config), runId)` — the file that exists, never a second guess. */
+  runLogPath?: string;
+  verdict?: 'delivered' | 'partial';
+}
+
 export interface Deliverer {
   /** Push the branch, then `gh pr create`. Idempotent: an existing PR is returned. */
   deliver(
@@ -305,7 +335,7 @@ export interface Deliverer {
     repo: RepoMapping,
     pr: {
       title: string;
-      body: string;
+      prBody: PrBodySource;
       /**
        * Forces a draft regardless of the mapping's `draftPr` toggle. Set only for a
        * `partial` run (TRAPS T73): the operator opted into ready-for-review PRs for work

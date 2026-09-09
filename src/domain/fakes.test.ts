@@ -265,7 +265,10 @@ test('FakeAgentRunner resolves cancelled when the signal aborts while the run is
 test('FakeDeliverer is idempotent: a repeated call for the same worktree returns the same PR', async () => {
   const deliverer = new FakeDeliverer();
   const wt = { runId: 'run-1', repoDir: '/repo', path: '/wt/run-1', branch: 'eng-1', baseBranch: 'main' };
-  const pr = { title: 't', body: 'b' };
+  const pr = {
+    title: 't',
+    prBody: { ticketIdentifier: 'ENG-1', ticketUrl: 'https://linear.app/x/issue/ENG-1', summary: 'b' },
+  };
   const first = await deliverer.deliver(wt, FAKE_REPO, pr);
   const second = await deliverer.deliver(wt, FAKE_REPO, pr);
   assert.equal(first.url, second.url);

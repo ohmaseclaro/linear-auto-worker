@@ -640,8 +640,10 @@ export class FakeAgentRunner implements AgentRunner {
  * rather than minting a second one — the interface documents delivery as idempotent, and a
  * fake that double-delivered would hide the bug it exists to surface.
  */
+type DelivererPr = Parameters<Deliverer['deliver']>[2];
+
 export class FakeDeliverer implements Deliverer {
-  readonly calls: Array<{ wt: Worktree; repo: RepoMapping; pr: { title: string; body: string } }>;
+  readonly calls: Array<{ wt: Worktree; repo: RepoMapping; pr: DelivererPr }>;
   private readonly byWorktreePath: Map<string, PullRequest>;
   private counter: number;
 
@@ -651,7 +653,7 @@ export class FakeDeliverer implements Deliverer {
     this.counter = 0;
   }
 
-  deliver(wt: Worktree, repo: RepoMapping, pr: { title: string; body: string }): Promise<PullRequest> {
+  deliver(wt: Worktree, repo: RepoMapping, pr: DelivererPr): Promise<PullRequest> {
     this.calls.push({ wt, repo, pr });
     const existing = this.byWorktreePath.get(wt.path);
     if (existing) return Promise.resolve(existing);

@@ -71,7 +71,11 @@ function input(h: Harness, over: Partial<DeliverInput> = {}): DeliverInput {
     defaultBranch: 'main',
     title: 'ENG-1: do the thing',
     draft: true,
-    prBody: { ticketIdentifier: 'ENG-1', ticketUrl: 'https://linear.app/x/issue/ENG-1' },
+    prBody: {
+      ticketIdentifier: 'ENG-1',
+      ticketUrl: 'https://linear.app/x/issue/ENG-1',
+      summary: 'Did the thing.',
+    },
     ...over,
   };
 }
@@ -319,3 +323,29 @@ function headingsOutsideFences(body: string): string[] {
   }
   return out;
 }
+
+
+// ------------------------------------------------------- the structured body is the only body
+
+/**
+ * T120. `renderPrBody` was correct and unit-tested for a whole milestone while every
+ * production PR said `(no ticket recorded)`, because nothing ever handed it a ticket. This
+ * reads the file `gh pr create` was actually pointed at — the return value cannot tell you
+ * whether the body reached the command.
+ */
+test('the body gh was pointed at carries the ticket link, not the missing branch', async () => {
+  const h = harness();
+  await deliver(
+    input(h, {
+      prBody: {
+        ticketIdentifier: 'COD-9',
+        ticketUrl: 'https://linear.app/x/issue/COD-9',
+        summary: 'Added a TOC.',
+      },
+    }),
+  );
+
+  const body = h.bodyAtCreate()!;
+  assert.ok(body.includes('[COD-9](https://linear.app/x/issue/COD-9)'), body.slice(0, 200));
+  assert.equal(body.includes('(no ticket recorded)'), false);
+});

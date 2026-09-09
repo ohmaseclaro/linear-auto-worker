@@ -26,6 +26,8 @@ import type { Run, RunState } from '../domain/types.js';
 import { createScheduler } from './scheduler.js';
 import { createRunEngine } from './run-engine.js';
 import { createQuestions } from './questions.js';
+import { daemonDirOf } from '../domain/types.js';
+import { runLogPath } from '../execution/run-log.js';
 
 const silent: Logger = {
   child: () => silent,
@@ -56,7 +58,7 @@ function issue(n: number) {
 function configWith(concurrency: number): Config {
   return {
     operatorUserId: 'operator-1',
-    logDir: '/home/op/.linear-auto-worker/logs',
+    worktreeRoot: '/home/op/.linear-auto-worker/worktrees',
     // TOP LEVEL, not under `defaults`. The cap bounds local RAM across every run on this
     // machine, so types.ts rules out a per-mapping override; nested here it was never read
     // and `concurrency: 1` silently ran as the default 3, which is why the queue-position
@@ -83,6 +85,13 @@ const COMPLETE: AgentResult = {
   summary: 'Shipped it.',
   prTitle: 'ENG: do the thing',
   prBody: 'Does the thing.',
+};
+
+const PARTIAL: AgentResult = {
+  status: 'partial',
+  summary: 'Turn ended early.',
+  prTitle: 'ENG: do the thing',
+  prBody: 'Half of the thing.',
 };
 
 const NEEDS_INPUT: AgentResult = {
@@ -459,7 +468,13 @@ test('a failed run posts one diagnosis with the error and log path, and keeps it
   const diagnoses = h.linear.created.filter((c) => /Run failed/.test(c.body));
   assert.equal(diagnoses.length, 1, 'exactly one diagnosis, from the finally');
   assert.match(diagnoses[0].body, /tsc exited 2/, 'the diagnosis carries the error');
-  assert.match(diagnoses[0].body, /logs\/.*\.log/, 'and the log path');
+  // T120: this used to assert `/logs/<id>.log`, a directory NOTHING creates. The path the
+  // operator is told to read is now the path `openRunLog` actually writes, derived by
+  // CALLING the shared derivation rather than by rebuilding the rule in the test.
+  assert.ok(
+    diagnoses[0].body.includes(runLogPath(daemonDirOf(h.config), run.id)),
+    diagnoses[0].body,
+  );
   assert.match(diagnoses[0].body, /left in place/, 'and says the branch and worktree are kept');
   assert.equal(h.spy.removed.length, 0, 'the worktree cleanup port is NOT called on failure');
 });
@@ -650,4 +665,62 @@ test('the drain admits oldest-first across a restart', async () => {
   assert.deepEqual(h.engine.dispatchQueued(), ['r-at-1', 'r-at-2', 'r-at-3']);
   await h.engine.settle();
   assert.deepEqual(h.spy.created, ['r-at-1', 'r-at-2', 'r-at-3'], 'FIFO survives the restart');
+});
+
+
+// ---------------------------------------------------------------------------
+// T120 — the engine hands the ticket to the deliverer
+// ---------------------------------------------------------------------------
+
+/**
+ * The wiring, not the renderer. `renderPrBody` was right all milestone; nothing called it
+ * with a ticket. This asserts on the port's own recorded argument, which is the only place
+ * the gap between "renders correctly" and "ships" is visible.
+ */
+test('a delivered run hands the deliverer a structured body built from the run row', async () => {
+  const h = harness({ script: [COMPLETE], issues: [issue(9)] });
+
+  await h.engine.handle({ kind: 'run.requested', trigger: 'assignment', issueId: 'issue-9' });
+  await h.engine.settle();
+
+  const [run] = h.store.listByState('delivered');
+  const { prBody } = h.deliverer.calls[0]!.pr;
+  assert.equal(prBody.ticketIdentifier, 'ENG-9');
+  assert.equal(prBody.ticketUrl, 'https://linear.app/x/issue/ENG-9');
+  assert.equal(prBody.verdict, 'delivered');
+  assert.equal(prBody.summary, COMPLETE.prBody);
+  assert.equal(prBody.runLogPath, runLogPath(daemonDirOf(h.config), run.id));
+  assert.ok(prBody.runLogPath!.endsWith(`/runs/${run.id}.jsonl`), prBody.runLogPath);
+});
+
+test('a PARTIAL run hands over the same structured body, with its banner and its verdict', async () => {
+  const h = harness({ script: [PARTIAL], issues: [issue(9)] });
+
+  await h.engine.handle({ kind: 'run.requested', trigger: 'assignment', issueId: 'issue-9' });
+  await h.engine.settle();
+
+  const { prBody } = h.deliverer.calls[0]!.pr;
+  assert.equal(prBody.ticketIdentifier, 'ENG-9');
+  assert.equal(prBody.ticketUrl, 'https://linear.app/x/issue/ENG-9');
+  assert.equal(prBody.verdict, 'partial');
+  // The banner survives the move into `summary` — it already fed `summary` through `body`.
+  assert.match(prBody.summary, /Partial run/);
+  assert.ok(prBody.summary.endsWith(PARTIAL.prBody), prBody.summary);
+});
+
+/**
+ * The three fields with no truthful source (M6). `present()` treats omitted and empty the
+ * same, but a test that pins them ABSENT is what stops someone fabricating a `testResult`
+ * later — the honest render is the one the reviewer can act on.
+ */
+test('testCommand, testResult and didNotDo are omitted, because nothing here runs a test', async () => {
+  const h = harness({ script: [COMPLETE], issues: [issue(9)] });
+
+  await h.engine.handle({ kind: 'run.requested', trigger: 'assignment', issueId: 'issue-9' });
+  await h.engine.settle();
+
+  const { prBody } = h.deliverer.calls[0]!.pr;
+  assert.equal(prBody.testCommand, undefined);
+  assert.equal(prBody.testResult, undefined);
+  assert.equal(prBody.didNotDo, undefined);
 });

@@ -15,7 +15,8 @@ import { IllegalTransitionError } from '../domain/errors.js';
 // cannot tell the bot's own comments from a human's and the bot answers itself.
 import { BOT_COMMENT_MARKER } from '../domain/index.js';
 import type { RepoRun, Run, RunId, RunState } from '../domain/types.js';
-import { LOG_DIR } from '../domain/types.js';
+import { daemonDirOf } from '../domain/types.js';
+import { runLogPath } from '../execution/run-log.js';
 import type {
   AgentResult,
   AgentRunner,
@@ -25,6 +26,7 @@ import type {
   LinearClient,
   LinearIssue,
   Logger,
+  PrBodySource,
   Store,
   WorktreeManager,
 } from '../domain/ports.js';
@@ -427,8 +429,39 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
     return msg.split('\n')[0].slice(0, 200);
   }
 
+  /**
+   * The file `openRunLog` actually writes — one derivation, shared with `adapters.ts`.
+   * This used to build `${LOG_DIR}/${runId}.log`, a directory nothing ever creates, so the
+   * failure comment below quoted the operator a path that could not exist (T120).
+   */
   function logPathFor(runId: RunId): string {
-    return `${LOG_DIR}/${runId}.log`;
+    return runLogPath(daemonDirOf(config), runId);
+  }
+
+  /**
+   * The PR body both `dispatch` arms hand the deliverer, built from the run row and the
+   * agent's result. One source for the ticket, so the `## Ticket` section and the title's
+   * identifier prefix cannot name different tickets.
+   *
+   * `testCommand`, `testResult` and `didNotDo` are OMITTED, not blanked. `present()` treats
+   * the two the same, but omission is the honest statement: nothing in this repository runs
+   * a test command — `runPrePushGates` reads the diff and runs nothing, and `MappingToggles`
+   * has no test-command field — and `AgentResult` carries no did-not-do field. Those three
+   * sections keep rendering their explicit "not recorded" branches on purpose. Do not
+   * fabricate a value here to make the body look fuller (T120).
+   */
+  function prBodyFor(
+    run: RepoRun,
+    summary: string,
+    verdict: 'delivered' | 'partial',
+  ): PrBodySource {
+    return {
+      ticketIdentifier: run.issueKey,
+      ticketUrl: run.issueUrl,
+      summary,
+      runLogPath: logPathFor(run.id),
+      verdict,
+    };
   }
 
   function diagnosis(run: RepoRun): string {
@@ -629,7 +662,7 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
         const run = repoRun(runId);
         const pr = await deliverer.deliver(worktreeOf(run), repoOf(run), {
           title: result.prTitle,
-          body: result.prBody,
+          prBody: prBodyFor(run, result.prBody, 'delivered'),
         });
         store.updateRun(runId, { prUrl: pr.url, updatedAt: now() });
         await transition(runId, 'delivered', pr.url);
@@ -652,12 +685,19 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
           : '';
         const pr = await deliverer.deliver(worktreeOf(run), repoOf(run), {
           title: result.prTitle,
-          body:
+          // The banner rides inside `summary`, exactly where it already rode: `body` fed
+          // `summary` before. `verdict: 'partial'` additionally lights the renderer's
+          // cut-short branch under `## What I did not do`, which is new and correct.
+          prBody: prBodyFor(
+            run,
             `> ⚠️ **Partial run.** The agent's turn ended before it reported completion, ` +
-            `but it left commits behind. Review before merging.${uncommitted}\n\n` +
-            result.prBody,
+              `but it left commits behind. Review before merging.${uncommitted}\n\n` +
+              result.prBody,
+            'partial',
+          ),
           // Forced, never the mapping's toggle: a truncated branch is not something the
-          // operator opted into shipping ready-for-review.
+          // operator opted into shipping ready-for-review. This is the ONLY input to the
+          // draft decision -- `DeliverInput.verdict` is deliberately not set.
           draft: true,
         });
         store.updateRun(runId, { prUrl: pr.url, updatedAt: now() });
