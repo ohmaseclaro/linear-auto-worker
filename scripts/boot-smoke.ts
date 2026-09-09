@@ -391,7 +391,107 @@ async function main(): Promise<void> {
   }
 }
 
+/**
+ * Phase 2 — the SILENT instance (260909-nh6).
+ *
+ * This is the only instrument in the repository that can see the composition root's
+ * wiring, and for the silence gate that is not a nicety. The gate is a decorator applied
+ * once in `daemon.ts`; because the wrapper returns the same interface, DELETING that call
+ * still compiles, `outbound/quiet-linear.test.ts` still passes, and `run-engine.test.ts`
+ * still passes — measured, per T109's procedure, not assumed. Both of those suites
+ * construct the wrapper themselves, so neither can tell you the daemon uses it.
+ *
+ * This phase can: it boots the REAL graph on a config with both toggles off, drives one
+ * run to a terminal state, and reads the fake's four recording arrays. Remove the wrap in
+ * `daemon.ts` and the first check here fails.
+ */
+async function silentPhase(): Promise<void> {
+  const secret = randomBytes(32).toString('hex');
+  let workspace: Workspace | undefined;
+  let daemon: DaemonHandle | undefined;
+
+  try {
+    console.log('\n── phase 2: the silent instance ──');
+    workspace = await makeWorkspace(secret, {
+      defaults: { postLinearComments: false, updateLinearIssue: false, questionsEnabled: false },
+    });
+
+    // Assigned at boot, so the missed-work sweep — which is the poll — finds it. This is
+    // the same producer a poll-only instance's tick uses.
+    const linear = new RecordingLinear({ issues: [smokeIssue({ assigneeId: BOT_USER_ID })] });
+    const runCommand = (): Promise<RunCommandResult> =>
+      Promise.resolve({ exitCode: 0, stdout: '', stderr: '' });
+
+    daemon = await bootDaemon({
+      configDir: workspace.dir,
+      linear,
+      tunnel: probingTunnel(),
+      runCommand,
+      agent: { run: () => Promise.reject(new Error('smoke: no agent')), onProgress: () => {} },
+    });
+
+    // The boot sweep already ran and already acknowledged, so these arrays are final by
+    // the time the handle comes back. On an UNWRAPPED client the acknowledgement alone
+    // puts one comment, one state change and one warn-skipped subscribe through.
+    check(
+      linear.comments.length === 0,
+      `nothing posted a Linear comment with comments off (got ${linear.comments.length})`,
+    );
+    check(
+      linear.stateChanges.length === 0,
+      `no issue state was written with issue mutation off (got ${linear.stateChanges.length})`,
+    );
+    check(linear.subscribers.length === 0, 'and no subscriber was added');
+    check(
+      daemon.store.findRunsByIssue(ISSUE_ID).length === 1,
+      'the silent instance still PICKED THE TICKET UP — quiet is not idle',
+    );
+
+    await daemon.shutdown('silent phase done');
+    daemon = undefined;
+
+    // The boot-time refusal, exercised through a real boot rather than a unit call. The
+    // two silence toggles are instance-level; a mapping that disagrees would be inert, so
+    // the daemon refuses to start instead of lying to the operator.
+    const bad = await makeWorkspace(randomBytes(32).toString('hex'), {
+      defaults: { postLinearComments: false },
+      mapping: { overrides: { postLinearComments: true } },
+    });
+    try {
+      let refused: string | null = null;
+      try {
+        const boot = await bootDaemon({
+          configDir: bad.dir,
+          linear: new RecordingLinear(),
+          tunnel: probingTunnel(),
+          runCommand,
+        });
+        await boot.shutdown('should not have booted');
+      } catch (err) {
+        refused = err instanceof Error ? err.message : String(err);
+      }
+      check(
+        refused !== null && /overrides `postLinearComments`/.test(refused),
+        `a mapping override disagreeing with defaults refuses the boot (${refused ?? 'it BOOTED'})`,
+      );
+      check(
+        refused !== null && /instance-level/.test(refused),
+        'and the refusal says why the override could never have worked',
+      );
+    } finally {
+      await bad.remove();
+    }
+
+    console.log('SILENT PHASE PASSED — the daemon uses the gated client, and says so at boot.');
+  } finally {
+    if (daemon) await daemon.shutdown('silent phase cleanup');
+    if (workspace) await workspace.remove();
+  }
+}
+
 main().then(
+  () => silentPhase(),
+).then(
   () => process.exit(0),
   (err: unknown) => {
     console.error('\nSMOKE FAILED');

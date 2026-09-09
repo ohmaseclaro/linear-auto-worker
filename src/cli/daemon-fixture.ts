@@ -90,7 +90,34 @@ export interface Workspace {
  * first thing the daemon reads out of `kv` at boot, and the kv read is precisely what T53
  * broke while every automated signal stayed green.
  */
-export async function makeWorkspace(secret: string): Promise<Workspace> {
+/**
+ * How one caller's workspace differs from the default one.
+ *
+ * An options PARAMETER rather than a second builder: two workspace builders is two things
+ * to keep in step, and the second one always drifts. Every existing caller passes nothing
+ * and gets exactly what it got before.
+ */
+export interface WorkspaceOptions {
+  /** Merged over the generated config's top level — e.g. `{ ingress: 'poll' }`. */
+  config?: Record<string, unknown>;
+  /** Merged over `defaults` — e.g. `{ postLinearComments: false }`. */
+  defaults?: Record<string, unknown>;
+  /** Merged over the single mapping — e.g. `{ pickupStates: ['unstarted'] }`. */
+  mapping?: Record<string, unknown>;
+  /**
+   * Write `NGROK_AUTHTOKEN` into the `.env`. Defaults true.
+   *
+   * `false` is the poll-only instance's real configuration: no token on disk at all. That
+   * is now a supported setup rather than a boot failure, and this is where it is exercised
+   * end to end rather than only at the loader.
+   */
+  ngrokToken?: boolean;
+}
+
+export async function makeWorkspace(
+  secret: string,
+  opts: WorkspaceOptions = {},
+): Promise<Workspace> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'law-smoke-'));
 
   const config = {
@@ -126,11 +153,20 @@ export async function makeWorkspace(secret: string): Promise<Workspace> {
     },
   };
 
-  await fs.writeFile(path.join(dir, 'config.json'), JSON.stringify(config, null, 2), 'utf8');
+  const merged = {
+    ...config,
+    ...opts.config,
+    defaults: { ...config.defaults, ...opts.defaults },
+    mappings: { [TEAM_ID]: { ...config.mappings[TEAM_ID], ...opts.mapping } },
+  };
+
+  await fs.writeFile(path.join(dir, 'config.json'), JSON.stringify(merged, null, 2), 'utf8');
   // `loadSecrets` refuses anything but 0600, so the mode is part of what boot exercises.
   await fs.writeFile(
     path.join(dir, '.env'),
-    'LINEAR_API_KEY=smoke-not-a-real-key\nNGROK_AUTHTOKEN=smoke-not-a-real-token\n',
+    `LINEAR_API_KEY=smoke-not-a-real-key\n${
+      opts.ngrokToken === false ? '' : 'NGROK_AUTHTOKEN=smoke-not-a-real-token\n'
+    }`,
     { mode: 0o600 },
   );
   await fs.chmod(path.join(dir, '.env'), 0o600);

@@ -26,6 +26,7 @@ import type { Run, RunState } from '../domain/types.js';
 import { createScheduler } from './scheduler.js';
 import { createRunEngine } from './run-engine.js';
 import { createQuestions } from './questions.js';
+import { quietLinear } from '../outbound/quiet-linear.js';
 import { daemonDirOf } from '../domain/types.js';
 import { runLogPath } from '../execution/run-log.js';
 
@@ -55,7 +56,7 @@ function issue(n: number) {
 
 // Shaped against the ADDENDUM; cast because the exact field set lands with
 // Phase 1 and these tests must not pin it.
-function configWith(concurrency: number): Config {
+function configWith(concurrency: number, pickupStates?: string[]): Config {
   return {
     operatorUserId: 'operator-1',
     worktreeRoot: '/home/op/.linear-auto-worker/worktrees',
@@ -75,6 +76,7 @@ function configWith(concurrency: number): Config {
     mappings: {
       'proj-1': {
         repos: [{ repoDir: '/repo/api', repoSlug: 'org/api', baseBranch: 'main', enabled: true }],
+        ...(pickupStates ? { pickupStates } : {}),
       },
     },
   } as unknown as Config;
@@ -197,14 +199,23 @@ function harness(opts: {
   failCreate?: boolean;
   /** The run was acknowledged by a PREVIOUS process; this one must not re-acknowledge. */
   preAcked?: boolean;
+  /** Restrict pickup to these workflow states, by id or by TYPE. */
+  pickupStates?: string[];
+  /**
+   * Wrap the engine's Linear client in the silence decorator, exactly as the composition
+   * root does. An OPTION rather than a second harness: two harnesses is two things to
+   * keep in step, and the wire under test is "the engine got the wrapped client".
+   */
+  quiet?: { postLinearComments: boolean; updateLinearIssue: boolean };
 }) {
-  const config = configWith(opts.concurrency ?? 3);
+  const config = configWith(opts.concurrency ?? 3, opts.pickupStates);
   const store = new InMemoryStore();
   const scheduler = createScheduler({ config, log: silent });
   const agent = new FakeAgentRunner(opts.script);
   const deliverer = new FakeDeliverer();
   const linear = recordingLinear(opts.issues, { failCreate: opts.failCreate });
-  const spy = spyWorktrees(linear.order, { requireAck: !opts.preAcked });
+  const client = opts.quiet ? quietLinear(linear.client, opts.quiet, silent) : linear.client;
+  const spy = spyWorktrees(linear.order, { requireAck: !opts.preAcked && !opts.quiet });
 
   let questions: ReturnType<typeof createQuestions>;
   const engine = createRunEngine({
@@ -213,12 +224,12 @@ function harness(opts: {
     agent,
     worktrees: spy.worktrees,
     deliverer,
-    linear: linear.client,
+    linear: client,
     config,
     log: silent,
     questions: () => questions,
   });
-  questions = createQuestions({ store, engine, config, linear: linear.client, log: silent });
+  questions = createQuestions({ store, engine, config, linear: client, log: silent });
 
   return { store, scheduler, agent, deliverer, linear, spy, engine, config };
 }
@@ -723,4 +734,132 @@ test('testCommand, testResult and didNotDo are omitted, because nothing here run
   assert.equal(prBody.testCommand, undefined);
   assert.equal(prBody.testResult, undefined);
   assert.equal(prBody.didNotDo, undefined);
+});
+
+// ---------------------------------------------------------------------------
+// 260909-nh6 — the silence gate and the pickup filter, at the ENGINE
+//
+// The decorator's own suite (`outbound/quiet-linear.test.ts`) proves the FUNCTION. These
+// prove the WIRE: an engine handed the wrapped client writes nothing to Linear. Delete the
+// wrapping and these go red while that suite stays green — which is the T109 pair.
+// ---------------------------------------------------------------------------
+
+test('with both toggles off, a whole run leaves NO comment on the ticket', async () => {
+  const h = harness({
+    script: [COMPLETE],
+    issues: [issue(20)],
+    quiet: { postLinearComments: false, updateLinearIssue: false },
+  });
+
+  await h.engine.handle({ kind: 'run.requested', trigger: 'assignment', issueId: 'issue-20' });
+  await h.engine.settle();
+
+  // One assertion per array, so a failure says WHICH one leaked.
+  assert.deepEqual(h.linear.created, [], 'no comment was created — ack or terminal');
+  assert.deepEqual(h.linear.updated, [], 'and none was edited');
+  assert.deepEqual(h.linear.states, [], 'no In Progress transition');
+  assert.deepEqual(h.linear.subscribed, [], 'no subscriber');
+
+  const [run] = h.store.listByState('delivered');
+  assert.ok(run, 'and the run still completed — silence is not breakage');
+});
+
+test('with both toggles on, the same run comments — the live instance is unchanged', async () => {
+  // GREEN at HEAD by construction. This is the non-regression; do not "repair" it.
+  const h = harness({ script: [COMPLETE], issues: [issue(21)] });
+
+  await h.engine.handle({ kind: 'run.requested', trigger: 'assignment', issueId: 'issue-21' });
+  await h.engine.settle();
+
+  assert.ok(h.linear.created.length > 0);
+  assert.deepEqual(h.linear.states, [{ issueId: 'issue-21', stateType: 'started' }]);
+  assert.equal(h.linear.subscribed.length, 1);
+});
+
+test('the questionsEnabled:false branch — which POSTS a comment — is silenced too', async () => {
+  // questions.ts:254-262 announces that the question flow is off by posting a comment.
+  // Nothing in questions.ts is touched by this change; the wrapper is why it is quiet.
+  const h = harness({
+    script: [NEEDS_INPUT, COMPLETE],
+    issues: [issue(22)],
+    quiet: { postLinearComments: false, updateLinearIssue: false },
+  });
+  (h.config.defaults as { questionsEnabled: boolean }).questionsEnabled = false;
+
+  await h.engine.handle({ kind: 'run.requested', trigger: 'assignment', issueId: 'issue-22' });
+  await h.engine.settle();
+
+  assert.deepEqual(h.linear.created, [], 'not even the "questions are off" comment');
+});
+
+// --- the pickup filter, at the one site both producers pass through ---------
+
+const PICKED_UP = (h: ReturnType<typeof harness>) => h.store.findRunsByIssue('issue-30').length > 0;
+
+for (const trigger of ['assignment', 'reconcile'] as const) {
+  test(`pickupStates naming a state the issue is not in drops it (${trigger})`, async () => {
+    const h = harness({ script: [COMPLETE], issues: [issue(30)], pickupStates: ['started'] });
+    await h.engine.handle({ kind: 'run.requested', trigger, issueId: 'issue-30' });
+    await h.engine.settle();
+    assert.equal(PICKED_UP(h), false, 'no run row was created');
+  });
+
+  test(`pickupStates matching the issue's TYPE picks it up (${trigger})`, async () => {
+    const h = harness({ script: [COMPLETE], issues: [issue(30)], pickupStates: ['unstarted'] });
+    await h.engine.handle({ kind: 'run.requested', trigger, issueId: 'issue-30' });
+    await h.engine.settle();
+    assert.equal(PICKED_UP(h), true);
+  });
+
+  test(`pickupStates matching the issue's state ID picks it up (${trigger})`, async () => {
+    const h = harness({ script: [COMPLETE], issues: [issue(30)], pickupStates: ['state-todo'] });
+    await h.engine.handle({ kind: 'run.requested', trigger, issueId: 'issue-30' });
+    await h.engine.settle();
+    assert.equal(PICKED_UP(h), true);
+  });
+}
+
+test('a mapping with no pickupStates picks up whatever the state — the live instance', async () => {
+  // GREEN at HEAD. An absent list is no filter, not an empty one.
+  const h = harness({ script: [COMPLETE], issues: [issue(30)] });
+  await h.engine.handle({ kind: 'run.requested', trigger: 'assignment', issueId: 'issue-30' });
+  await h.engine.settle();
+  assert.equal(PICKED_UP(h), true);
+});
+
+test('a dropped pickup is LOGGED with both state fields and the configured list', async () => {
+  // A filter that drops silently is the same defect as a filter that never matches.
+  const lines: Array<{ fields: Record<string, unknown>; msg?: string }> = [];
+  const noisy: Logger = {
+    child: () => noisy,
+    info: (f: unknown, msg?: string) => lines.push({ fields: f as Record<string, unknown>, msg }),
+    warn: () => {},
+    error: () => {},
+    debug: () => {},
+  };
+  const config = configWith(3, ['started']);
+  const store = new InMemoryStore();
+  const linear = recordingLinear([issue(30)]);
+  let questions: ReturnType<typeof createQuestions>;
+  const engine = createRunEngine({
+    store,
+    scheduler: createScheduler({ config, log: noisy }),
+    agent: new FakeAgentRunner([COMPLETE]),
+    worktrees: spyWorktrees([]).worktrees,
+    deliverer: new FakeDeliverer(),
+    linear: linear.client,
+    config,
+    log: noisy,
+    questions: () => questions,
+  });
+  questions = createQuestions({ store, engine, config, linear: linear.client, log: noisy });
+
+  await engine.handle({ kind: 'run.requested', trigger: 'assignment', issueId: 'issue-30' });
+
+  const drop = lines.find((l) => l.fields.pickupStates !== undefined);
+  assert.ok(drop, 'the drop was logged');
+  assert.equal(drop.fields.issueId, 'issue-30');
+  assert.equal(drop.fields.stateType, 'unstarted');
+  assert.equal(drop.fields.stateId, 'state-todo');
+  assert.deepEqual(drop.fields.pickupStates, ['started']);
 });

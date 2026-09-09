@@ -43,6 +43,7 @@ import * as http from 'node:http';
 
 import { loadFoundation } from '../infra/index.js';
 import { LinearClientImpl } from '../outbound/linear-client.js';
+import { assertInstanceLevelToggles, quietLinear } from '../outbound/quiet-linear.js';
 import { Notifier, type RunEvent as NotifyEvent } from '../outbound/notify/notifier.js';
 import { SlackChannel } from '../outbound/notify/slack-channel.js';
 import { defaultRoot, webhookTeamId } from '../infra/config.js';
@@ -503,12 +504,26 @@ export async function bootDaemon(opts: BootOptions = {}): Promise<DaemonHandle> 
   // The `log` argument is hard deliverable #4 and not optional in practice: it defaults to
   // a no-op, and with a no-op every `linear.ratelimited` and every complexity-budget line
   // is silently dropped. With no dashboard the log IS the UI (D-04).
-  const linear =
+  // Refused before the client is even built, and before the first Linear call: the two
+  // silence toggles are INSTANCE-level (see `quiet-linear.ts`), so a mapping override that
+  // disagrees with `defaults` would be inert — which is the exact defect the wrapper
+  // exists to fix. An override that AGREES is harmless and is left alone.
+  assertInstanceLevelToggles(config);
+
+  // Wrapped HERE, once, immediately at construction and before anything takes a reference
+  // to it — so the registrar, the router, the recovery sweep, the engine and the questions
+  // module all receive the same gated instance. This one line is the whole of "no daemon
+  // path can post a comment when comments are off"; there is no per-call-site guard to
+  // forget, and a seventh write site added later is silent by construction.
+  const linear = quietLinear(
     opts.linear ??
-    new LinearClientImpl({
-      apiKey: secrets.linearApiKey,
-      log: (fields, msg) => log.info(fields, msg),
-    });
+      new LinearClientImpl({
+        apiKey: secrets.linearApiKey,
+        log: (fields, msg) => log.info(fields, msg),
+      }),
+    config.defaults,
+    log,
+  );
 
   // ── 2a. preflight, before anything binds or registers ─────────────────────
   // `gh`, `claude` and `git` first because they are pure local checks, then the Linear

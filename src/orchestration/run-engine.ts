@@ -1008,6 +1008,34 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
             log.warn({ issueId: issue.id }, 'no repo mapping for issue; ignoring');
             return;
           }
+          // The pickup filter, and it sits HERE because here is where the two producers
+          // meet — the same reason the two guards above do. The webhook path arrives via
+          // `daemon.ts`'s router `onEvent` -> `createIngressMapper`; the poll arrives via
+          // `recovery.ts:275`. One check covers both doors; a second copy at the poll is
+          // this repo's most repeated defect.
+          //
+          // Absent list means NO filter, which is every config written before today.
+          // Matched by state TYPE or by state ID, never by name (`ProjectMapping`).
+          const pickupStates = mapping.pickupStates;
+          if (
+            pickupStates &&
+            !pickupStates.includes(issue.stateType) &&
+            !pickupStates.includes(issue.stateId)
+          ) {
+            // Logged, with both state fields AND the configured list: a filter that drops
+            // silently is the same defect as a filter that never matches — from the
+            // operator's chair both look like a bot that is ignoring them.
+            log.info(
+              {
+                issueId: issue.id,
+                stateType: issue.stateType,
+                stateId: issue.stateId,
+                pickupStates,
+              },
+              'issue is not in a pickup state for its mapping; ignoring',
+            );
+            return;
+          }
           // D-12 / DELV-06. Fan-out happens HERE, at the engine, and never
           // inside an agent session: one child run per mapped repo, each with
           // its own worktree, branch, session and state. One repo stays one run
