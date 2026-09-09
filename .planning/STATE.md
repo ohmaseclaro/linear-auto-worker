@@ -115,6 +115,7 @@ Items acknowledged and carried forward from previous milestone close:
 | 260908-bms | `ALLOWED_TOOLS` under-grants (Skill, Read) and the probe that would prove it crashes | P1 | `c81df58`, `2c0b700`, `988b037` | 2026-09-08 |
 | 260908-crx | The disambiguation listing prints a field that is not a target, so ambiguity is a dead end | P1 | `e51a388`, `4691669`, `527d325` | 2026-09-08 |
 | 260909-lvl | Wire the dead PR body, the issue key in the PR title, and the leaked bot marker | 2026-09-09 | 8837d11 | [260909-lvl-wire-the-dead-pr-body-issue-key-in-pr-ti](./quick/260909-lvl-wire-the-dead-pr-body-issue-key-in-pr-ti/) |
+| 260909-nh6 | A second, silent, poll-only daemon instance for the Lahzo workspace | P2 | `24d05a7`, `b04973c`, `e8cf1f6`, `6f07bf8` | 2026-09-09 |
 
 ## Session Continuity
 
