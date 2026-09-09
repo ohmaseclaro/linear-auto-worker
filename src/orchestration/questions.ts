@@ -25,9 +25,9 @@ import type { Config, EngineEvent, LinearClient, Logger, Store } from '../domain
 // barrel. Never declared, re-exported or re-derived here -- a second copy is
 // exactly what makes the loop-prevention filter unmergeable.
 import {
-  BOT_COMMENT_MARKER_PREFIX,
-  QUESTION_MARKER_PREFIX,
+  BOT_COMMENT_MARKER,
   isBotAuthoredBody,
+  questionMarker,
   resolveToggles,
 } from '../domain/index.js';
 import type { RunEngine } from './run-engine.js';
@@ -145,14 +145,29 @@ export function createQuestions(deps: QuestionsDeps): Questions {
     { status: 'answered' | 'timed_out'; answeredBy: string | null }
   >();
 
-  /** Every comment this module writes carries the marker: it is the loop guard. */
-  function botBody(body: string): string {
-    return `${BOT_COMMENT_MARKER_PREFIX}${body}`;
+  /**
+   * Every comment this module writes carries the marker: it is the loop guard.
+   *
+   * T119: the `\n\n` is behaviour, not formatting. The marker is a CommonMark link
+   * reference definition, which produces no output only in BLOCK position — this writer
+   * had no separator at all, so the marker sat inside the first paragraph and Linear
+   * rendered it to the reader.
+   *
+   * `marker` lets a question comment lead with its own `questionMarker(id)`, which is
+   * still a bot marker by construction (it shares `BOT_MARKER_PREFIX`).
+   */
+  function botBody(body: string, marker: string = BOT_COMMENT_MARKER): string {
+    return `${marker}\n\n${body}`;
   }
 
-  async function post(issueId: string, body: string, parentId?: string | null): Promise<string | null> {
+  async function post(
+    issueId: string,
+    body: string,
+    parentId?: string | null,
+    marker?: string,
+  ): Promise<string | null> {
     try {
-      const c = await linear.createComment(issueId, botBody(body), parentId ?? undefined);
+      const c = await linear.createComment(issueId, botBody(body, marker), parentId ?? undefined);
       return c.id;
     } catch (err) {
       // Never fragile: a comment we could not post is a worse record, not a
@@ -299,11 +314,17 @@ export function createQuestions(deps: QuestionsDeps): Questions {
 
       // Posted after the row exists: a question we failed to post still has a
       // deadline, whereas a question we failed to persist has nothing.
-      const shortCode = `${QUESTION_MARKER_PREFIX}${question.id.slice(0, 8)}`;
+      // A HUMAN LABEL ONLY. `correlate()` matches on the stored `linearCommentId` and
+      // never on the body (T-06-13), so nothing reads this back — it exists so a person
+      // can say which question they mean. It is the bare code, not the marker: printing
+      // the marker here leaked it a second time, visibly, mid-body (T119).
+      const shortCode = question.id.slice(0, 8);
       const commentId = await post(
         run.issueId,
         `${text}\n\n---\n_Reply in this thread to answer._ \`${shortCode}\`\n` +
           `Unanswered, I will proceed with: ${assumption}`,
+        null,
+        questionMarker(question.id),
       );
       if (commentId) {
         // Tier 1 correlation reads exactly this column.

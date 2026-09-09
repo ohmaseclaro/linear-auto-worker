@@ -3,12 +3,12 @@
  *
  * Three things this file is careful about:
  *
- *  - **The marker is imported, never redefined (TRAPS T32 / D-09 / threat T-05-04).**
- *    `BOT_COMMENT_MARKER_PREFIX` lives in `src/domain/` because two owners share it: this
- *    channel writes it onto every comment, and Phase 3's filter drops any comment carrying
- *    it regardless of actor. A second local copy silently breaks that filter and the break
- *    presents as a webhook loop burning the shared Linear request budget. Two phases
- *    already invented two different homes for this constant — this is the settled one.
+ *  - **This file writes NO comment and imports NO marker.** It composes bodies; the
+ *    marker and the `createComment` call both live in `run-engine.ts` (`botBody`), which
+ *    is what actually posts. An earlier version of this header claimed "this channel
+ *    writes it onto every comment" — it never did, and `composeBody()` below is consumed
+ *    by `SlackChannel`. A doc comment asserting a security guard the file does not
+ *    implement is itself a trap (T119's sibling); corrected 2026-09-09.
  *  - **Bodies are composed only from RunEvent fields (threat T-05-05).** Never an agent's
  *    raw stdout, never a stack trace, never a filesystem path: a Linear comment is
  *    human-visible on a shared ticket and any of those could carry a secret.
@@ -16,8 +16,8 @@
  *    `suppression:self-write` guard, which reads zero until the writer says a write
  *    happened — ingress cannot know on its own (03-CONTEXT D-09).
  *
- * `QUESTION_MARKER_PREFIX` is deliberately absent. The per-question short code is Phase 6's
- * correlation concern, not this channel's.
+ * `QUESTION_MARKER_PREFIX` is deliberately absent, and so is every other marker constant:
+ * a file that posts nothing has nothing to mark.
  */
 
 import { noteSelfWrite } from '../../ingress/guards.js';

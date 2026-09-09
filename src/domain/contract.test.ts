@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import { parseAgentResult } from './agent-result.js';
 import { RUN_STATE_TABLE, canTransition } from './state-machine.js';
 import {
+  BOT_COMMENT_MARKER,
   isBotAuthoredBody,
   questionMarker,
   questionShortCode,
@@ -89,4 +90,29 @@ test('the bot marker is actor-independent and carries the question short code (T
   assert.equal(isBotAuthoredBody('a human reply'), false);
   assert.equal(questionShortCode(`${marker} body`), 'abcdef01');
   assert.equal(questionShortCode('no marker here'), null);
+});
+
+/**
+ * T119. The marker's whole job is to be invisible in every renderer it reaches, and
+ * Linear has no HTML-comment rule at all — the old form arrived as a plain text node and
+ * the operator read it on every ticket for a milestone. A CommonMark link reference
+ * definition produces no output *by specification*, which is the property being pinned
+ * here: a marker whose invisibility is incidental is one parser away from visible.
+ */
+test('the bot marker is a link reference definition, which renders as nothing (T119)', () => {
+  assert.match(BOT_COMMENT_MARKER, /^\[\/\/\]: # \(.+\)$/);
+  assert.match(questionMarker('abcdef01-2345-6789'), /^\[\/\/\]: # \(.+\)$/);
+});
+
+/**
+ * The migration guard. Every bot comment written before 2026-09-09 carries the legacy
+ * HTML-comment form, and nothing rewrites them — so the loop guard has to keep reading
+ * both for as long as those comments are reachable.
+ */
+test('isBotAuthoredBody recognises BOTH the new marker and the legacy form', () => {
+  assert.equal(isBotAuthoredBody(`${BOT_COMMENT_MARKER}\n\nstatus update`), true);
+  assert.equal(isBotAuthoredBody(`${questionMarker('abcdef01-2345')}\n\nwhich database?`), true);
+  // GREEN at HEAD by design: this arm is the non-regression, not the new behaviour.
+  assert.equal(isBotAuthoredBody('<!-' + '- law-bot\n\nposted last month'), true);
+  assert.equal(isBotAuthoredBody('a human reply'), false);
 });

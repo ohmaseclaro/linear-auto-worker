@@ -17,11 +17,11 @@
  * fires is otherwise indistinguishable from a layer that is working.
  */
 
-// T32: BOT_COMMENT_MARKER_PREFIX and isBotAuthoredBody live in src/domain/ and are owned
+// T32: BOT_MARKER_PREFIX and isBotAuthoredBody live in src/domain/ and are owned
 // by Phase 1. Never declare, re-export or re-derive them here, and do not create
 // src/shared/markers.ts (03-CONTEXT D-13 is superseded) — a second copy of the constant is
 // exactly what makes this filter unmergeable against Phase 5's outbound writer.
-import { BOT_COMMENT_MARKER_PREFIX, isBotAuthoredBody } from '../domain/index.js';
+import { BOT_MARKER_PREFIX, isBotAuthoredBody } from '../domain/index.js';
 
 /**
  * Structural view of the fields these guards read. Deliberately not the SDK's
@@ -118,7 +118,7 @@ export function selfEventGuards(payload: GuardPayload, botUserId: string): Guard
     const body = payload.data?.body;
     if (typeof body === 'string' && isBotAuthoredBody(body)) {
       incSelfEventDrop('marker:bot-authored');
-      return { drop: true, guard: 'marker:bot-authored', actorType, marker: BOT_COMMENT_MARKER_PREFIX };
+      return { drop: true, guard: 'marker:bot-authored', actorType, marker: BOT_MARKER_PREFIX };
     }
   }
 

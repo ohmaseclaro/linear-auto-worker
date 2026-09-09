@@ -110,8 +110,11 @@ export interface Store {
   getQuestion(id: string): QuestionRow | undefined;
   openQuestionsForIssue(issueId: string): QuestionRow[];
   findQuestionByCommentId(linearCommentId: string): QuestionRow | undefined;
-  /** Correlation tier 2: the short code carried in a question comment's marker is
-   *  the first 8 characters of the question id (`domain/types.ts:questionMarker`). */
+  /** Lookup by the first 8 characters of the question id — the code
+   *  `questions.ts:openQuestion` prints as a human label.
+   *  NOT correlation tier 2, whatever this comment used to say: `correlate()` matches on
+   *  the stored `linearCommentId` and tier 2 is the exactly-one-open-question fallback;
+   *  neither reads a short code (T-06-13). No production caller today. */
   findQuestionByShortCode(code: string): QuestionRow | undefined;
   /** Generic column-by-column patch -- same no-validation rule as `updateRun`. */
   updateQuestion(id: string, patch: Partial<QuestionRow>): void;

@@ -13,7 +13,7 @@ import { IllegalTransitionError } from '../domain/errors.js';
 // T32: the self-event marker is declared once, in the domain barrel. Every
 // comment this daemon posts carries it, or the ingress loop-prevention filter
 // cannot tell the bot's own comments from a human's and the bot answers itself.
-import { BOT_COMMENT_MARKER_PREFIX } from '../domain/index.js';
+import { BOT_COMMENT_MARKER } from '../domain/index.js';
 import type { RepoRun, Run, RunId, RunState } from '../domain/types.js';
 import { LOG_DIR } from '../domain/types.js';
 import type {
@@ -273,9 +273,13 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
     store.kvSet(ackKey(runId), JSON.stringify(ack));
   }
 
-  /** T32: never re-derive the marker, never post a comment without it. */
+  /**
+   * T32: never re-derive the marker, never post a comment without it. T119: the `\n\n` is
+   * behaviour — the marker is a CommonMark link reference definition and is only invisible
+   * in block position.
+   */
   function botBody(text: string): string {
-    return `${BOT_COMMENT_MARKER_PREFIX}\n\n${text}`;
+    return `${BOT_COMMENT_MARKER}\n\n${text}`;
   }
 
   /**

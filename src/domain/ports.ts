@@ -30,7 +30,9 @@ export type { PendingQuestion, IssueId, SessionId } from './types.js';
 export type { AgentResult } from './agent-result.js';
 export { AgentResultSchema, parseAgentResult } from './agent-result.js';
 export {
-  BOT_COMMENT_MARKER_PREFIX,
+  BOT_COMMENT_MARKER,
+  BOT_MARKER_PREFIX,
+  LEGACY_BOT_MARKER,
   QUESTION_MARKER_PREFIX,
   isBotAuthoredBody,
   resolveToggles,

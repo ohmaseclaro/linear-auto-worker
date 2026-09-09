@@ -19,6 +19,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { FakeAgentRunner, FakeDeliverer, InMemoryStore } from '../domain/fakes.js';
+import { BOT_COMMENT_MARKER } from '../domain/index.js';
 import { RUN_STATE_TABLE } from '../domain/state-machine.js';
 import type { AgentResult, Config, LinearClient, Logger, WorktreeManager } from '../domain/ports.js';
 import type { Run, RunState } from '../domain/types.js';
@@ -254,6 +255,21 @@ test('the ack comment id is persisted, so a restart edits rather than re-posts',
   const saved = JSON.parse(store.kvGet(`ack:${run.id}`)!);
   assert.equal(saved.commentId, linear.created[0].id, 'the edit target survives being read back');
   assert.equal(saved.position, 0, 'a run that started immediately was never queued');
+});
+
+/**
+ * T119. The status comment's marker has to sit in BLOCK position — its own line, followed
+ * by a blank one — or CommonMark reads the link reference definition as paragraph text and
+ * Linear renders it to the operator. The separator is behaviour, not formatting.
+ */
+test('the status comment leads with the marker on its own line, followed by a blank one', async () => {
+  const { engine, linear } = harness({ script: [COMPLETE], issues: [issue(1)] });
+
+  await engine.handle({ kind: 'run.requested', trigger: 'assignment', issueId: 'issue-1' });
+
+  const lines = linear.created[0]!.body.split('\n');
+  assert.equal(lines[0], BOT_COMMENT_MARKER);
+  assert.equal(lines[1], '');
 });
 
 test('a queued run is acknowledged with its position, and three position changes edit one comment', async () => {

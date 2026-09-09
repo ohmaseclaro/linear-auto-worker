@@ -377,34 +377,62 @@ export const LOG_DIR = DEFAULT_PATHS.logDir;
 // these; import them from `src/domain/`.
 
 /**
- * Opens an HTML comment, which Linear renders invisibly. Phase 5 prefixes every comment
- * the bot writes with it; Phase 3 drops any comment carrying it regardless of actor. That
- * actor-independence is the point: the loop guard survives a null actor, a stale cached
- * bot id, and a re-created bot user.
+ * The marker every comment the bot writes leads with, and the substring Phase 3 drops on
+ * regardless of actor.
+ *
+ * **It is a CommonMark link reference definition, not an HTML comment.** Measured against
+ * Linear's own parser on 2026-09-09 (TRAPS T119): Linear's markdown has no HTML-comment
+ * rule at all, so `<!-- law-bot` — closed or unclosed, leading or inline — arrives as a
+ * plain `text` node inside a `paragraph` and is RENDERED TO THE READER. A link reference
+ * definition is specified to produce no output, and Linear implements that: the block is
+ * absent from `bodyData` entirely, while the raw `body` round-trips byte-identical, so the
+ * loop guard still sees it.
+ *
+ * Two consequences for writers, both load-bearing:
+ *  - it is a COMPLETE line, which is why this constant is not named `..._PREFIX` any more.
+ *    The old name invited `` `${PREFIX}${body}` `` and an unclosed prefix is the defect.
+ *  - it must sit in BLOCK position — its own line, then a blank one. Inline, CommonMark
+ *    does not treat it as a definition and it is paragraph text again.
+ *
+ * The actor-independence is still the point, but the live reason is narrower than it was:
+ * `guards.ts:101-105` drops a null actor outright, so what remains is a stale cached bot
+ * id and a re-created bot user.
  */
-export const BOT_COMMENT_MARKER_PREFIX = '<!-- law-bot';
+export const BOT_COMMENT_MARKER = '[//]: # (law-bot)';
 
 /**
- * A question comment's marker. Note it begins with `BOT_COMMENT_MARKER_PREFIX`, so a
- * question body is bot-authored by construction rather than by a second convention.
+ * Detection only. Also matches the question form, whose destination carries a short code.
+ * Never write this — writers take `BOT_COMMENT_MARKER` or `questionMarker()`.
  */
-export const QUESTION_MARKER_PREFIX = `${BOT_COMMENT_MARKER_PREFIX}:q:`;
+export const BOT_MARKER_PREFIX = '[//]: # (law-bot';
 
-/** The loop guard. True for anything the bot wrote, question comments included. */
+/**
+ * The marker every bot comment written before 2026-09-09 carries. **Detection only; never
+ * emitted.** Spliced rather than written whole so the literal cannot be copy-pasted out of
+ * this file into a writer.
+ *
+ * Do not delete it while comments written before that date are still reachable on any
+ * ticket in this workspace — nothing rewrites them, so this arm is the only thing keeping
+ * a year of bot comments filtered.
+ */
+export const LEGACY_BOT_MARKER = '<!-' + '- law-bot';
+
+/**
+ * A question comment's marker. It begins with `BOT_MARKER_PREFIX`, so a question body is
+ * bot-authored by construction rather than by a second convention.
+ */
+export const QUESTION_MARKER_PREFIX = `${BOT_MARKER_PREFIX}:q:`;
+
+/** The loop guard. True for anything the bot wrote, in either marker form. */
 export function isBotAuthoredBody(body: string): boolean {
-  return body.includes(BOT_COMMENT_MARKER_PREFIX);
+  return body.includes(BOT_MARKER_PREFIX) || body.includes(LEGACY_BOT_MARKER);
 }
 
 /** The marker to embed in a question comment. The short code is the question id's head. */
 export function questionMarker(questionId: string): string {
-  return `${QUESTION_MARKER_PREFIX}${questionId.slice(0, 8)} -->`;
+  return `${QUESTION_MARKER_PREFIX}${questionId.slice(0, 8)})`;
 }
 
-/**
- * The short code carried by a question comment, or null. Correlation tier 2 matches a
- * reply to a pending question with it; built here so ingress and outbound cannot drift
- * on the marker's exact spelling.
- */
 export function questionShortCode(body: string): string | null {
   const at = body.indexOf(QUESTION_MARKER_PREFIX);
   if (at < 0) return null;

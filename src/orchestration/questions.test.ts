@@ -5,7 +5,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { InMemoryStore } from '../domain/fakes.js';
-import { BOT_COMMENT_MARKER_PREFIX } from '../domain/index.js';
+import { BOT_COMMENT_MARKER, BOT_MARKER_PREFIX } from '../domain/index.js';
 import type { PendingQuestion, Run } from '../domain/types.js';
 import type { Config, DomainEvent, Logger } from '../domain/ports.js';
 import { correlate, createQuestions, DEFAULT_QUESTION_TIMEOUT_MS } from './questions.js';
@@ -124,7 +124,7 @@ test('a bot-authored comment correlates to nothing at either tier', () => {
 
 test('a comment carrying the bot marker is dropped even with a null author', () => {
   // A stale cached bot id and a re-created bot user both survive the id check.
-  const marked = comment({ parentId: 'c-q1', authorId: null, body: BOT_COMMENT_MARKER_PREFIX + 'mine' });
+  const marked = comment({ parentId: 'c-q1', authorId: null, body: `${BOT_COMMENT_MARKER}\n\nmine` });
   const r = correlate(marked, [question()], BOT);
   assert.equal(r.outcome === 'none' && r.reason, 'bot_authored');
 });
@@ -292,9 +292,42 @@ test('opening a question posts it to Linear and stores the comment id tier 1 mat
   const q = (await h.questions.openQuestion('r1', 'which database?', 'postgres'))!;
 
   assert.equal(h.comments.length, 1);
-  assert.ok(h.comments[0]!.body.startsWith(BOT_COMMENT_MARKER_PREFIX));
+  // The DETECTION prefix, not the plain marker: a question comment leads with its own
+  // `questionMarker(id)`, which shares the prefix and so is bot-authored by construction.
+  assert.ok(h.comments[0]!.body.startsWith(BOT_MARKER_PREFIX));
   assert.equal(h.store.getQuestion(q.id)!.linearCommentId, 'c-posted-1');
   assert.ok(h.transitions.some((t) => t.to === 'awaiting_answer'));
+});
+
+/**
+ * T119. A link reference definition is only invisible in BLOCK position — inline, Linear
+ * parses it as ordinary paragraph text and the operator reads it again. `questions.ts`'s
+ * writer had no separator at all, so block position here is a behaviour, not formatting.
+ */
+test('the question comment leads with the marker on its own line, followed by a blank one', async () => {
+  const h = harness();
+  seedRun(h.store);
+  const q = (await h.questions.openQuestion('r1', 'which database?', 'postgres'))!;
+
+  const lines = h.comments[0]!.body.split('\n');
+  assert.equal(lines[0], `[//]: # (law-bot:q:${q.id.slice(0, 8)})`);
+  assert.equal(lines[1], '', 'the marker must be its own block, or CommonMark reads it as paragraph text');
+});
+
+/**
+ * The leak this closes is doubled: the marker led the comment AND was reprinted mid-body
+ * inside a code span as a "reply code". Counting `[//]: #` catches both at once, and the
+ * legacy assertion catches a half-migrated writer.
+ */
+test('a reader sees no marker anywhere in the question comment', async () => {
+  const h = harness();
+  seedRun(h.store);
+  await h.questions.openQuestion('r1', 'which database?', 'postgres');
+
+  const body = h.comments[0]!.body;
+  assert.equal(body.includes('<!-' + '- law-bot'), false, 'the legacy form must never be written again');
+  assert.equal(body.split('[//]: #').length - 1, 1, 'exactly one marker, and it is the invisible leading line');
+  assert.equal(body.indexOf('[//]: #'), 0);
 });
 
 // -- the deadline: data in SQLite, swept by a tick, never a setTimeout -------

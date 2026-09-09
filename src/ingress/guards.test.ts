@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { BOT_COMMENT_MARKER_PREFIX } from '../domain/index.js';
+import { BOT_COMMENT_MARKER } from '../domain/index.js';
 import type { GuardPayload } from './guards.js';
 import {
   SELF_WRITE_SUPPRESSION_MS,
@@ -29,7 +29,7 @@ const issue = (id: string, actor: GuardPayload['actor']): GuardPayload => ({
 });
 
 /** The marker value is Phase 1's; never hardcode a literal copy of it here (T32). */
-const botBody = (text: string) => `${BOT_COMMENT_MARKER_PREFIX}${text}`;
+const botBody = (text: string) => `${BOT_COMMENT_MARKER}\n\n${text}`;
 
 const count = (guard: string): number => selfEventDropCounts[guard] ?? 0;
 
@@ -76,6 +76,21 @@ const rows: Row[] = [
   {
     name: 'bot marker in the body drops regardless of actor',
     payload: comment('c-marked', botBody('a question'), user(HUMAN)),
+    expectedGuard: 'marker:bot-authored',
+    expectedActorType: 'user',
+  },
+  {
+    // T119. The ingress leg has to see the marker in the form the writers now emit, or
+    // layer 2 quietly stops existing the day the marker changes shape.
+    name: 'the NEW link-reference marker drops at layer 2',
+    payload: comment('c-lrd', `[//]: # (law-bot)\n\na status update`, user(HUMAN)),
+    expectedGuard: 'marker:bot-authored',
+    expectedActorType: 'user',
+  },
+  {
+    // The migration arm, at the ingress boundary rather than only in the unit test.
+    name: 'a comment carrying the LEGACY marker still drops at layer 2',
+    payload: comment('c-legacy', '<!-' + '- law-bot\n\nposted last month', user(HUMAN)),
     expectedGuard: 'marker:bot-authored',
     expectedActorType: 'user',
   },
