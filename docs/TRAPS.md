@@ -1,6 +1,6 @@
 # Traps
 
-One hundred and eighteen footguns found while building this daemon, kept as a running ledger
+One hundred and twenty-one footguns found while building this daemon, kept as a running ledger
 so no two parallel work streams had to rediscover the same one.
 
 **Every entry here was measured, not recalled.** Versions come from the npm registry, API
@@ -15,7 +15,7 @@ spawn processes, several of them will cost you an afternoon each.
 Measured against: `@linear/sdk@93.0.1`, `@ngrok/ngrok@1.7.0`, `better-sqlite3@13.0.3`,
 `execa@10.0.1`, Claude Code CLI `2.1.259`, `gh` `2.98.0`, Node `22.23.1`, macOS.
 
-The complete internal ledger — all 118 rows with per-phase attribution and the evidence for
+The complete internal ledger — all 121 rows with per-phase attribution and the evidence for
 each — is in [`.planning/TRAPS.md`](../.planning/TRAPS.md). This page is the subset that
 generalises.
 
@@ -524,6 +524,26 @@ probe that spawns the real binary under the product's own child environment can 
 is wide enough, and that answer expires: an unknown tool name in `--allowedTools` is accepted
 SILENTLY rather than rejected, so a vendor-side rename narrows the grant with no error
 anywhere. Re-run the probe after every CLI upgrade.
+
+**An optional parameter is a dead parameter until something in the gate proves a caller sets
+it.** `renderPrBody` took a ticket identifier and URL, handled them correctly, and had unit
+tests that passed them. No production code ever did. Both delivery call sites passed a plain
+string, and a `?? { summary: body }` fallback turned "nobody wired this" into a valid render —
+so every pull request shipped saying *(no ticket recorded)*, *none configured*, *not run*: a
+body that reads like a considered report of nothing. Making the field required is not enough
+either, because every field inside it was optional and `{}` still compiles. The fix is to
+require the fields that actually carry the value and delete the fallback, so the compiler is
+the thing that notices.
+
+**A marker chosen to be invisible in one renderer is not invisible in another, and the gate
+renders nothing so it cannot tell.** The bot's comment marker was an HTML comment, which
+GitHub hides. Linear has no HTML-comment rule at all — measured by posting six candidate
+bodies and reading back Linear's own parse, a properly closed `<!-- ... -->` arrives as plain
+text identical to the unclosed form, so closing it changes nothing. The operator read
+`<!-- law-bot` at the top of every comment for a milestone. What works is a CommonMark link
+reference definition: absent from the parsed document entirely, while the raw body round-trips
+byte-identical so the loop guard still matches. The lesson is the method, not the string —
+do not reason about a foreign renderer, post to it and read back what it parsed.
 
 ## The one that cost the most
 

@@ -6,8 +6,8 @@ current_phase: 8
 current_phase_name: Setup Wizard & Safety Pass
 status: milestone_complete
 stopped_at: v1.0 shipped, published, and live-verified end to end
-last_updated: "2026-09-07T23:59:00.000Z"
-last_activity: 2026-09-07
+last_updated: "2026-09-09T12:00:00.000Z"
+last_activity: 2026-09-09
 last_activity_desc: "Quick task 260907-voh: `law watch` / `law say`, prompt on stdin (T113-T115)"
 progress:
   total_phases: 8
@@ -114,6 +114,7 @@ Items acknowledged and carried forward from previous milestone close:
 | 260907-voh | `law watch` and `law say` — live run observability and mid-flight interaction | P2 | `24bf09c`, `9712297`, `7e97c67`, `5ffc811`, `22c857d` | 2026-09-07 |
 | 260908-bms | `ALLOWED_TOOLS` under-grants (Skill, Read) and the probe that would prove it crashes | P1 | `c81df58`, `2c0b700`, `988b037` | 2026-09-08 |
 | 260908-crx | The disambiguation listing prints a field that is not a target, so ambiguity is a dead end | P1 | `e51a388`, `4691669`, `527d325` | 2026-09-08 |
+| 260909-lvl | Wire the dead PR body, the issue key in the PR title, and the leaked bot marker | 2026-09-09 | 8837d11 | [260909-lvl-wire-the-dead-pr-body-issue-key-in-pr-ti](./quick/260909-lvl-wire-the-dead-pr-body-issue-key-in-pr-ti/) |
 
 ## Session Continuity
 
