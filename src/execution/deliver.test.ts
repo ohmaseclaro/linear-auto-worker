@@ -349,3 +349,75 @@ test('the body gh was pointed at carries the ticket link, not the missing branch
   assert.ok(body.includes('[COD-9](https://linear.app/x/issue/COD-9)'), body.slice(0, 200));
   assert.equal(body.includes('(no ticket recorded)'), false);
 });
+
+
+// ------------------------------------------------------- the identifier leads the title
+
+/** The `--title` value `gh pr create` was actually handed. */
+function titleOf(h: Harness): string {
+  const create = find(h.calls, 'gh', 'create')!;
+  return create.args[create.args.indexOf('--title') + 1]!;
+}
+
+async function deliverWith(title: string, ticketIdentifier: string): Promise<string> {
+  const h = harness();
+  await deliver(
+    input(h, {
+      title,
+      prBody: { ticketIdentifier, ticketUrl: 'https://linear.app/x/issue/COD-9', summary: 's' },
+    }),
+  );
+  return titleOf(h);
+}
+
+test('the title gains the identifier — PR #3 shipped without one', async () => {
+  // The real title of dzfweb/miracle-shop#3, which led with the conventional-commit type.
+  assert.equal(
+    await deliverWith('docs(readme): índice de seções', 'COD-9'),
+    'COD-9 docs(readme): índice de seções',
+  );
+});
+
+test('an agent that already led with the key is not given a second one', async () => {
+  const title = await deliverWith('COD-9 docs: x', 'COD-9');
+  assert.equal(title, 'COD-9 docs: x');
+  assert.equal(title.split('COD-9').length - 1, 1, 'exactly one occurrence, counted not matched');
+});
+
+test('the colon form counts as already leading with the key', async () => {
+  assert.equal(await deliverWith('COD-9: docs: x', 'COD-9'), 'COD-9: docs: x');
+});
+
+/**
+ * The boundary is the whole rule. A bare `startsWith` reads `COD-99` as "already prefixed
+ * with COD-9" and silently drops this ticket's key — and `COD-99` is a DIFFERENT ticket,
+ * which is exactly when the reader most needs to be told which one they are looking at.
+ */
+test('a neighbouring ticket key at the front does not suppress this one', async () => {
+  assert.equal(
+    await deliverWith('COD-99 fix the other thing', 'COD-9'),
+    'COD-9 COD-99 fix the other thing',
+  );
+});
+
+test('the match is case-insensitive, so a lowercased key is still not doubled', async () => {
+  assert.equal(await deliverWith('cod-9 docs: x', 'COD-9'), 'cod-9 docs: x');
+});
+
+/**
+ * `ticketIdentifier` is REQUIRED, so it cannot be absent — but a run row with a blank
+ * issue key would otherwise prefix every title with a stray space.
+ */
+test('a blank identifier leaves the sanitized title exactly as it was', async () => {
+  assert.equal(await deliverWith('docs: x', '   '), 'docs: x');
+});
+
+/**
+ * The identifier is trusted — it came off the run row — and is joined AFTER sanitization.
+ * Checked rather than assumed: `sanitizeUntrustedText` strips C0/C1, zero-width and tag
+ * characters, so the agent's half loses them and the joined identifier never passes
+ * through the stripper at all.
+ */
+test('the agent half is sanitized and the trusted identifier is joined after it', async () => {
+  assert.equal(await deliverWith('docs:\u0007 x\u200b', 'COD-9'), 'COD-9 docs: x');
+});

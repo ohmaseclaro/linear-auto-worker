@@ -57,6 +57,22 @@ export interface DeliveryResult {
   alreadyExisted: boolean;
 }
 
+/**
+ * A bare `startsWith` would read `COD-99 …` as already carrying `COD-9` and drop this
+ * ticket's key — and they are different tickets. The identifier is joined AFTER sanitizing so
+ * the trusted half never passes through the stripper.
+ */
+function leadWithIdentifier(title: string, identifier: string): string {
+  const key = identifier.trim();
+  if (key.length === 0) return title;
+  const head = title.slice(0, key.length);
+  if (head.toLowerCase() === key.toLowerCase()) {
+    const next = title.charAt(key.length);
+    if (next === '' || !/[\p{L}\p{N}]/u.test(next)) return title;
+  }
+  return `${key} ${title}`;
+}
+
 export async function deliver(o: DeliverInput): Promise<DeliveryResult> {
   const remote = o.remote ?? 'origin';
   const range = `${o.base}..HEAD`;
@@ -112,7 +128,7 @@ export async function deliver(o: DeliverInput): Promise<DeliveryResult> {
   // The title crosses into a subprocess argv AND into a GitHub page heading. It is the same
   // untrusted ticket text the prompt sanitizes, and it deserves the same treatment; the
   // runner takes an argv array, so there is no shell to interpolate into either.
-  const title = sanitizeUntrustedText(o.title);
+  const title = leadWithIdentifier(sanitizeUntrustedText(o.title), o.prBody.ticketIdentifier);
 
   const createArgs = [
     'pr',
