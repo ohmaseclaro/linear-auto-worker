@@ -143,6 +143,15 @@ export interface Mapping {
   repos: string[];
   /** Bearer-secret-shaped (posting needs no other auth) — never echoed in full on re-run. */
   slackWebhookUrl?: string;
+  /**
+   * Workflow states this mapping picks up from, by id or by TYPE (`ProjectMapping`).
+   *
+   * The wizard never PROMPTS for this — it is hand-written in `config.json`. It is on this
+   * intermediate type solely so a `law setup` re-run does not delete it: the round trip is
+   * `Config → toWizardMappings → Mapping[] → toProjectMapping → Config`, and a field this
+   * type cannot carry is a field that re-run drops on the floor.
+   */
+  pickupStates?: string[];
   /** Sparse override of the six CONF-02 toggles (Phase 1 D-09). Absent key = "use default",
    *  never an empty-valued key. */
   toggles?: ToggleOverrides;

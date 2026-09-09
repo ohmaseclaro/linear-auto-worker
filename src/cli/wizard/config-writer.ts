@@ -51,6 +51,7 @@ import type { EnrichedMapping, RepoSafetyInfo } from './repo-safety.js';
  */
 export const DEFAULT_TOGGLES: MappingToggles = {
   postLinearComments: true,
+  updateLinearIssue: true,
   notifySlack: false,
   baseBranch: 'main',
   draftPr: true,
@@ -91,11 +92,18 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * Merge an existing `defaults` block over the shipped defaults, one recognised field at a
  * time. A field that is missing, misspelled, or of the wrong type reverts to the shipped
  * default instead of reaching the four layers that read it (T-08-19).
+ *
+ * **A field this function does not NAME is a field a `law setup` re-run DELETES.** That is
+ * deliberate for garbage and catastrophic for a real toggle: for the operator's second,
+ * silent instance it would mean a re-run turning a quiet daemon loud in a workspace his
+ * colleagues can see. Add the field here in the same commit that adds it to
+ * `MappingToggles`, or the round-trip test below goes red — which is the point of it.
  */
 function mergeToggles(existing: unknown): MappingToggles {
   const e = isRecord(existing) ? existing : {};
   return {
     postLinearComments: pickBoolean(e.postLinearComments, DEFAULT_TOGGLES.postLinearComments),
+    updateLinearIssue: pickBoolean(e.updateLinearIssue, DEFAULT_TOGGLES.updateLinearIssue),
     notifySlack: pickBoolean(e.notifySlack, DEFAULT_TOGGLES.notifySlack),
     baseBranch: pickString(e.baseBranch, DEFAULT_TOGGLES.baseBranch),
     draftPr: pickBoolean(e.draftPr, DEFAULT_TOGGLES.draftPr),
@@ -230,6 +238,13 @@ function toProjectMapping(
   // equality this plan asserts on. Omit rather than null.
   const slack = mapping.slackWebhookUrl?.trim();
   if (slack) value.slackWebhookUrl = slack;
+  // Same conditional-assignment discipline as `slackWebhookUrl` directly above, and for
+  // the same reason: an `undefined`-valued key survives in the object and breaks the
+  // round-trip equality this module's tests assert on. The wizard never asks for this —
+  // it carries it so a re-run does not delete it (M11).
+  if (mapping.pickupStates && mapping.pickupStates.length > 0) {
+    value.pickupStates = [...mapping.pickupStates];
+  }
   const overrides = toDomainOverrides(mapping.toggles);
   if (overrides) value.overrides = overrides;
 
@@ -272,6 +287,10 @@ export function toWizardMappings(config: Config | undefined): Mapping[] | undefi
       repos,
     };
     if (typeof entry.slackWebhookUrl === 'string') mapping.slackWebhookUrl = entry.slackWebhookUrl;
+    if (Array.isArray(entry.pickupStates)) {
+      const states = entry.pickupStates.filter((s): s is string => typeof s === 'string');
+      if (states.length > 0) mapping.pickupStates = states;
+    }
     const toggles = fromDomainOverrides(entry.overrides as Partial<MappingToggles> | undefined);
     if (toggles) mapping.toggles = toggles;
     out.push(mapping);
@@ -362,6 +381,13 @@ export function assembleConfig(input: AssembleConfigInput): Config {
   // `undefined` key (see the round-trip note in `toProjectMapping`).
   if (typeof existing.maxBudgetUsd === 'number' && Number.isFinite(existing.maxBudgetUsd)) {
     config.maxBudgetUsd = existing.maxBudgetUsd;
+  }
+
+  // `ingress` has no wizard prompt — it is a property of the instance the operator writes
+  // by hand. Preserved, never invented: a re-run against the second instance's root must
+  // not silently turn a poll-only daemon back into one that demands an ngrok token.
+  if (existing.ingress === 'poll' || existing.ingress === 'webhook') {
+    config.ingress = existing.ingress;
   }
 
   // This run's answer wins over what is on disk, INCLUDING when this run's answer is

@@ -202,6 +202,19 @@ export interface PendingQuestion {
  */
 export interface MappingToggles {
   postLinearComments: boolean;
+  /**
+   * Whether the daemon may write to the issue RECORD — `setIssueState` and `addSubscriber`.
+   *
+   * ONE toggle for both, and the reason is worth stating so the next reader does not
+   * "finish the job" by splitting it. Both are writes to the record as opposed to writes
+   * to its comment thread; nobody has asked for "move the state but do not subscribe" or
+   * its inverse; and `addSubscriber` is already inert wherever `config.operatorUserId` is
+   * unset, which no wizard step writes. A second knob would exist only to be set to the
+   * same value as this one.
+   *
+   * Gated at the Linear client (`outbound/quiet-linear.ts`), not at the call sites.
+   */
+  updateLinearIssue: boolean;
   notifySlack: boolean;
   baseBranch: string;
   draftPr: boolean;
@@ -259,6 +272,23 @@ export interface ProjectMapping {
   displayName?: string;
   repos: RepoMapping[];
   slackWebhookUrl?: string;
+  /**
+   * Restrict pickup to named workflow states. Absent means no filter — today's behaviour.
+   *
+   * Each entry is EITHER a Linear workflow-state id (a UUID) OR a workflow-state TYPE
+   * (`LINEAR_STATE_TYPES` in `ports.ts`). Never a name: `linear-client.ts:257-262` records
+   * why — teams rename "In Progress" to "Doing" freely, and nothing in this project has
+   * ever matched a state by name.
+   *
+   * An entry that is neither form is a `ConfigError` at load, not a filter that silently
+   * never matches. That rejection is the load-bearing half: a typo would otherwise disable
+   * the mapping forever, indistinguishable from a bot that is ignoring you.
+   *
+   * Here rather than in `MappingToggles` because that is a FULL set on `Config.defaults` —
+   * putting it there would force every config to state a value for a filter almost nobody
+   * wants.
+   */
+  pickupStates?: string[];
   /** Sparse by construction (D-09): a mapping names only what it changes. */
   overrides?: Partial<MappingToggles>;
 }
@@ -277,6 +307,19 @@ export interface ProjectMapping {
 export interface Config {
   botUserId: string;
   teamId: string;
+  /**
+   * How this instance receives work. Absent means `'webhook'` — today's behaviour.
+   *
+   * `'poll'` opens no tunnel, registers no webhook and needs no `NGROK_AUTHTOKEN`; it
+   * finds work through the tick that already exists (`recovery.reconcile` →
+   * `listAssignedOpenIssues`). Poll mode is a strict SUBSET of webhook mode: the loopback
+   * receiver still binds, so flipping this field and restarting is the whole difference.
+   *
+   * On `Config` and not a CLI flag on purpose: it is a property of the INSTANCE, not of an
+   * invocation. An operator who can start the daemon two different ways has two ways to be
+   * wrong.
+   */
+  ingress?: 'webhook' | 'poll';
   /** Global cap on simultaneous spawned Claude sessions. Default 3. Never per-mapping. */
   concurrency: number;
   maxQuestionRounds: number;

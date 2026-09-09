@@ -66,6 +66,7 @@ test('canTransition is state-to-state and terminal states stay put', () => {
 
 const DEFAULTS: MappingToggles = {
   postLinearComments: true,
+  updateLinearIssue: true,
   notifySlack: true,
   baseBranch: 'main',
   draftPr: false,

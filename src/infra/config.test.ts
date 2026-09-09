@@ -7,7 +7,9 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import * as z from 'zod';
 import type { Config } from '../domain/types.js';
-import { ConfigSchema, loadSecrets, resolveMapping, webhookTeamId } from './config.js';
+import { resolveToggles } from '../domain/types.js';
+import { ConfigError } from '../domain/errors.js';
+import { ConfigSchema, loadConfig, loadSecrets, resolveMapping, webhookTeamId } from './config.js';
 
 function makeTempRoot(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'law-config-'));
@@ -15,6 +17,7 @@ function makeTempRoot(): string {
 
 const validDefaults = {
   postLinearComments: true,
+  updateLinearIssue: true,
   notifySlack: false,
   baseBranch: 'main',
   draftPr: true,
@@ -239,4 +242,130 @@ test('webhookTeamId still throws the named error when no team id exists anywhere
       return true;
     },
   );
+});
+
+// ---------------------------------------------------------------------------
+// 260909-nh6 — the three fields a second, silent, poll-only instance needs
+//
+// Every one of them is optional and defaults to today's behaviour, because the live
+// Código 18 daemon picks these changes up on its next restart and must not notice.
+// ---------------------------------------------------------------------------
+
+/** `loadConfig` reads a real file, and only `loadConfig` wraps a parse failure in
+ *  `ConfigError` — so the rejection assertions below go through the loader, not through
+ *  `safeParse`, which returns rather than throws. */
+function loadFromDisk(raw: unknown): Config {
+  const root = makeTempRoot();
+  fs.writeFileSync(path.join(root, 'config.json'), JSON.stringify(raw), 'utf8');
+  return loadConfig(root);
+}
+
+test('a config written before today loads and resolves to today\'s behaviour', () => {
+  // No `ingress`, no `updateLinearIssue`, no `pickupStates` — the operator's live file.
+  // `updateLinearIssue` is stripped rather than omitted from the shared fixture, so this
+  // stays a test about the SCHEMA DEFAULT and not about what the fixture happens to hold.
+  const { updateLinearIssue: _dropped, ...preTodayDefaults } = validDefaults;
+  const parsed = loadFromDisk({
+    ...config({
+      'proj-1': { linearProjectId: 'proj-1', linearTeamId: null, repos: [repo('/r', 'org/r')] },
+    }),
+    defaults: preTodayDefaults,
+  });
+
+  assert.equal(parsed.ingress, undefined, 'absent ingress means webhook, not poll');
+  const resolved = resolveToggles(parsed.defaults, parsed.mappings['proj-1']);
+  assert.equal(resolved.postLinearComments, true);
+  assert.equal(resolved.updateLinearIssue, true, 'the new toggle defaults to today: issues move');
+  assert.equal(parsed.mappings['proj-1'].pickupStates, undefined, 'no pickup filter');
+});
+
+test('a pickupStates entry may be a workflow-state TYPE', () => {
+  const parsed = loadFromDisk(
+    config({
+      'proj-1': {
+        linearProjectId: 'proj-1',
+        linearTeamId: null,
+        repos: [repo('/r', 'org/r')],
+        pickupStates: ['unstarted'],
+      },
+    }),
+  );
+  assert.deepEqual(parsed.mappings['proj-1'].pickupStates, ['unstarted']);
+});
+
+test('a pickupStates entry may be a workflow-state ID', () => {
+  const parsed = loadFromDisk(
+    config({
+      'proj-1': {
+        linearProjectId: 'proj-1',
+        linearTeamId: null,
+        repos: [repo('/r', 'org/r')],
+        pickupStates: ['43876da4-7abe-4268-8559-e4db36ca4247'],
+      },
+    }),
+  );
+  assert.deepEqual(parsed.mappings['proj-1'].pickupStates, [
+    '43876da4-7abe-4268-8559-e4db36ca4247',
+  ]);
+});
+
+test('a pickupStates entry that is neither is a LOAD ERROR, not a filter that never matches', () => {
+  // The assertion that matters most in this file. A typo here would otherwise disable the
+  // mapping forever and silently — indistinguishable from a bot that is ignoring you.
+  assert.throws(
+    () =>
+      loadFromDisk(
+        config({
+          'proj-1': {
+            linearProjectId: 'proj-1',
+            linearTeamId: null,
+            repos: [repo('/r', 'org/r')],
+            pickupStates: ['Todo'],
+          },
+        }),
+      ),
+    (err: unknown) => {
+      assert.ok(err instanceof ConfigError);
+      assert.match(err.message, /Todo/, 'names the value it rejected');
+      assert.match(err.message, /unstarted/, 'names the TYPE form');
+      assert.match(err.message, /id/i, 'names the ID form');
+      return true;
+    },
+  );
+});
+
+test('ingress accepts only "webhook" and "poll"', () => {
+  assert.equal(loadFromDisk({ ...config({}), ingress: 'poll' }).ingress, 'poll');
+  assert.equal(loadFromDisk({ ...config({}), ingress: 'webhook' }).ingress, 'webhook');
+  assert.throws(
+    () => loadFromDisk({ ...config({}), ingress: 'polling' }),
+    (err: unknown) => {
+      assert.ok(err instanceof ConfigError);
+      assert.match(err.message, /ingress/);
+      return true;
+    },
+  );
+});
+
+test('the ngrok token is required only when the instance opens a tunnel', () => {
+  const root = makeTempRoot();
+  const envPath = path.join(root, '.env');
+  fs.writeFileSync(envPath, 'LINEAR_API_KEY=abc\n');
+  fs.chmodSync(envPath, 0o600);
+
+  // Poll-only: no tunnel, so no token, and that is a supported configuration.
+  const secrets = loadSecrets(root, false);
+  assert.equal(secrets.linearApiKey, 'abc');
+  assert.equal(secrets.ngrokAuthtoken, undefined);
+
+  // Webhook mode, and the default for every existing caller: still a hard failure.
+  assert.throws(
+    () => loadSecrets(root, true),
+    (err: unknown) => {
+      assert.ok(err instanceof ConfigError);
+      assert.match(err.message, /NGROK_AUTHTOKEN/);
+      return true;
+    },
+  );
+  assert.throws(() => loadSecrets(root), /NGROK_AUTHTOKEN/, 'required by default');
 });

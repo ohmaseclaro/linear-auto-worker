@@ -46,6 +46,7 @@ import { LinearClientImpl } from '../outbound/linear-client.js';
 import { Notifier, type RunEvent as NotifyEvent } from '../outbound/notify/notifier.js';
 import { SlackChannel } from '../outbound/notify/slack-channel.js';
 import { defaultRoot, webhookTeamId } from '../infra/config.js';
+import { ConfigError } from '../domain/errors.js';
 import { resolveToggles } from '../domain/types.js';
 import { createSqliteStore } from '../infra/store/sqlite-store.js';
 import { asDomainStore } from '../infra/store/domain-store.js';
@@ -674,7 +675,21 @@ export async function bootDaemon(opts: BootOptions = {}): Promise<DaemonHandle> 
   // delivery, Linear allows three, and the fourth disables the webhook. The boot smoke's
   // tunnel stub TCP-connects to the port it is handed and fails on ECONNREFUSED, so this
   // ordering is asserted from both sides rather than described in a comment.
-  const tunnel = opts.tunnel ?? createTunnelManager(secrets.ngrokAuthtoken, log);
+  // `Secrets.ngrokAuthtoken` is optional since a poll-only instance needs none. This is
+  // the WEBHOOK path, which does, so the absence is narrowed here rather than asserted
+  // away with `!` — the whole reason the field became optional was to make the missing
+  // token a mode, and a non-null assertion would turn it back into a crash.
+  const tunnel =
+    opts.tunnel ??
+    (() => {
+      if (!secrets.ngrokAuthtoken) {
+        throw new ConfigError(
+          'NGROK_AUTHTOKEN is required in webhook mode. Set it in the .env beside ' +
+            'config.json, or set `ingress: "poll"` — a poll-only instance opens no tunnel.',
+        );
+      }
+      return createTunnelManager(secrets.ngrokAuthtoken, log);
+    })();
   // Asserted from THIS side too, not only from the stub's. The stub proves the socket
   // answers; this proves the daemon believes it does, and it holds for the real ngrok
   // tunnel as well — where nothing probes anything and a reorder would otherwise be

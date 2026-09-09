@@ -61,6 +61,7 @@ const CONFIG: Config = {
     questionTimeoutMs: 4 * 60 * 60 * 1000,
     baseBranch: 'main',
     postLinearComments: false,
+    updateLinearIssue: true,
     notifySlack: false,
     draftPr: true,
     questionsEnabled: true,

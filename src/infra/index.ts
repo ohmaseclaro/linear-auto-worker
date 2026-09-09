@@ -15,8 +15,16 @@ import { openStore } from './store/db.js';
  */
 export function loadFoundation(root: string = defaultRoot()) {
   const config = loadConfig(root);
-  const secrets = loadSecrets(root);
-  const logger = createLogger([secrets.linearApiKey, secrets.ngrokAuthtoken]);
+  // The ordering comment above is what makes this possible at all: the config is already
+  // read, so the MODE is in hand before the secrets check runs. A poll-only instance opens
+  // no tunnel, so it needs no ngrok token — and demanding one would make the second
+  // instance's supported configuration a boot failure.
+  const secrets = loadSecrets(root, config.ingress !== 'poll');
+  // Only what exists. `registerSecret`/`createLogger` redact by VALUE, and an `undefined`
+  // in the list is a redaction rule matching nothing at best.
+  const logger = createLogger(
+    [secrets.linearApiKey, secrets.ngrokAuthtoken].filter((s): s is string => Boolean(s)),
+  );
   // `config.dbPath`, not a second derivation of `root/store.db`. `law setup` persists the
   // webhook signing secret through the SAME field, and two derivations of "the database"
   // is a daemon that boots clean and rejects every delivery against a secret it cannot see.

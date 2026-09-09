@@ -380,3 +380,38 @@ test('writeConfig REPAIRS an existing 0644 file to 0600', async () => {
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+// ---------------------------------------------------------------------------
+// 260909-nh6 — M11: a field this writer does not NAME is a field a `law setup` re-run
+// DELETES. For the second instance that means turning a silent daemon loud in a
+// workspace the operator's colleagues can see.
+// ---------------------------------------------------------------------------
+
+test('a law setup re-run preserves ingress, pickupStates and updateLinearIssue', () => {
+  const existing = assembleConfig({ mappings: [mapping()] });
+  existing.ingress = 'poll';
+  existing.defaults.updateLinearIssue = false;
+  existing.defaults.postLinearComments = false;
+  existing.mappings['proj-1'].pickupStates = ['unstarted'];
+
+  // The full round trip the wizard actually takes: Config -> Mapping[] -> Config.
+  const back = toWizardMappings(existing);
+  assert.ok(back);
+  assert.deepEqual(back[0].pickupStates, ['unstarted'], 'the intermediate type carries it');
+
+  const again = assembleConfig({ mappings: back, existing });
+  assert.equal(again.ingress, 'poll', 'a top-level ingress survives assembly');
+  assert.equal(again.defaults.updateLinearIssue, false, 'mergeToggles names the new toggle');
+  assert.equal(again.defaults.postLinearComments, false);
+  assert.deepEqual(
+    again.mappings['proj-1'].pickupStates,
+    ['unstarted'],
+    'toProjectMapping carries pickupStates the way it carries slackWebhookUrl',
+  );
+});
+
+test('a config with no ingress does not gain an undefined-valued key', () => {
+  const config = assembleConfig({ mappings: [mapping()] });
+  assert.equal('ingress' in config, false);
+  assert.equal(JSON.stringify(config).includes('ingress'), false);
+});

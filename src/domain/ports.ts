@@ -397,6 +397,37 @@ export interface LinearComment {
  */
 export type WorkflowStateType = 'started' | 'completed' | 'canceled';
 
+/**
+ * The READ vocabulary: every workflow-state type Linear may REPORT on an issue.
+ *
+ * Deliberately wider than `WorkflowStateType` directly above, and the two MUST NOT be
+ * unified. `WorkflowStateType` is the three states this daemon may WRITE — the only
+ * transitions `setIssueState` is allowed to make. This list is what `LinearIssue.stateType`
+ * can hold, which is why that field is typed `string` and not the union. Lahzo's Todo is
+ * `unstarted`; collapsing the two would make a legitimate state unrepresentable and a
+ * legitimate `pickupStates` entry a config load error.
+ *
+ * Adjacency is the point. Two overlapping-but-different vocabularies is this repository's
+ * signature defect, and putting them in different files is what lets the next person unify
+ * them without ever seeing this warning.
+ *
+ * Read from the installed SDK, not recalled: `@linear/sdk@93.0.1`
+ * `dist/index.d.mts:16337` — `The type of the state. One of "triage", "backlog",
+ * "unstarted", "started", "completed", "canceled", "duplicate".` Note the same file
+ * contradicts itself at `:16314`, where the `WorkflowState` class doc omits `duplicate`.
+ * The seven-member list wins: the operator's own Código 18 team has a state named
+ * "Duplicate" typed `duplicate`, so the six-member list would reject a real state.
+ */
+export const LINEAR_STATE_TYPES = [
+  'triage',
+  'backlog',
+  'unstarted',
+  'started',
+  'completed',
+  'canceled',
+  'duplicate',
+] as const;
+
 export interface LinearClient {
   /** Preflight. */
   viewer(): Promise<{ id: string; name: string }>;

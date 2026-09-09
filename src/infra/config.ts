@@ -4,6 +4,9 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { Config, MappingToggles, RepoMapping } from '../domain/types.js';
 import { resolveToggles } from '../domain/types.js';
+// The READ vocabulary, and it lives beside the WRITE one in `ports.ts` on purpose — see
+// the comment there before considering unifying the two.
+import { LINEAR_STATE_TYPES } from '../domain/ports.js';
 import { ConfigError } from '../domain/errors.js';
 
 /**
@@ -19,6 +22,10 @@ import { ConfigError } from '../domain/errors.js';
  * overrides (D-09). */
 export const TogglesSchema = z.object({
   postLinearComments: z.boolean(),
+  // `.default(true)`, not `z.boolean()`: every config written before this field existed
+  // must still load, and must load as today's behaviour. The live instance picks these
+  // changes up on its next restart and must not notice.
+  updateLinearIssue: z.boolean().default(true),
   notifySlack: z.boolean(),
   baseBranch: z.string().min(1).max(255),
   draftPr: z.boolean(),
@@ -38,6 +45,34 @@ const RepoMappingSchema = z.object({
   enabled: z.boolean(),
 }) satisfies z.ZodType<RepoMapping>;
 
+/**
+ * One `pickupStates` entry: a workflow-state id, or a workflow-state TYPE. Never a name.
+ *
+ * **The rejection is the point, not the match.** A typo'd entry that matches neither form
+ * would leave the mapping picking nothing up, forever, with every signal green — which
+ * from the operator's chair is identical to a bot that is ignoring them. So the message
+ * names the value it rejected and both accepted forms, and this is a load error rather
+ * than a filter that never fires.
+ *
+ * The id form is checked shape-only. Whether that UUID is a state of THIS team is a Linear
+ * round trip per mapping at boot, and a wrong-but-well-formed id already fails loudly the
+ * first time a ticket arrives and matches nothing the operator expected.
+ */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+const PickupStateSchema = z
+  .string()
+  .min(1)
+  .refine(
+    (v) => (LINEAR_STATE_TYPES as readonly string[]).includes(v) || UUID_RE.test(v),
+    {
+      error: (issue) =>
+        `pickupStates: "${String(issue.input)}" is neither a workflow-state id (a UUID) ` +
+        `nor a workflow-state type (${LINEAR_STATE_TYPES.join(', ')}). ` +
+        'A state NAME is never accepted — teams rename "In Progress" to "Doing" freely.',
+    },
+  );
+
 /** Phase 1 D-07: project keying with a team-level fallback — exactly one of
  * linearProjectId/linearTeamId is set, never both, never neither. */
 const ProjectMappingSchema = z
@@ -49,6 +84,7 @@ const ProjectMappingSchema = z
     displayName: z.string().min(1).optional(),
     repos: z.array(RepoMappingSchema).min(1),
     slackWebhookUrl: z.url().optional(),
+    pickupStates: z.array(PickupStateSchema).min(1).optional(),
     overrides: TogglesSchema.partial().optional(),
   })
   .refine((m) => Boolean(m.linearProjectId) !== Boolean(m.linearTeamId), {
@@ -65,6 +101,8 @@ export const ConfigSchema = z.object({
   maxTurns: z.number().int().positive(),
   maxBudgetUsd: z.number().positive().optional(),
   operatorUserId: z.string().min(1).optional(),
+  /** Absent means `'webhook'`. A third value is a load error, not a silent fallback. */
+  ingress: z.enum(['webhook', 'poll']).optional(),
   worktreeRoot: z.string().min(1),
   dbPath: z.string().min(1),
   defaults: TogglesSchema,
@@ -144,12 +182,20 @@ export function webhookTeamId(config: Config): string {
 
 export interface Secrets {
   linearApiKey: string;
-  ngrokAuthtoken: string;
+  /** Absent on a poll-only instance, which opens no tunnel. See `loadSecrets`. */
+  ngrokAuthtoken?: string;
 }
 
-/** D-01/Phase 1 D-08: the two secrets live in a sibling .env, mode 0600,
- * never inside config.json. */
-export function loadSecrets(root: string = defaultRoot()): Secrets {
+/**
+ * D-01/Phase 1 D-08: the two secrets live in a sibling .env, mode 0600,
+ * never inside config.json.
+ *
+ * `requireNgrok` defaults to TRUE so every existing caller keeps today's behaviour. A
+ * poll-only instance opens no tunnel, so demanding a token it will never use turns a
+ * supported configuration into a boot failure — and `loadFoundation` already has the
+ * config in hand before it calls this, so the mode is known by the time the check runs.
+ */
+export function loadSecrets(root: string = defaultRoot(), requireNgrok = true): Secrets {
   const envPath = path.join(root, '.env');
   const stat = fs.statSync(envPath);
   const mode = stat.mode & 0o777;
@@ -172,7 +218,13 @@ export function loadSecrets(root: string = defaultRoot()): Secrets {
   const linearApiKey = values.LINEAR_API_KEY;
   const ngrokAuthtoken = values.NGROK_AUTHTOKEN;
   if (!linearApiKey) throw new ConfigError(`${envPath} is missing LINEAR_API_KEY`);
-  if (!ngrokAuthtoken) throw new ConfigError(`${envPath} is missing NGROK_AUTHTOKEN`);
+  if (requireNgrok && !ngrokAuthtoken) {
+    throw new ConfigError(
+      `${envPath} is missing NGROK_AUTHTOKEN. Set it, or set \`ingress: "poll"\` in ` +
+        'config.json — a poll-only instance opens no tunnel and needs no token.',
+    );
+  }
 
-  return { linearApiKey, ngrokAuthtoken };
+  // Conditional, never an explicit `undefined` key: `Secrets` is spread and compared.
+  return { linearApiKey, ...(ngrokAuthtoken ? { ngrokAuthtoken } : {}) };
 }
