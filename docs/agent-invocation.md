@@ -124,6 +124,51 @@ It costs real money and takes minutes, so it is a script rather than a test: it 
 nothing from `node:test`, and it lives outside `src/`, which is the only directory `tsc`
 compiles into `dist/`. `npm run verify` cannot fire it by accident.
 
+## Per-project agent instructions
+
+**You do not need to wire anything.** A repository's own `AGENTS.md` or `CLAUDE.md` is
+already picked up by the spawned agent, and a committed one is already present in the
+worktree the run works in — `git worktree add -b <branch> <path> <base>` checks out `base`,
+so every committed file is there by construction. Nothing in this daemon injects it, and
+nothing should: a second mechanism next to a working one is the defect shape this
+repository has recorded eight times.
+
+Measured, not assumed. `scripts/probe-agents-md.ts` writes a scratch directory containing
+one instruction file whose only content is "reply with exactly `<token>`", invokes `claude`
+non-interactively in that directory under this project's own permission mode, and reports
+whether the token came back. The token is minted per run, so a correct answer cannot come
+from training data or a cache.
+
+Measured 2026-09-09, CLI **2.1.263**:
+
+| File in the working directory | Result |
+|---|---|
+| `AGENTS.md` | **honoured** |
+| `CLAUDE.md` | **honoured** |
+| *(control: no instruction file)* | **not honoured** — "Directory empty. No project token anywhere" |
+
+The control is the falsification: without it the two results above mean nothing (T71/T76).
+
+**Do not invent a third filename.** `strings` over the installed binary returns 199
+occurrences of `CLAUDE.md` and six of `AGENTS.md` — including the verbatim line *"Claude
+Code hardcodes CLAUDE.md / AGENTS.md discovery."* — and zero of any project-specific name.
+
+Your own `~/.claude/CLAUDE.md` also reaches every spawned agent, because `--bare` is
+forbidden precisely to keep `~/.claude` loaded.
+
+### Two cases this does NOT cover
+
+- **An uncommitted `AGENTS.md` never reaches a worktree.** The run works in a fresh checkout
+  of the base branch; a file that is not committed is not in it. Commit it.
+- **A file in a PARENT of the repository is not on the discovery path**, because the agent's
+  working directory is the worktree. That only changes under a parent-directory multi-repo
+  mode, which does not exist — see the deferred task, and do not write documentation that
+  implies it does.
+
+Re-run the probe after every CLI upgrade. A vendor-side change that silently dropped this
+discovery would be invisible in every other signal this daemon emits: the agent would
+produce generic work, exit 0, open a pull request and post a cheerful comment.
+
 ## Accepted risks
 
 Two, both deliberate, both requiring no action — but both worth knowing before you are

@@ -1,6 +1,6 @@
 # Traps
 
-One hundred and twenty-one footguns found while building this daemon, kept as a running ledger
+One hundred and twenty-four footguns found while building this daemon, kept as a running ledger
 so no two parallel work streams had to rediscover the same one.
 
 **Every entry here was measured, not recalled.** Versions come from the npm registry, API
@@ -15,7 +15,7 @@ spawn processes, several of them will cost you an afternoon each.
 Measured against: `@linear/sdk@93.0.1`, `@ngrok/ngrok@1.7.0`, `better-sqlite3@13.0.3`,
 `execa@10.0.1`, Claude Code CLI `2.1.259`, `gh` `2.98.0`, Node `22.23.1`, macOS.
 
-The complete internal ledger — all 121 rows with per-phase attribution and the evidence for
+The complete internal ledger — all 124 rows with per-phase attribution and the evidence for
 each — is in [`.planning/TRAPS.md`](../.planning/TRAPS.md). This page is the subset that
 generalises.
 
@@ -211,6 +211,13 @@ error object leaks the credential.
 
 **Every ngrok error carries `code: "GenericFailure"`.** Branching on the code is useless;
 match on the message.
+
+**A second tunnel fails with a message that names the wrong cause.** `The endpoint
+'https://<name>.ngrok-free.dev' is already online. ERR_NGROK_334` reads as a free-plan
+tunnel-*count* limit and is not one: it is a static-domain conflict, because the account has
+a reserved domain and the first process is already bound to it. The code passes no `domain`
+at all — the static domain comes from the account. Read the endpoint *in* the message: it
+names a domain, not a quota. A second instance that opens no tunnel never meets it.
 
 ## `gh`
 
@@ -593,3 +600,26 @@ before anything was widened, precisely so the reporting path that had crashed wa
 under test. And where the product already owns a rule, the instrument should CALL it rather
 than re-derive it; a probe carrying its own copy of a rule verifies its copy, not the thing
 that ships.
+
+**And the shape underneath both of those has now appeared eight times in this repository.**
+That count is the lesson, not the individual entries: *a thing that exists, type-checks, is
+tested, and is not connected to anything.* A renderer with no production caller. A path
+constant nothing writes to. A parameter no caller sets. A migration runner with all the
+tests and none of the calls. A timer that was documented and never built.
+
+The seventh and eighth landed together. **A whole module whose doc comment reads exactly
+like the live one's**: an ingress poll declared, described in its own header as the
+reconciliation poll, and never called — while the real poll lived in another file under
+another name. The header was accurate about *intent* and silent about *reach*, so a reader
+took it for the live trigger and reasoned about the wrong query. **And a config toggle the
+setup wizard writes, echoes back in its own review prompt, and nothing consults**: it
+reached six layers as a schema field and had exactly one mention in production code — a doc
+comment referring to a module that does not do the thing. Set it to false and the behaviour
+it names carries on, with every signal reporting success.
+
+Both have the same tell and the same cheap check: `grep` for the name, discard the schema,
+the fixtures and the tests, and see what is left. If nothing is left, it is unimplemented —
+the declaration is the claim, not the evidence. When two modules claim one job, find the
+*caller* before reading either header. And when a toggle must actually take effect, gate it
+at the one place every path goes through rather than at each call site: six guards is six
+chances to forget, and the seventh site arrives with no guard at all.
