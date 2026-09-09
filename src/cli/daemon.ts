@@ -34,6 +34,19 @@
  *      producing a persisted `queued` run proves the whole ingress seam while the
  *      expensive half is still cheap to iterate on.
  *
+ * ## The SECOND mode: `ingress: "poll"`
+ *
+ * A header that describes one of two paths is worse than no header. With `ingress: "poll"`
+ * in `config.json`, steps 5 and 6's tunnel/registrar halves are SKIPPED — no tunnel, no
+ * webhook registration, no `NGROK_AUTHTOKEN` required — and so are the two shutdown steps
+ * that pair with them. Everything else is identical, including step 4's loopback bind,
+ * which is kept on purpose (see the skip site).
+ *
+ * Poll mode needs no new trigger and no new timer: the periodic tick already calls
+ * `reconcile()` → `linear.listAssignedOpenIssues(botUserId)` once a minute, which is the
+ * same "assigned to the bot and still open" query a poll-only instance wants. So poll-only
+ * is a strict SUBSET of webhook mode — one config field and a restart is the difference.
+ *
  * ## What this plan deliberately does not do
  *
  * The scheduler is constructed and immediately **paused**, so no run can leave `queued` and
@@ -83,6 +96,7 @@ import type {
   Logger,
   Store,
   TunnelManager,
+  WebhookRegistrar,
 } from '../domain/ports.js';
 
 export interface BootOptions {
@@ -158,6 +172,20 @@ export interface DaemonHandle {
  * because "some string containing 'shutdown'" is not a contract.
  */
 export const SHUTDOWN_NOTE = 'daemon shut down cleanly while this run was in flight';
+
+/**
+ * The first line `law start` prints.
+ *
+ * Exported for the same reason `SHUTDOWN_NOTE` is: an operator running two daemons must be
+ * able to tell from this line WHICH of them he just started, and "some string containing
+ * the port" is not a contract. An empty `publicUrl` is poll-only — there is no tunnel and
+ * no webhook, and the line says so rather than printing a dangling arrow.
+ */
+export function readyLine(handle: Pick<DaemonHandle, 'port' | 'publicUrl'>): string {
+  return handle.publicUrl
+    ? `listening on 127.0.0.1:${handle.port} -> ${handle.publicUrl}`
+    : `listening on 127.0.0.1:${handle.port} — poll-only: no tunnel, no webhook`;
+}
 
 /**
  * How long the whole child-reap step may take before shutdown proceeds without it.
@@ -494,6 +522,10 @@ export async function bootDaemon(opts: BootOptions = {}): Promise<DaemonHandle> 
   const { config, secrets, logger, db } = loadFoundation(root);
   const log = logger.child({ component: 'daemon' });
 
+  // Derived ONCE, here, and used at four sites below. `ingress` is a property of the
+  // INSTANCE (see `Config`), so there is no invocation that can disagree with it.
+  const pollOnly = config.ingress === 'poll';
+
   // ── 2. the store ───────────────────────────────────────────────────────────
   const store = asDomainStore(createSqliteStore(db));
 
@@ -684,50 +716,72 @@ export async function bootDaemon(opts: BootOptions = {}): Promise<DaemonHandle> 
   });
   log.info({ port }, 'receiver listening on loopback');
 
-  // ── 5. and only now, the tunnel ────────────────────────────────────────────
-  // The bind above is not a style choice (D-02, HOOK-01). Reversed, there is a window in
-  // which Linear can deliver to a live public URL backed by nothing; each 502 is a failed
-  // delivery, Linear allows three, and the fourth disables the webhook. The boot smoke's
-  // tunnel stub TCP-connects to the port it is handed and fails on ECONNREFUSED, so this
-  // ordering is asserted from both sides rather than described in a comment.
-  // `Secrets.ngrokAuthtoken` is optional since a poll-only instance needs none. This is
-  // the WEBHOOK path, which does, so the absence is narrowed here rather than asserted
-  // away with `!` — the whole reason the field became optional was to make the missing
-  // token a mode, and a non-null assertion would turn it back into a crash.
-  const tunnel =
-    opts.tunnel ??
-    (() => {
-      if (!secrets.ngrokAuthtoken) {
-        throw new ConfigError(
-          'NGROK_AUTHTOKEN is required in webhook mode. Set it in the .env beside ' +
-            'config.json, or set `ingress: "poll"` — a poll-only instance opens no tunnel.',
-        );
-      }
-      return createTunnelManager(secrets.ngrokAuthtoken, log);
-    })();
-  // Asserted from THIS side too, not only from the stub's. The stub proves the socket
-  // answers; this proves the daemon believes it does, and it holds for the real ngrok
-  // tunnel as well — where nothing probes anything and a reorder would otherwise be
-  // caught by nobody until Linear's third failed delivery.
-  if (!server.listening) {
-    throw new Error(
-      'HOOK-01: refusing to open a tunnel — the receiver is not accepting connections. ' +
-        'The bind must complete before the tunnel opens (07-CONTEXT D-02).',
+  // ── 5 and 6. the tunnel and the webhook — WEBHOOK MODE ONLY ───────────────
+  //
+  // **The loopback bind above is KEPT in poll mode, deliberately.** It costs nothing
+  // (127.0.0.1, an ephemeral port, an HMAC-verified receiver), it keeps `DaemonHandle.port`
+  // a `number` so the smoke, `law start` and the whole shutdown sequence are unchanged, and
+  // it makes poll-only a strict SUBSET of webhook mode — flipping one config field and
+  // restarting is the entire difference. Do not "finish the job" by deleting it: that would
+  // mean `port: number | null` and a branch at every consumer, for a socket that is not a
+  // surface.
+  //
+  // What IS skipped: the tunnel, the registrar, and the two shutdown steps that pair with
+  // them — and therefore also `webhookTeamId(config)`, which is a boot failure mode for a
+  // config with no team that a poll-only instance has no reason to meet.
+  let tunnel: TunnelManager | null = null;
+  let registrar: WebhookRegistrar | null = null;
+  let publicUrl = '';
+  let webhookId: string | null = null;
+
+  if (!pollOnly) {
+    // The bind above is not a style choice (D-02, HOOK-01). Reversed, there is a window in
+    // which Linear can deliver to a live public URL backed by nothing; each 502 is a failed
+    // delivery, Linear allows three, and the fourth disables the webhook. The boot smoke's
+    // tunnel stub TCP-connects to the port it is handed and fails on ECONNREFUSED, so this
+    // ordering is asserted from both sides rather than described in a comment.
+    //
+    // `Secrets.ngrokAuthtoken` is optional because a poll-only instance needs none. This
+    // branch already PROVES the token is required, so the absence is narrowed here rather
+    // than asserted away with `!` — the whole reason the field became optional was to make
+    // a missing token a mode, and a non-null assertion would turn it back into a crash.
+    if (!opts.tunnel && !secrets.ngrokAuthtoken) {
+      throw new ConfigError(
+        'NGROK_AUTHTOKEN is required in webhook mode. Set it in the .env beside ' +
+          'config.json, or set `ingress: "poll"` — a poll-only instance opens no tunnel.',
+      );
+    }
+    tunnel =
+      opts.tunnel ??
+      createTunnelManager(secrets.ngrokAuthtoken as string, log);
+    // Asserted from THIS side too, not only from the stub's. The stub proves the socket
+    // answers; this proves the daemon believes it does, and it holds for the real ngrok
+    // tunnel as well — where nothing probes anything and a reorder would otherwise be
+    // caught by nobody until Linear's third failed delivery.
+    if (!server.listening) {
+      throw new Error(
+        'HOOK-01: refusing to open a tunnel — the receiver is not accepting connections. ' +
+          'The bind must complete before the tunnel opens (07-CONTEXT D-02).',
+      );
+    }
+    publicUrl = await tunnel.open(port);
+    log.info({ port }, 'tunnel open');
+
+    // Never a blind create: the label is matched against the full listing first, and an
+    // existing registration is updated AND re-enabled in one call. With an ephemeral domain
+    // every restart guarantees failed deliveries, so finding our webhook auto-disabled is
+    // the normal case here (03-CONTEXT D-02).
+    registrar = createWebhookRegistrar(linear, store, log, {
+      teamId: webhookTeamId(config),
+      secret,
+    });
+    webhookId = (await registrar.reconcile(publicUrl)).webhookId;
+  } else {
+    log.info(
+      { port },
+      'poll-only ingress: no tunnel, no webhook registration; work arrives on the tick',
     );
   }
-  const publicUrl = await tunnel.open(port);
-  log.info({ port }, 'tunnel open');
-
-  // ── 6. reconcile the webhook against the URL the tunnel just handed back ───
-  // Never a blind create: the label is matched against the full listing first, and an
-  // existing registration is updated AND re-enabled in one call. With an ephemeral domain
-  // every restart guarantees failed deliveries, so finding our webhook auto-disabled is
-  // the normal case here (03-CONTEXT D-02).
-  const registrar = createWebhookRegistrar(linear, store, log, {
-    teamId: webhookTeamId(config),
-    secret,
-  });
-  const registration = await registrar.reconcile(publicUrl);
 
   // ── 7. the missed-work sweep ───────────────────────────────────────────────
   // This is what makes an ephemeral URL safe. While the daemon was down, Linear delivered
@@ -767,7 +821,14 @@ export async function bootDaemon(opts: BootOptions = {}): Promise<DaemonHandle> 
   let ticking = false;
   const ticker = setInterval(() => void tick(), tickMs);
   log.info(
-    { port, publicUrl, webhookId: registration.webhookId, tickMs, saySocket: socketPath(root) },
+    {
+      port,
+      ingress: pollOnly ? 'poll' : 'webhook',
+      publicUrl,
+      webhookId,
+      tickMs,
+      saySocket: socketPath(root),
+    },
     'daemon ready',
   );
 
@@ -831,13 +892,16 @@ export async function bootDaemon(opts: BootOptions = {}): Promise<DaemonHandle> 
       // 3. Politeness, time-boxed (T-07-23). The URL is about to stop answering; leaving
       //    the webhook enabled spends Linear's three retries on deliveries that cannot
       //    land. Never fatal — `disable` returns false rather than throwing.
-      await within(registrar.disable(), WEBHOOK_DISABLE_BUDGET_MS, 'disable webhook', log);
+      // Nothing to disable on a poll-only instance: it registered nothing.
+      if (registrar) {
+        await within(registrar.disable(), WEBHOOK_DISABLE_BUDGET_MS, 'disable webhook', log);
+      }
 
       // 4. The tunnel, then 5. the server — in that order, so the public URL stops
       //    resolving before the thing behind it stops answering. Reversed, the last
       //    deliveries in flight get a 502 from a live URL, which is the same failed
       //    delivery step 3 just spent a call avoiding.
-      await within(tunnel.close(), 5_000, 'close tunnel', log);
+      if (tunnel) await within(tunnel.close(), 5_000, 'close tunnel', log);
       await new Promise<void>((resolve) => server.close(() => resolve()));
       server.closeAllConnections();
       // The `law say` socket closes with the server, and UNLINKS its path — a leftover

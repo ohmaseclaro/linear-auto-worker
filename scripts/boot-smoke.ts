@@ -392,7 +392,11 @@ async function main(): Promise<void> {
 }
 
 /**
- * Phase 2 — the SILENT instance (260909-nh6).
+ * Phase 2 — the SILENT, POLL-ONLY instance (260909-nh6).
+ *
+ * Two things nothing else in this repository can see. First, poll-only boot: no test boots
+ * the daemon (M13), so the tunnel skip, the registrar skip and the shutdown steps that pair
+ * with them are visible only from here. Second, the silence gate's WIRING.
  *
  * This is the only instrument in the repository that can see the composition root's
  * wiring, and for the silence gate that is not a nicety. The gate is a decorator applied
@@ -405,30 +409,54 @@ async function main(): Promise<void> {
  * run to a terminal state, and reads the fake's four recording arrays. Remove the wrap in
  * `daemon.ts` and the first check here fails.
  */
-async function silentPhase(): Promise<void> {
+async function pollOnlyPhase(): Promise<void> {
   const secret = randomBytes(32).toString('hex');
   let workspace: Workspace | undefined;
   let daemon: DaemonHandle | undefined;
 
   try {
-    console.log('\n── phase 2: the silent instance ──');
+    console.log('\n── phase 2: the silent, poll-only instance ──');
+    // The operator's second instance, byte for byte in shape: poll ingress, both silence
+    // toggles off, the question flow off, a pickup filter, and an `.env` with NO ngrok
+    // token on disk at all.
     workspace = await makeWorkspace(secret, {
+      config: { ingress: 'poll' },
       defaults: { postLinearComments: false, updateLinearIssue: false, questionsEnabled: false },
+      mapping: { pickupStates: ['unstarted'] },
+      ngrokToken: false,
     });
 
-    // Assigned at boot, so the missed-work sweep — which is the poll — finds it. This is
-    // the same producer a poll-only instance's tick uses.
+    // Assigned at boot, so the missed-work sweep — which IS the poll (`recovery.reconcile`,
+    // reached from the tick that already existed) — finds it. A poll-only instance needs no
+    // new trigger and no new timer; this is the one it already has.
     const linear = new RecordingLinear({ issues: [smokeIssue({ assigneeId: BOT_USER_ID })] });
     const runCommand = (): Promise<RunCommandResult> =>
       Promise.resolve({ exitCode: 0, stdout: '', stderr: '' });
 
+    // The tunnel stub is handed over ANYWAY. `probes.length === 0` then reads a recorded
+    // fact — the daemon never called `open` — rather than the absence of a log line.
+    const tunnel = probingTunnel();
     daemon = await bootDaemon({
       configDir: workspace.dir,
       linear,
-      tunnel: probingTunnel(),
+      tunnel,
       runCommand,
       agent: { run: () => Promise.reject(new Error('smoke: no agent')), onProgress: () => {} },
     });
+
+    check(tunnel.probes.length === 0, `the tunnel was never opened (got ${tunnel.probes.length})`);
+    check(daemon.publicUrl === '', `publicUrl is empty (got ${JSON.stringify(daemon.publicUrl)})`);
+    check(
+      (await linear.listWebhooks()).length === 0,
+      'no webhook was created against the Linear workspace',
+    );
+    check(
+      daemon.store.kvGet(KEY_ID) === undefined,
+      `and no webhook id was persisted (got ${String(daemon.store.kvGet(KEY_ID))})`,
+    );
+    // The loopback bind is KEPT in poll mode, deliberately — see the skip site in
+    // `daemon.ts`. It costs nothing and it keeps poll-only a strict subset of webhook mode.
+    check(await accepting(daemon.port), `the receiver is still bound and accepting on ${daemon.port}`);
 
     // The boot sweep already ran and already acknowledged, so these arrays are final by
     // the time the handle comes back. On an UNWRAPPED client the acknowledgement alone
@@ -442,20 +470,53 @@ async function silentPhase(): Promise<void> {
       `no issue state was written with issue mutation off (got ${linear.stateChanges.length})`,
     );
     check(linear.subscribers.length === 0, 'and no subscriber was added');
+    // The assertion that proves a poll-only instance is a WORKING instance and not just a
+    // quiet one — through the store, against the real schema, exactly as phase 1 does.
+    const runs = daemon.store.findRunsByIssue(ISSUE_ID);
+    check(runs.length === 1, `the poll picked the ticket up (got ${runs.length} run rows)`);
+    const genesis = daemon.store.listRunEvents(runs[0]!.id)[0];
     check(
-      daemon.store.findRunsByIssue(ISSUE_ID).length === 1,
-      'the silent instance still PICKED THE TICKET UP — quiet is not idle',
+      genesis?.from === null && genesis.to === 'queued',
+      'the genesis run_events row records the insert at queued, in the real SQLite file',
     );
 
-    await daemon.shutdown('silent phase done');
+    const pollPort = daemon.port;
+    await daemon.shutdown('poll-only phase done');
+    check(!(await accepting(pollPort)), 'shutdown is clean with no tunnel and no registrar to close');
+    await daemon.shutdown('poll-only phase again');
+    check(true, 'and a second shutdown is safe');
     daemon = undefined;
+
+    // The pickup filter, through a REAL boot: same workspace shape, an issue whose state is
+    // not in the list. It is the mapping that refuses, not the sweep.
+    const filtered = await makeWorkspace(randomBytes(32).toString('hex'), {
+      config: { ingress: 'poll' },
+      mapping: { pickupStates: ['started'] },
+      ngrokToken: false,
+    });
+    try {
+      const boot = await bootDaemon({
+        configDir: filtered.dir,
+        linear: new RecordingLinear({ issues: [smokeIssue({ assigneeId: BOT_USER_ID })] }),
+        tunnel: probingTunnel(),
+        runCommand,
+        agent: { run: () => Promise.reject(new Error('smoke: no agent')), onProgress: () => {} },
+      });
+      const picked = boot.store.findRunsByIssue(ISSUE_ID).length;
+      await boot.shutdown('filtered phase done');
+      check(picked === 0, `an issue outside pickupStates is not picked up (got ${picked} runs)`);
+    } finally {
+      await filtered.remove();
+    }
 
     // The boot-time refusal, exercised through a real boot rather than a unit call. The
     // two silence toggles are instance-level; a mapping that disagrees would be inert, so
     // the daemon refuses to start instead of lying to the operator.
     const bad = await makeWorkspace(randomBytes(32).toString('hex'), {
+      config: { ingress: 'poll' },
       defaults: { postLinearComments: false },
       mapping: { overrides: { postLinearComments: true } },
+      ngrokToken: false,
     });
     try {
       let refused: string | null = null;
@@ -482,15 +543,19 @@ async function silentPhase(): Promise<void> {
       await bad.remove();
     }
 
-    console.log('SILENT PHASE PASSED — the daemon uses the gated client, and says so at boot.');
+    console.log(
+      'POLL-ONLY PHASE PASSED — a daemon with no tunnel, no webhook and no ngrok token ' +
+        'found bot-assigned work on the tick that already existed, wrote nothing to Linear, ' +
+        'and stopped cleanly.',
+    );
   } finally {
-    if (daemon) await daemon.shutdown('silent phase cleanup');
+    if (daemon) await daemon.shutdown('poll-only phase cleanup');
     if (workspace) await workspace.remove();
   }
 }
 
 main().then(
-  () => silentPhase(),
+  () => pollOnlyPhase(),
 ).then(
   () => process.exit(0),
   (err: unknown) => {

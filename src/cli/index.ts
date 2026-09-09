@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { parseArgs } from 'node:util';
 import { runDoctor, runSetupWizard } from './wizard/index.js';
-import { bootDaemon, installSignalHandlers } from './daemon.js';
+import { bootDaemon, installSignalHandlers, readyLine } from './daemon.js';
 import { runStatus } from './status.js';
 import { runSay } from './say.js';
 import { runWatch } from './watch.js';
@@ -30,6 +30,13 @@ commands:
                    it land with "law watch". Use -- before text starting with a dash.
 
 options:
+  --config-dir <dir>
+                   Read config.json, .env, the SQLite store, the run logs and say.sock
+                   from <dir> instead of ~/.linear-auto-worker. A SECOND instance needs
+                   its own root: two daemons sharing a store are two daemons driving one
+                   queue. Honoured by start, status, watch and say.
+                   No environment variable — a shell alias is the intended ergonomics:
+                     alias lawz='law --config-dir ~/.law-lahzo'
   -h, --help       Show this message.
 
 the activity "watch" renders is plain NDJSON at
@@ -44,7 +51,7 @@ async function main(): Promise<number> {
   // 08-CONTEXT D-08 requires an actionable message and never a stack trace; that held
   // for unknown commands and was missed for unknown options.
   let positionals: string[];
-  let values: { doctor?: boolean; help?: boolean };
+  let values: { doctor?: boolean; help?: boolean; 'config-dir'?: string };
   try {
     ({ positionals, values } = parseArgs({
       args: process.argv.slice(2),
@@ -55,6 +62,9 @@ async function main(): Promise<number> {
         // after a per-item confirmation.
         doctor: { type: 'boolean', default: false },
         help: { type: 'boolean', short: 'h', default: false },
+        // No `default`: undefined has to reach each command so its own `?? defaultRoot()`
+        // stays the single definition of where the config root is.
+        'config-dir': { type: 'string' },
       },
     }));
   } catch (error) {
@@ -64,6 +74,10 @@ async function main(): Promise<number> {
   }
 
   const command = positionals[0];
+  // Threaded to all four commands that already accept a root. A flag that parses but does
+  // not reach the callee is precisely this repository's repeated defect, so `bin.test.ts`
+  // RUNS the built binary against a throwaway root rather than asserting the parse.
+  const root = values['config-dir'];
 
   if (values.help || command === 'help' || command === undefined) {
     console.log(USAGE);
@@ -74,7 +88,7 @@ async function main(): Promise<number> {
     case 'setup':
       return values.doctor ? runDoctor() : runSetupWizard();
     case 'start': {
-      const daemon = await bootDaemon();
+      const daemon = await bootDaemon(root === undefined ? {} : { configDir: root });
       // Installed HERE and not inside `bootDaemon`: signal handlers are process-wide
       // state, and a boot that installs them means every integration test that boots a
       // daemon leaves another handler behind on a process they all share.
@@ -83,15 +97,18 @@ async function main(): Promise<number> {
       // can legitimately run 25 seconds), and the next boot's recovery sweep cleans up
       // whatever the interrupted shutdown did not reach.
       installSignalHandlers(daemon);
-      console.log(`listening on 127.0.0.1:${daemon.port} -> ${daemon.publicUrl}`);
+      console.log(readyLine(daemon));
       // The listening socket keeps the loop alive; this never resolves. `main` returning
       // would set an exit code and let the process fall out from under a live daemon.
       return new Promise<number>(() => undefined);
     }
     case 'status':
-      return runStatus();
+      return runStatus(root === undefined ? {} : { root });
     case 'watch':
-      return runWatch({ ...(positionals[1] !== undefined ? { target: positionals[1] } : {}) });
+      return runWatch({
+        ...(positionals[1] !== undefined ? { target: positionals[1] } : {}),
+        ...(root !== undefined ? { root } : {}),
+      });
     case 'say': {
       // Joined rather than requiring quotes: `law say LAW-1 stop and run the tests` is what
       // an operator types. `parseArgs` THROWS on an unknown option (T88), so text starting
@@ -102,7 +119,11 @@ async function main(): Promise<number> {
         console.error(USAGE);
         return 1;
       }
-      return runSay({ target: positionals[1], text });
+      return runSay({
+        target: positionals[1],
+        text,
+        ...(root !== undefined ? { root } : {}),
+      });
     }
     default:
       console.error(`unknown command: ${command}\n`);
