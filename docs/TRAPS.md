@@ -1,6 +1,6 @@
 # Traps
 
-One hundred and twenty-four footguns found while building this daemon, kept as a running ledger
+One hundred and twenty-seven footguns found while building this daemon, kept as a running ledger
 so no two parallel work streams had to rediscover the same one.
 
 **Every entry here was measured, not recalled.** Versions come from the npm registry, API
@@ -15,7 +15,7 @@ spawn processes, several of them will cost you an afternoon each.
 Measured against: `@linear/sdk@93.0.1`, `@ngrok/ngrok@1.7.0`, `better-sqlite3@13.0.3`,
 `execa@10.0.1`, Claude Code CLI `2.1.259`, `gh` `2.98.0`, Node `22.23.1`, macOS.
 
-The complete internal ledger — all 124 rows with per-phase attribution and the evidence for
+The complete internal ledger — all 127 rows with per-phase attribution and the evidence for
 each — is in [`.planning/TRAPS.md`](../.planning/TRAPS.md). This page is the subset that
 generalises.
 
@@ -125,6 +125,18 @@ a main-conversation MCP call after roughly two minutes and the agent proceeds wi
 answer. The only reliable question mechanism is exit-and-`--resume`: the agent ends its turn
 to ask, the process exits, and the answer arrives as the resumed turn's input.
 
+**A field in your agent's output schema that nothing reads is not dead code — it is a
+suggestion.** A `changedRepos: string[]` sat in the JSON schema under a comment saying when
+it would be present; the parser read three other fields and the result type had no such
+member. It survived a whole milestone harmlessly, and then the multi-repo feature arrived and
+it was exactly the lever to reach for. Taking it would have made delivery trust the agent's
+own account of what it changed — in a codebase whose first trap is that `claude -p` exits 0
+having been denied every edit. Judge from the filesystem: `git diff --name-only <base>..HEAD`
+was already being run before the push, so the honest answer cost one early return. Delete the
+field in the same commit as the feature it would have been misused for; with
+`additionalProperties: false` the deletion is total, because an unlisted field is one the
+model physically cannot return.
+
 ## Linear's API and SDK
 
 **`@linear/sdk` ships a new major roughly weekly** — 86.0.0 to 93.0.1 in fifteen weeks,
@@ -223,6 +235,16 @@ names a domain, not a quota. A second instance that opens no tunnel never meets 
 
 **`gh pr create` has no `--json` flag.** It prints the URL on stdout — read it from there.
 Note the narrow scope: `gh pr list --json` and `gh pr view --json` both exist and work.
+
+**The ref you branch from and the ref you diff against must be the SAME STRING, or a stale
+local base fabricates commits.** `git fetch` advances `refs/remotes/origin/main` and never
+moves `refs/heads/main`, so a clone checked out on another branch drifts arbitrarily far
+behind its own origin — one here sat 18 commits behind. Branch from the remote-tracking ref
+and then compute `main..HEAD` and you get those 18 upstream commits for a run that committed
+nothing. Anything gating on "did this produce commits" then says yes. The fix that does not
+hold is resolving the ref again in the second reader: make the function that CHOSE the ref
+RETURN it, carry that one string, and the two cannot disagree. Same rule for a value read
+from config in three places — one lookup, or you will eventually ship three answers.
 
 ## SQLite and `better-sqlite3`
 
@@ -414,6 +436,16 @@ to unify them but to **assert their equivalence** — one test comparing a looku
 against the arrays beside it turns an invisible drift into a red build.
 
 ## Shipping a CLI
+
+**A directory whose `.git` is a FILE is not a repository you can offer someone.** It is a
+linked worktree or a submodule — a checkout of a repository that lives elsewhere.
+`fs.readdir(dir, {withFileTypes: true})` already tells you which, and a scanner that only
+asks "is there an entry named `.git`" over-counts badly: on one working root, 33 directories
+bore a `.git` entry, 12 as a directory and 21 as a file, and `git rev-parse --git-common-dir`
+resolved all 33 to those same 12. Two picks that resolve to one repository then collide on
+whatever key you index them by. Build the fixture with real `git worktree add` — a
+hand-written `.git` file passes against a rule that only matches the shape you typed.
+
 
 **`tsc` does not make your `bin` entry executable, and a clean build destroys the bit npm
 set.** A `bin` mapping plus a `#!/usr/bin/env node` shebang is not enough: TypeScript emits

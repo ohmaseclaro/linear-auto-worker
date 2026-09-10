@@ -161,13 +161,53 @@ forbidden precisely to keep `~/.claude` loaded.
 - **An uncommitted `AGENTS.md` never reaches a worktree.** The run works in a fresh checkout
   of the base branch; a file that is not committed is not in it. Commit it.
 - **A file in a PARENT of the repository is not on the discovery path**, because the agent's
-  working directory is the worktree. That only changes under a parent-directory multi-repo
-  mode, which does not exist — see the deferred task, and do not write documentation that
-  implies it does.
+  working directory is the worktree. The parent-directory multi-repo mode below does NOT
+  change this, and the reason is structural rather than a matter of effort: under it the
+  agent's cwd is `~/.linear-auto-worker/tickets/<parentRunId>/`, a daemon-owned directory
+  in a different tree from the operator's own repository root. Native discovery walks up
+  from cwd, so it cannot reach a parent-level file there no matter what is dropped in.
+  Measured 2026-09-09: `~/ohmaseclaro/lahzo` holds neither `AGENTS.md` nor `CLAUDE.md`
+  today, so there is also nothing to test an injection against. Nothing is built for this.
+  The per-repo COMMITTED case keeps working for free, because each worktree is a
+  subdirectory of that cwd and discovery does reach it.
 
 Re-run the probe after every CLI upgrade. A vendor-side change that silently dropped this
 discovery would be invisible in every other signal this daemon emits: the agent would
 produce generic work, exit 0, open a pull request and post a cheerful comment.
+
+## A ticket over several repositories
+
+A Linear project can map to more than one repository. When it does, the ticket is worked by
+**one** `claude` session, not one per repository.
+
+```
+${daemonDir}/tickets/<parentRunId>/
+    org-api/      <- a git worktree, on its own branch
+    org-web/      <- a git worktree, on its own branch
+    org-infra/    <- a git worktree, on its own branch
+```
+
+That directory is the session's working directory and its only contents are that ticket's
+worktrees. The run engine then opens **one pull request per repository the session left
+commits in**, judged from `git diff <base>..HEAD` inside each worktree — never from anything
+the agent says it changed. A repository it did not touch is recorded `cancelled` with the
+reason, not delivered as an empty pull request.
+
+**Concurrency.** The whole ticket costs **one** slot, because it is one process. Before this
+it cost one per repository, which on a three-slot daemon meant a four-repo ticket could
+never run at all.
+
+**One short session runs ahead of it.** A read-only triage session reads the ticket and
+names which of the mapped repositories it needs. It is granted **no tools** and its working
+directory is an empty daemon-owned scratch directory; it has its own 90-second deadline,
+deliberately not the work session's `maxRunMs`. Its answer is intersected with the
+operator's mapping, which is the privilege boundary: it can only ever make the set smaller.
+A name it invents is dropped and logged; a discovery that fails, times out or answers with
+nothing falls back to the whole mapping and says so. A one-repo mapping runs no discovery
+session at all.
+
+**What this does not do.** See the two `AGENTS.md` cases above — neither is handled, and the
+parent-level one is out of reach by construction rather than deferred.
 
 ## Accepted risks
 

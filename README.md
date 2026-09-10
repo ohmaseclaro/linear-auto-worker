@@ -198,7 +198,7 @@ and what is explicitly out of scope.
 
 ## The traps ledger
 
-[`docs/TRAPS.md`](docs/TRAPS.md) holds the **124 verified footguns** found building this —
+[`docs/TRAPS.md`](docs/TRAPS.md) holds the **127 verified footguns** found building this —
 each one measured against the real tool, not recalled. A sample:
 
 - `claude -p --permission-mode dontAsk` alone **denies every edit and exits 0** with
@@ -213,6 +213,8 @@ each one measured against the real tool, not recalled. A sample:
 - `node --test dist` runs **zero tests** on Node 22.
 - A backtick inside a SQL comment closed a TypeScript template literal, and the resulting
   syntax error **suppressed 53 downstream type errors**.
+- A directory whose `.git` is a **file** is a worktree, not a repository — 33 candidates on
+  one machine were 12 repositories.
 
 If you take one thing from this repository, take that file. The raw internal ledger, with
 per-phase attribution and the evidence for each row, is in
