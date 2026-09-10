@@ -271,8 +271,21 @@ test('FakeDeliverer is idempotent: a repeated call for the same worktree returns
   };
   const first = await deliverer.deliver(wt, FAKE_REPO, pr);
   const second = await deliverer.deliver(wt, FAKE_REPO, pr);
+  assert.ok(first && second, 'this repo has commits, so neither call is the null case');
   assert.equal(first.url, second.url);
   assert.equal(first.number, second.number);
+});
+
+test('FakeDeliverer returns null for a repository the run left no commits in', async () => {
+  // The real deliverer decides this from `git diff <base>..HEAD` and returns null before
+  // pushing. It is the normal case for one repository of a multi-repo ticket.
+  const deliverer = new FakeDeliverer([FAKE_REPO.repoSlug]);
+  const wt = { runId: 'run-1', repoDir: '/repo', path: '/wt/run-1', branch: 'eng-1', baseBranch: 'main' };
+  const result = await deliverer.deliver(wt, FAKE_REPO, {
+    title: 't',
+    prBody: { ticketIdentifier: 'ENG-1', ticketUrl: 'https://linear.app/x/issue/ENG-1', summary: 'b' },
+  });
+  assert.equal(result, null);
 });
 
 test('FakeLinearClient.createComment returns a distinct id per call, retained for correlation', async () => {

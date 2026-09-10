@@ -233,6 +233,53 @@ describe('prepareWorktree', () => {
     assert.equal(result.base, addCall?.args[addCall.args.length - 1], 'the SAME string, not a second answer');
   });
 
+  /**
+   * The shared parent — one ticket's worktrees side by side, so a single `claude` session
+   * can be started with its cwd there and see exactly those repositories and nothing else.
+   */
+  test('with parentDir the worktree lands under it, named for the repository', async () => {
+    const { run, calls } = makeRunner((call) => (call.args.includes('show-ref') ? { exitCode: 1 } : { exitCode: 0 }));
+
+    const result = await prepareWorktree({
+      ...BASE_INPUT,
+      runCommand: run,
+      branchName: 'ENG-1',
+      parentDir: '/Users/operator/.linear-auto-worker/tickets/parent-uuid',
+    });
+
+    assert.equal(result.path, '/Users/operator/.linear-auto-worker/tickets/parent-uuid/acme-widget');
+    const addCall = calls.find((c) => c.args.includes('add'));
+    assert.ok(addCall?.args.includes(result.path), 'git was asked for that exact path');
+  });
+
+  /**
+   * The containment refusal is the guard standing between a bug here and `git worktree
+   * remove --force` on the operator's own work. It must hold on the NEW branch too — that
+   * is the whole reason this asserts rather than trusting the shared helper.
+   */
+  test('with parentDir OUTSIDE the daemon root the refusal still fires', async () => {
+    const { run, calls } = makeRunner((call) => (call.args.includes('show-ref') ? { exitCode: 1 } : { exitCode: 0 }));
+
+    await assert.rejects(
+      prepareWorktree({
+        ...BASE_INPUT,
+        runCommand: run,
+        branchName: 'ENG-1',
+        parentDir: '/Users/operator/code',
+      }),
+      /escapes the daemon root/,
+    );
+    assert.equal(calls.filter((c) => c.args.includes('add')).length, 0, 'it fails BEFORE git runs');
+  });
+
+  test('without parentDir the path is byte-identical to the single-repo layout', async () => {
+    const { run } = makeRunner((call) => (call.args.includes('show-ref') ? { exitCode: 1 } : { exitCode: 0 }));
+
+    const result = await prepareWorktree({ ...BASE_INPUT, runCommand: run, branchName: 'ENG-1' });
+
+    assert.equal(result.path, '/Users/operator/.linear-auto-worker/worktrees/acme-widget/ENG-1');
+  });
+
   test('the returned base is the bare fallback when no remote-tracking ref exists', async () => {
     const { run } = makeRunner((call) => (call.args.includes('show-ref') ? { exitCode: 1 } : { exitCode: 0 }));
 

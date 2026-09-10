@@ -38,6 +38,15 @@ export interface PrepareWorktreeInput {
   base: string;
   /** Fetched before branching off `base`. Defaults to 'origin'. */
   remote?: string;
+  /**
+   * A shared, daemon-owned parent directory a whole ticket's worktrees land side by side
+   * in, so ONE `claude` session can be started with its cwd there and see exactly those
+   * repositories and nothing else.
+   *
+   * Absent — the single-repo path, which is every run the live instance makes — keeps
+   * today's `${daemonDir}/worktrees/${repoSlug}/${branch}` layout byte-identical.
+   */
+  parentDir?: string;
 }
 
 /**
@@ -142,8 +151,21 @@ export async function prepareWorktree(o: PrepareWorktreeInput): Promise<Prepared
     // destroys the previous attempt's commits — the entire reason D-11 names it. Do not
     // reintroduce it by reaching for the "obvious" idempotent create.
     const branch = await resolveBranchName(o.runCommand, o.repoPath, o.branchName);
-    const worktreePath = path.join(o.daemonDir, 'worktrees', o.repoSlug, branch);
+    // Under a shared parent the leaf is the REPOSITORY, not the branch: the whole point is
+    // a directory whose entries are the ticket's repositories, which is what the agent
+    // reads and what the brief names. `repoSlug` arrives already flattened (`org-api`) so
+    // the leaf is one segment AND is unique across organisations — `orgA/api` and
+    // `orgB/api` in one mapping get `orgA-api` and `orgB-api` rather than colliding on
+    // `api` and failing one child.
+    const worktreePath = o.parentDir
+      ? path.join(o.parentDir, o.repoSlug)
+      : path.join(o.daemonDir, 'worktrees', o.repoSlug, branch);
 
+    // Checked on BOTH branches, and NOT relaxed for the new one. `parentDir` is composed
+    // by the caller from `daemonDir` and a run id, so it should already be inside the
+    // root — this is what makes that a fact rather than an assumption, and it is the guard
+    // standing between a bug here and `git worktree remove --force` running against the
+    // operator's own clone (`reconcileWorktrees`'s `isUnderRoot` trusts it).
     if (!isUnderRoot(worktreePath, o.daemonDir)) {
       // Defense in depth: `branchName` is Linear-supplied text (T-04-11). git itself
       // rejects a ref containing `..` or control characters, but this check fails closed

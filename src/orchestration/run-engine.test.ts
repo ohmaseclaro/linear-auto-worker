@@ -25,6 +25,7 @@ import type { AgentResult, Config, LinearClient, Logger, WorktreeManager } from 
 import type { Run, RunState } from '../domain/types.js';
 import { createScheduler } from './scheduler.js';
 import { createRunEngine } from './run-engine.js';
+import { deriveParentStatus } from './fanout.js';
 import { createQuestions } from './questions.js';
 import { quietLinear } from '../outbound/quiet-linear.js';
 import { daemonDirOf } from '../domain/types.js';
@@ -161,7 +162,7 @@ function recordingLinear(issues: Array<ReturnType<typeof issue>>, opts: { failCr
  * A worktree port that fails the test on early invocation rather than merely
  * documenting the rule. Nothing in the acknowledgement sequence may reach it.
  */
-function spyWorktrees(order: string[], opts: { requireAck?: boolean } = {}) {
+function spyWorktrees(order: string[], opts: { requireAck?: boolean; failFor?: readonly string[] } = {}) {
   const ACK_SEQUENCE = ['comment.create', 'issue.state', 'issue.subscribe'];
   // A REDRIVEN run deliberately does not re-acknowledge (D-7): it was acknowledged, moved
   // to In Progress and subscribed by the process that first picked it up, and re-running
@@ -172,23 +173,37 @@ function spyWorktrees(order: string[], opts: { requireAck?: boolean } = {}) {
   const removed: string[] = [];
   const created: string[] = [];
   /** Every `create` call in full — the argument the base-ref cases (T125) assert on. */
-  const calls: Array<{ runId: string; repo: { repoDir: string; baseBranch: string }; branch: string }> = [];
+  const calls: Array<{
+    runId: string;
+    repo: { repoDir: string; repoSlug: string; baseBranch: string };
+    branch: string;
+    parentDir: string | undefined;
+  }> = [];
+  const failFor = new Set(opts.failFor ?? []);
 
   const wt = {
-    async create(runId: string, repo: { repoDir: string; baseBranch: string }, branch: string) {
+    async create(
+      runId: string,
+      repo: { repoDir: string; repoSlug: string; baseBranch: string },
+      branch: string,
+      parentDir?: string,
+    ) {
       const missing = requireAck ? ACK_SEQUENCE.filter((s) => !order.includes(s)) : [];
       if (missing.length > 0) {
         throw new Error(`worktree reached before the acknowledgement sequence: missing ${missing.join(', ')}`);
       }
       order.push('worktree.create');
       created.push(runId);
-      calls.push({ runId, repo, branch });
+      calls.push({ runId, repo, branch, parentDir });
+      if (failFor.has(repo.repoSlug)) {
+        throw new Error(`scripted worktree failure for ${repo.repoSlug}`);
+      }
       // The resolved remote-tracking ref, which is what the real adapter returns since
       // T125 — not the bare name it was handed.
       return {
         runId,
         repoDir: repo.repoDir,
-        path: `/wt/${runId}`,
+        path: parentDir ? `${parentDir}/${repo.repoSlug.replace(/\//g, '-')}` : `/wt/${runId}`,
         branch,
         baseBranch: `refs/remotes/origin/${repo.baseBranch}`,
       };
@@ -224,15 +239,22 @@ function harness(opts: {
   quiet?: { postLinearComments: boolean; updateLinearIssue: boolean };
   /** Override the mapping's repo list — the multi-repo and base-ref cases need it. */
   repos?: Array<{ repoDir: string; repoSlug: string; baseBranch?: string; enabled: boolean }>;
+  /** Repositories the run left no commits in — the deliverer returns null for these. */
+  barren?: readonly string[];
+  /** Repositories whose worktree cannot be prepared. */
+  worktreeFailsFor?: readonly string[];
 }) {
   const config = configWith(opts.concurrency ?? 3, opts.pickupStates, opts.repos);
   const store = new InMemoryStore();
   const scheduler = createScheduler({ config, log: silent });
   const agent = new FakeAgentRunner(opts.script);
-  const deliverer = new FakeDeliverer();
+  const deliverer = new FakeDeliverer(opts.barren ?? []);
   const linear = recordingLinear(opts.issues, { failCreate: opts.failCreate });
   const client = opts.quiet ? quietLinear(linear.client, opts.quiet, silent) : linear.client;
-  const spy = spyWorktrees(linear.order, { requireAck: !opts.preAcked && !opts.quiet });
+  const spy = spyWorktrees(linear.order, {
+    requireAck: !opts.preAcked && !opts.quiet,
+    ...(opts.worktreeFailsFor ? { failFor: opts.worktreeFailsFor } : {}),
+  });
 
   let questions: ReturnType<typeof createQuestions>;
   const engine = createRunEngine({
@@ -935,4 +957,167 @@ test('T125: the RESOLVED ref is recorded on the run row and is what delivery mea
   );
   // And `gh pr create --base` still names a GitHub BRANCH, never a local ref.
   assert.equal(deliverer.calls[0]!.repo.baseBranch, 'master');
+});
+
+// ---------------------------------------------------------------------------
+// One ticket, ONE agent session, one pull request per repository
+// ---------------------------------------------------------------------------
+
+const THREE = [
+  { repoDir: '/repo/api', repoSlug: 'org/api', baseBranch: 'main', enabled: true },
+  { repoDir: '/repo/web', repoSlug: 'org/web', baseBranch: 'main', enabled: true },
+  { repoDir: '/repo/infra', repoSlug: 'org/infra', baseBranch: 'main', enabled: true },
+];
+
+function children(store: InMemoryStore, issueId: string) {
+  return store
+    .findRunsByIssue(issueId)
+    .filter((r): r is Extract<Run, { kind: 'repo' }> => r.kind === 'repo');
+}
+
+test('a three-repo ticket produces exactly ONE agent session, at the shared parent', async () => {
+  const { engine, agent, store, spy } = harness({ script: [COMPLETE], issues: [issue(1)], repos: THREE });
+
+  await engine.handle({ kind: 'run.requested', trigger: 'assignment', issueId: 'issue-1' });
+  await engine.settle();
+
+  assert.equal(agent.calls.length, 1, 'one session for the ticket, not one per repository');
+
+  const [parent] = store.findRunsByIssue('issue-1').filter((r) => r.kind === 'ticket');
+  assert.ok(parent, 'the ticket parent row still exists');
+  assert.equal(agent.calls[0]!.cwd, `${daemonDirOf(config1())}/tickets/${parent.id}`);
+
+  // Every worktree landed under that one directory, and nowhere else.
+  assert.equal(spy.calls.length, 3);
+  for (const call of spy.calls) {
+    assert.equal(call.parentDir, agent.calls[0]!.cwd, `${call.repo.repoSlug} must share the parent`);
+  }
+
+  // The session id is the LEAD child's — a mark, not a position (M5). Exactly one child
+  // carries one, so no two rows share a session id (T4).
+  const kids = children(store, 'issue-1');
+  const withSession = kids.filter((c) => c.sessionId !== null);
+  assert.equal(withSession.length, 1, 'only the session owner has a session id');
+  assert.equal(agent.calls[0]!.sessionId, withSession[0]!.sessionId);
+});
+
+/** The config the harness builds, for the tests that need the daemon dir. */
+function config1(): Config {
+  return { worktreeRoot: '/home/op/.linear-auto-worker/worktrees' } as unknown as Config;
+}
+
+test('a three-repo ticket costs ONE concurrency slot, so a second ticket is not starved', async () => {
+  const { engine, store } = harness({
+    script: [COMPLETE],
+    issues: [issue(1), issue(2)],
+    repos: THREE,
+    concurrency: 1,
+  });
+
+  await engine.handle({ kind: 'run.requested', trigger: 'assignment', issueId: 'issue-1' });
+  await engine.handle({ kind: 'run.requested', trigger: 'assignment', issueId: 'issue-2' });
+  await engine.settle();
+
+  // Three children under one slot means the second ticket's own run gets the slot as soon
+  // as the first ticket's session ends. Under the old per-child acquire it queued behind
+  // three of them on a one-slot daemon.
+  assert.equal(children(store, 'issue-1').filter((c) => c.state === 'delivered').length, 3);
+  assert.equal(children(store, 'issue-2').filter((c) => c.state === 'delivered').length, 3);
+});
+
+test('a ONE-repo mapping still takes the old path: no parent row, cwd is its own worktree', async () => {
+  const { engine, agent, store } = harness({ script: [COMPLETE], issues: [issue(1)] });
+
+  await engine.handle({ kind: 'run.requested', trigger: 'assignment', issueId: 'issue-1' });
+  await engine.settle();
+
+  const rows = store.findRunsByIssue('issue-1');
+  assert.equal(rows.length, 1, 'no degenerate parent of one');
+  assert.equal(rows[0]!.kind, 'repo');
+  assert.equal(agent.calls.length, 1);
+  assert.equal(agent.calls[0]!.cwd, `/wt/${rows[0]!.id}`, 'the run’s own worktree, exactly as before');
+  assert.ok(!agent.calls[0]!.cwd.includes('/tickets/'), 'the live instance never reaches the ticket path');
+});
+
+test('one pull request per repository the session left commits in — the rest are explained', async () => {
+  const { engine, store, deliverer, linear } = harness({
+    script: [COMPLETE],
+    issues: [issue(1)],
+    repos: THREE,
+    barren: ['org/infra'],
+  });
+
+  await engine.handle({ kind: 'run.requested', trigger: 'assignment', issueId: 'issue-1' });
+  await engine.settle();
+
+  const kids = children(store, 'issue-1');
+  const delivered = kids.filter((c) => c.state === 'delivered');
+  assert.equal(delivered.length, 2);
+  assert.equal(new Set(delivered.map((c) => c.prUrl)).size, 2, 'two DISTINCT pull request urls');
+
+  const untouched = kids.find((c) => c.repoSlug === 'org/infra')!;
+  assert.equal(untouched.state, 'cancelled', 'terminal, and not a failure');
+  assert.match(untouched.failureReason ?? '', /no commits/);
+  assert.equal(untouched.prUrl, null, 'no empty pull request was opened for it');
+
+  assert.equal(deriveParentStatus(kids).settled, true);
+  assert.equal((deriveParentStatus(kids) as { state: string }).state, 'partial');
+
+  // The rollup names all three, and the cancelled one's reason is visible (M13).
+  const rollup = linear.created.at(-1)!.body;
+  for (const slug of ['org/api', 'org/web', 'org/infra']) assert.match(rollup, new RegExp(slug));
+  assert.match(rollup, /org\/infra` — \*\*cancelled\*\* — .*no commits/);
+});
+
+test('every repository delivering settles the ticket `delivered`', async () => {
+  const { engine, store } = harness({ script: [COMPLETE], issues: [issue(1)], repos: THREE });
+
+  await engine.handle({ kind: 'run.requested', trigger: 'assignment', issueId: 'issue-1' });
+  await engine.settle();
+
+  const kids = children(store, 'issue-1');
+  assert.deepEqual(
+    kids.map((c) => c.state).sort(),
+    ['delivered', 'delivered', 'delivered'],
+  );
+  assert.equal((deriveParentStatus(kids) as { state: string }).state, 'delivered');
+});
+
+test('D-10: one repository failing to prepare does not stop the others — the ticket is `partial`', async () => {
+  const { engine, store } = harness({
+    script: [COMPLETE],
+    issues: [issue(1)],
+    repos: THREE,
+    worktreeFailsFor: ['org/web'],
+  });
+
+  await engine.handle({ kind: 'run.requested', trigger: 'assignment', issueId: 'issue-1' });
+  await engine.settle();
+
+  const kids = children(store, 'issue-1');
+  assert.equal(kids.find((c) => c.repoSlug === 'org/web')!.state, 'failed');
+  assert.equal(kids.filter((c) => c.state === 'delivered').length, 2);
+  assert.equal((deriveParentStatus(kids) as { state: string }).state, 'partial');
+});
+
+test('cancelling ANY child of a running ticket reaps the one shared session', async () => {
+  const { engine, store } = harness({ script: [COMPLETE], issues: [issue(1)], repos: THREE });
+
+  // Start the ticket but do not settle it: the cancel has to arrive while the one session
+  // is live, which is the only state in which the shared AbortController matters.
+  const running = engine.handle({ kind: 'run.requested', trigger: 'assignment', issueId: 'issue-1' });
+  await running;
+  const kids = children(store, 'issue-1');
+  // Any child, deliberately NOT the session owner: `cancel` does `aborts.get(runId)?.abort()`,
+  // so a sibling with no controller registered would silently reap nothing.
+  const sibling = kids.find((c) => c.sessionId === null)!;
+  await engine.cancel(sibling.id, 'bot unassigned');
+  await engine.settle();
+
+  const after = children(store, 'issue-1');
+  assert.deepEqual(
+    after.map((c) => c.state).sort(),
+    ['cancelled', 'cancelled', 'cancelled'],
+    'the whole ticket stops, from any of its rows',
+  );
 });

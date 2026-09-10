@@ -1,11 +1,21 @@
 /**
  * Multi-repo fan-out (D-12, DELV-06, DELV-07).
  *
- * One ticket over N repos becomes one parent run and N child runs -- not one
- * session with `--add-dir`. Each child is a first-class run with its own repo,
- * branch, worktree, session and state, so each is a real `claude` process and
- * each costs one concurrency slot (D-03). The scheduler needs nothing new for
- * that: it counts runs, not tickets.
+ * One ticket over N repos becomes one parent run and N child runs. Each child is a
+ * first-class run with its own repo, branch, worktree and state, and every per-repo column
+ * the product has keeps meaning what it meant.
+ *
+ * What a child no longer owns is a PROCESS. One ticket is worked by ONE `claude` session,
+ * in a daemon-owned directory holding only that ticket's worktrees, costing one
+ * concurrency slot for the ticket rather than one per repository (`run-engine.driveTicket`).
+ * So only the LEAD child carries a `sessionId`; a sibling's is `null`, which is the honest
+ * value and is also the MARK `resolve-run.sessionOwner` reads.
+ *
+ * Known ceiling, named rather than discovered: `HOLDS_SLOT` counts ROWS, so N children in
+ * `running` under one session over-count the cap after a boot recovery
+ * (`scheduler.syncFromStore` recomputes from rows). Over-counting is conservative — it
+ * never over-spawns. ponytail: the upgrade path is a session-owner predicate in
+ * `syncFromStore`.
  *
  * The load-bearing property of this module is that **the parent's status is
  * derived from its children and never stored** (D-12, Phase 1 D-04). That is
@@ -122,7 +132,7 @@ export function planSubRuns(
 
   const single = repos.length === 1;
 
-  function row(repo: FanoutRepo, branch: string, parentRunId: RunId | null): RepoRun {
+  function row(repo: FanoutRepo, branch: string, parentRunId: RunId | null, lead = true): RepoRun {
     return {
       id: randomUUID(),
       parentRunId,
@@ -136,9 +146,16 @@ export function planSubRuns(
       branch,
       worktreePath: null,
       // T4: pre-assigned and persisted before any spawn, never parsed out of
-      // the event stream. One per child -- two children sharing a session id
-      // would resume into each other's conversation.
-      sessionId: randomUUID(),
+      // the event stream. Two rows must never share a session id -- they would
+      // resume into each other's conversation -- and that rule is UNCHANGED.
+      //
+      // What changed is that a multi-repo ticket is worked by ONE session, so only the
+      // lead child has a session of its own; `null` on a sibling is the honest value
+      // rather than a second id for a session that does not exist. It is also a MARK
+      // rather than a position, which M5 says it has to be: `childRuns` is
+      // `SELECT * FROM runs WHERE parent_run_id = ?` with no ORDER BY, so "the first
+      // child" is not a stable notion. `resolve-run.sessionOwner` reads this mark.
+      sessionId: lead ? randomUUID() : null,
       pid: null,
       state: 'queued',
       attempt: 0,
@@ -184,12 +201,15 @@ export function planSubRuns(
   // is a config error, but it must not silently produce two children racing on
   // one branch name, so identical suffixes are numbered rather than collided.
   const seen = new Map<string, number>();
-  const children = repos.map((repo) => {
+  const children = repos.map((repo, index) => {
     const base = branchSuffix(repo.repoSlug);
     const nth = (seen.get(base) ?? 0) + 1;
     seen.set(base, nth);
     const suffix = nth === 1 ? base : `${base}-${nth}`;
-    return row(repo, `${issue.branchName}-${suffix}`, parent.id);
+    // Only the first row is the session owner. Positional HERE is fine and nowhere else:
+    // this is the moment the rows are created, so there is an order; every later reader
+    // has to go through the `sessionId` mark instead (M5).
+    return row(repo, `${issue.branchName}-${suffix}`, parent.id, index === 0);
   });
 
   return { parent, children };

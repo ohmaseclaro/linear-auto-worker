@@ -12,7 +12,7 @@
  * still calls it.
  */
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -116,6 +116,44 @@ test('the ref actually branched from reaches Worktree.baseBranch, not the bare c
     assert.notEqual(stale, upstreamTip);
     const phantom = await git(worktree.path, 'log', '--oneline', 'main..HEAD');
     assert.equal(phantom.stdout.trim().split('\n').filter((l) => l.length > 0).length, 1);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * The shared parent, through the real factory and real git. `readdir(parent)` returning
+ * exactly the ticket's repositories is the literal statement of the isolation property —
+ * a directory whose only contents are those worktrees — and no fake can make it.
+ */
+test('three repos of one ticket land under one parent whose only entries are those three', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'law-wt-parent-'));
+  try {
+    const manager = managerFor(dir);
+    const daemonDir = join(dir, 'daemon');
+    const parent = join(daemonDir, 'tickets', 'parent-uuid');
+    await mkdir(parent, { recursive: true });
+
+    const slugs = ['org/api', 'org/web', 'org/infra'];
+    const paths: string[] = [];
+    for (const [i, slug] of slugs.entries()) {
+      const src = await makeScratchRepo(await mkdtemp(join(dir, `src-${i}-`)), 'main');
+      const mapping = { repoDir: src, repoSlug: slug, baseBranch: 'main', enabled: true } as RepoMapping;
+      const wt = await manager.create(`run-p${i}` as RunId, mapping, `ENG-9-${i}`, parent);
+      paths.push(wt.path);
+      // The leaf is the REPOSITORY, flattened — so `orgA/api` and `orgB/api` in one
+      // mapping cannot collide on `api` and fail one child.
+      assert.equal(wt.path, join(parent, slug.replace('/', '-')));
+    }
+
+    assert.deepEqual((await readdir(parent)).sort(), ['org-api', 'org-infra', 'org-web']);
+    // Every one is a real worktree on a real branch, not just a directory.
+    for (const p of paths) {
+      assert.equal((await git(p, 'rev-parse', '--is-inside-work-tree')).stdout.trim(), 'true');
+      assert.notEqual((await git(p, 'symbolic-ref', '--short', 'HEAD')).stdout.trim(), '');
+    }
+    // And nothing escaped the daemon root, which is what `reconcileWorktrees` relies on.
+    for (const p of paths) assert.ok(p.startsWith(daemonDir + '/'));
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

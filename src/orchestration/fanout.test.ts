@@ -102,21 +102,32 @@ test('the parent row carries no state, no repo, no branch and no session', () =>
   assert.equal(parent.pid, null);
 });
 
-test('each child gets its own session id and its own run id', () => {
+test('each child gets its own run id, and exactly ONE carries the session id', () => {
   const plan = planSubRuns(ISSUE, THREE_REPOS);
 
   const runIds = new Set(plan.children.map((c) => c.id));
-  const sessionIds = new Set(plan.children.map((c) => c.sessionId));
 
   assert.equal(runIds.size, 3, 'three distinct run ids');
-  assert.equal(sessionIds.size, 3, 'three distinct pre-assigned session ids (T4)');
   assert.ok(!runIds.has(plan.parent!.id), 'the parent is not one of its own children');
 
-  // A shared session id would resume one child into another child's
-  // conversation, in the wrong repository.
-  for (const c of plan.children) {
-    assert.ok(c.sessionId, 'the session id is assigned up front, never parsed out of the stream');
-  }
+  // T4's rule is UNCHANGED — two rows must never share a session id, or one child resumes
+  // into another child's conversation. What changed is that a multi-repo ticket is worked
+  // by ONE `claude` session, so there is one session to identify. `null` on a sibling is
+  // the honest value rather than a second id for a session that does not exist.
+  const withSession = plan.children.filter((c) => c.sessionId !== null);
+  assert.equal(withSession.length, 1, 'one session, so one session id');
+  assert.ok(withSession[0]!.sessionId, 'assigned up front, never parsed out of the stream');
+  assert.equal(
+    new Set(plan.children.map((c) => c.sessionId)).size,
+    2,
+    'one real id and one null — no two rows share an id',
+  );
+});
+
+test('a single-repo plan still gives its one run a session id', () => {
+  const plan = planSubRuns(ISSUE, { repos: [THREE_REPOS.repos[0]!] });
+  assert.equal(plan.parent, null);
+  assert.ok(plan.children[0]!.sessionId, 'the live instance’s shape, unchanged');
 });
 
 test('child branch names are distinct across repos', () => {
@@ -349,8 +360,11 @@ function multiRepoConfig(concurrency: number): Config {
     // T94: widen the fixture, never the production code. `worktreeRoot` is REQUIRED by
     // Config, and `logPathFor` now derives the run log path from it (T120).
     worktreeRoot: '/home/op/.linear-auto-worker/worktrees',
+    // TOP LEVEL. Nested under `defaults` it was never read, so every case in this file ran
+    // at the default 3 whatever it asked for — which is why the old three-slot assertion
+    // could pass at `concurrency: 3` without the number mattering.
+    concurrency,
     defaults: {
-      concurrency,
       questionTimeoutMs: 4 * 60 * 60 * 1000,
       baseBranch: 'main',
       postLinearComments: true,
@@ -380,6 +394,11 @@ const DELIVERS: AgentResult = {
   prBody: 'Does the thing.',
 };
 
+/**
+ * The whole session failing. It used to be scripted PER REPOSITORY (`org/web` breaks while
+ * `org/api` delivers) — a shape one shared session cannot produce. Per-repository failure
+ * is now a DELIVERY outcome; this is the ticket-wide case.
+ */
 const BREAKS: AgentResult = {
   status: 'failed',
   summary: 'could not build',
@@ -387,28 +406,38 @@ const BREAKS: AgentResult = {
 };
 
 /**
- * Scripted per repo rather than per call, because with three children running
- * concurrently a call-ordered script decides nothing reliably -- and the whole
- * point of these tests is which repo got which outcome.
+ * ONE session per ticket, so ONE scripted result.
+ *
+ * This used to be `agentByRepo`, keyed on `LAW_REPO`, because a ticket over three repos
+ * was three `claude` processes. It is one now, working in a directory holding all three
+ * worktrees, so there is one turn and one outcome to script — and WHICH repository got a
+ * pull request is no longer the agent's to say. That is decided per repository from git,
+ * inside `deliver`, which is why the per-repo knob moved to `deliveryByRepo` below.
  */
-function agentByRepo(
-  byRepo: Record<string, AgentResult>,
-  gate?: Promise<void>,
-): AgentRunner {
+function oneSession(result: AgentResult, gate?: Promise<void>): AgentRunner {
   return {
-    async run(req: { env: Record<string, string> }) {
+    async run() {
       if (gate) await gate;
-      const result = byRepo[req.env.LAW_REPO];
-      if (!result) throw new Error(`no scripted result for ${req.env.LAW_REPO}`);
       return result;
     },
   } as unknown as AgentRunner;
 }
 
+/**
+ * The per-repository outcome, at the seam that now owns it.
+ *
+ * `null` is "the run left no commits in this repository" — what the real deliverer returns
+ * when `git diff <base>..HEAD` is empty, before pushing anything. A thrown error is a
+ * delivery that was attempted and failed (a refused push, a `gh` outage), which must not
+ * touch a sibling's already-open pull request (DELV-07).
+ */
+type DeliveryOutcome = 'pr' | 'none' | 'error';
+
 function fanoutHarness(opts: {
   agent: AgentRunner;
   issues: Array<ReturnType<typeof issueN>>;
   concurrency?: number;
+  deliveryByRepo?: Record<string, DeliveryOutcome>;
 }) {
   const config = multiRepoConfig(opts.concurrency ?? 3);
   const raw = new InMemoryStore();
@@ -442,11 +471,22 @@ function fanoutHarness(opts: {
   // acknowledgement has finished -- plan 02's ordering constraint still binds,
   // and fan-out must not have moved the ack inside the per-child loop.
   const worktrees = {
-    async create(runId: string, repo: { repoDir: string }, branch: string) {
+    async create(
+      runId: string,
+      repo: { repoDir: string; repoSlug: string },
+      branch: string,
+      parentDir?: string,
+    ) {
       for (const step of ['comment.create', 'issue.state', 'issue.subscribe']) {
         if (!order.includes(step)) throw new Error(`worktree reached before ${step}`);
       }
-      return { runId, repoDir: repo.repoDir, path: `/wt/${runId}`, branch, baseBranch: 'main' };
+      return {
+        runId,
+        repoDir: repo.repoDir,
+        path: parentDir ? `${parentDir}/${repo.repoSlug.replace('/', '-')}` : `/wt/${runId}`,
+        branch,
+        baseBranch: 'refs/remotes/origin/main',
+      };
     },
     async remove() {},
     async exists() {
@@ -459,6 +499,9 @@ function fanoutHarness(opts: {
 
   const deliverer = {
     async deliver(_wt: unknown, repo: { repoSlug: string }) {
+      const outcome = opts.deliveryByRepo?.[repo.repoSlug] ?? 'pr';
+      if (outcome === 'none') return null;
+      if (outcome === 'error') throw new Error(`scripted delivery failure for ${repo.repoSlug}`);
       return { url: `https://github.com/${repo.repoSlug}/pull/7` };
     },
   } as unknown as Deliverer;
@@ -502,14 +545,7 @@ function fanoutHarness(opts: {
 }
 
 test('one ticket over three repos inserts one parent, three children, and one acknowledgement', async () => {
-  const h = fanoutHarness({
-    agent: agentByRepo({
-      'org/api': DELIVERS,
-      'org/web': DELIVERS,
-      'org/infra': DELIVERS,
-    }),
-    issues: [issueN(1)],
-  });
+  const h = fanoutHarness({ agent: oneSession(DELIVERS), issues: [issueN(1)] });
 
   await h.engine.handle({ kind: 'run.requested', trigger: 'assignment', issueId: 'issue-1' });
 
@@ -537,11 +573,20 @@ test('one ticket over three repos inserts one parent, three children, and one ac
   );
   assert.equal(new Set(children.map((c) => c.branch)).size, 3, 'three distinct branches');
   assert.equal(new Set(children.map((c) => c.worktreePath)).size, 3, 'three distinct worktrees');
-  assert.equal(new Set(children.map((c) => c.sessionId)).size, 3, 'three distinct sessions');
+  // ONE session across the three, and every worktree under its one parent directory —
+  // which is what makes the ticket cost one slot and one `claude` process instead of three.
+  assert.equal(children.filter((c) => c.sessionId !== null).length, 1, 'one session for the ticket');
+  const parents = new Set(children.map((c) => c.worktreePath!.replace(/\/[^/]+$/, '')));
+  assert.equal(parents.size, 1, 'all three worktrees share one daemon-owned parent');
+  assert.deepEqual(
+    children.map((c) => c.worktreePath!.replace(/^.*\//, '')).sort(),
+    ['org-api', 'org-infra', 'org-web'],
+    'and that directory’s only contents are this ticket’s repositories',
+  );
 });
 
 test('a ticket mapped to one repo is unchanged: one run, no parent', async () => {
-  const h = fanoutHarness({ agent: agentByRepo({ 'org/solo': DELIVERS }), issues: [issueN(2)] });
+  const h = fanoutHarness({ agent: oneSession(DELIVERS), issues: [issueN(2)] });
 
   await h.engine.handle({ kind: 'run.requested', trigger: 'assignment', issueId: 'issue-2' });
   await h.engine.settle();
@@ -552,39 +597,35 @@ test('a ticket mapped to one repo is unchanged: one run, no parent', async () =>
   assert.equal(rows[0].state, 'delivered');
 });
 
-test('three children occupy three slots, and a fourth unrelated run waits (D-03)', async () => {
+test('a three-repo ticket occupies ONE slot, so an unrelated run is not starved', async () => {
   let open!: () => void;
   const gate = new Promise<void>((resolve) => {
     open = resolve;
   });
 
   const h = fanoutHarness({
-    agent: agentByRepo(
-      { 'org/api': DELIVERS, 'org/web': DELIVERS, 'org/infra': DELIVERS, 'org/solo': DELIVERS },
-      gate,
-    ),
+    agent: oneSession(DELIVERS, gate),
     issues: [issueN(1), issueN(2)],
-    concurrency: 3,
+    concurrency: 1,
   });
 
   await h.engine.handle({ kind: 'run.requested', trigger: 'assignment', issueId: 'issue-1' });
-  // Let the three drivers reach the agent, where they park on the gate.
+  // Let the one driver reach the agent, where it parks on the gate.
   await new Promise((r) => setImmediate(r));
 
-  assert.equal(
-    h.scheduler.inUse(),
-    3,
-    'each child is a real claude process, so each costs a slot -- the cap bounds local RAM',
-  );
+  // The cap bounds local RAM, and a ticket over three repositories is ONE `claude`
+  // process. Charging it three slots was charging for processes that no longer exist —
+  // on a one-slot daemon it also meant a three-repo ticket could never run at all.
+  assert.equal(h.scheduler.inUse(), 1, 'one session, one slot');
 
   await h.engine.handle({ kind: 'run.requested', trigger: 'assignment', issueId: 'issue-2' });
-  const [fourth] = h.runsOf('issue-2');
-  assert.equal(h.scheduler.positionOf(fourth.id), 1, 'the fourth run waits; the cap is not exceeded');
-  assert.equal(h.scheduler.inUse(), 3);
+  const [second] = h.runsOf('issue-2');
+  assert.equal(h.scheduler.positionOf(second.id), 1, 'the next run waits its turn; the cap holds');
+  assert.equal(h.scheduler.inUse(), 1);
 
   open();
   await h.engine.settle();
-  assert.equal(h.scheduler.inUse(), 0, 'and every slot comes back');
+  assert.equal(h.scheduler.inUse(), 0, 'and the slot comes back');
 });
 
 // ---------------------------------------------------------------------------
@@ -593,12 +634,11 @@ test('three children occupy three slots, and a fourth unrelated run waits (D-03)
 
 test('a failing child leaves its delivered sibling untouched, and the ticket derives partial', async () => {
   const h = fanoutHarness({
-    agent: agentByRepo({
-      'org/api': DELIVERS,
-      'org/web': BREAKS,
-      'org/infra': BREAKS,
-    }),
+    agent: oneSession(DELIVERS),
     issues: [issueN(1)],
+    // The per-repository outcome now lives at DELIVERY, judged from git, not in the
+    // agent's report — one session cannot succeed in one repository and fail in another.
+    deliveryByRepo: { 'org/api': 'pr', 'org/web': 'error', 'org/infra': 'error' },
   });
 
   await h.engine.handle({ kind: 'run.requested', trigger: 'assignment', issueId: 'issue-1' });
@@ -639,8 +679,9 @@ test('a failing child leaves its delivered sibling untouched, and the ticket der
 
 test('the parent row still carries no state after every child has settled', async () => {
   const h = fanoutHarness({
-    agent: agentByRepo({ 'org/api': DELIVERS, 'org/web': BREAKS, 'org/infra': DELIVERS }),
+    agent: oneSession(DELIVERS),
     issues: [issueN(1)],
+    deliveryByRepo: { 'org/web': 'error' },
   });
 
   await h.engine.handle({ kind: 'run.requested', trigger: 'assignment', issueId: 'issue-1' });
@@ -658,8 +699,11 @@ test('the parent row still carries no state after every child has settled', asyn
 
 test('Linear gets one rollup for the ticket, not one terminal comment per child', async () => {
   const h = fanoutHarness({
-    agent: agentByRepo({ 'org/api': DELIVERS, 'org/web': BREAKS, 'org/infra': DELIVERS }),
+    agent: oneSession(DELIVERS),
     issues: [issueN(1)],
+    // One repository the session never touched — the normal multi-repo case — so the
+    // rollup has to explain a `cancelled` row as well as name two pull requests.
+    deliveryByRepo: { 'org/web': 'none' },
   });
 
   await h.engine.handle({ kind: 'run.requested', trigger: 'assignment', issueId: 'issue-1' });
@@ -682,7 +726,7 @@ test('Linear gets one rollup for the ticket, not one terminal comment per child'
 
 test('cancelling the ticket cancels every non-terminal child and leaves terminal ones alone', async () => {
   const h = fanoutHarness({
-    agent: agentByRepo({ 'org/api': DELIVERS, 'org/web': DELIVERS, 'org/infra': DELIVERS }),
+    agent: oneSession(DELIVERS),
     issues: [issueN(1)],
     concurrency: 1,
   });

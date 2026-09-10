@@ -542,13 +542,16 @@ export class FakeWorktreeManager implements WorktreeManager {
     this.root = root;
   }
 
-  create(runId: RunId, repo: RepoMapping, branch: string): Promise<Worktree> {
+  create(runId: RunId, repo: RepoMapping, branch: string, parentDir?: string): Promise<Worktree> {
     const wt: Worktree = {
       runId,
       repoDir: repo.repoDir,
-      path: `${this.root}/${runId}`,
+      // A ticket's worktrees land side by side under one daemon-owned parent, which is
+      // what makes the shared session's cwd hold only that ticket's repositories.
+      path: parentDir ? `${parentDir}/${repo.repoSlug.replace(/\//g, '-')}` : `${this.root}/${runId}`,
       branch,
-      baseBranch: repo.baseBranch,
+      // T125: the resolved remote-tracking ref, as the real adapter returns.
+      baseBranch: `refs/remotes/origin/${repo.baseBranch}`,
     };
     this.worktrees.set(runId, wt);
     return Promise.resolve(wt);
@@ -646,16 +649,25 @@ type DelivererPr = Parameters<Deliverer['deliver']>[2];
 export class FakeDeliverer implements Deliverer {
   readonly calls: Array<{ wt: Worktree; repo: RepoMapping; pr: DelivererPr }>;
   private readonly byWorktreePath: Map<string, PullRequest>;
+  private readonly barren: ReadonlySet<string>;
   private counter: number;
 
-  constructor() {
+  /**
+   * `barrenSlugs` are repositories the run left NO commits in, for which the real
+   * deliverer returns `null` before pushing (an empty branch and an empty pull request are
+   * not a delivery). A ticket's shared session works in some of its repositories and not
+   * others, so this is the normal case for the multi-repo path, not an edge one.
+   */
+  constructor(barrenSlugs: readonly string[] = []) {
     this.calls = [];
     this.byWorktreePath = new Map();
+    this.barren = new Set(barrenSlugs);
     this.counter = 0;
   }
 
-  deliver(wt: Worktree, repo: RepoMapping, pr: DelivererPr): Promise<PullRequest> {
+  deliver(wt: Worktree, repo: RepoMapping, pr: DelivererPr): Promise<PullRequest | null> {
     this.calls.push({ wt, repo, pr });
+    if (this.barren.has(repo.repoSlug)) return Promise.resolve(null);
     const existing = this.byWorktreePath.get(wt.path);
     if (existing) return Promise.resolve(existing);
     this.counter += 1;

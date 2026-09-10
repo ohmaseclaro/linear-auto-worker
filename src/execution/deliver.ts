@@ -73,7 +73,20 @@ function leadWithIdentifier(title: string, identifier: string): string {
   return `${key} ${title}`;
 }
 
-export async function deliver(o: DeliverInput): Promise<DeliveryResult> {
+/**
+ * Push the branch and open the pull request — or return `null` when there is nothing to
+ * deliver.
+ *
+ * `null` means the diff range is empty: the agent left no commits in THIS repository. That
+ * is the normal case for a multi-repo ticket, where one shared session works in some of
+ * its repositories and not others. Pushing anyway would create an empty branch on the
+ * operator's remote and open an empty pull request for a repository nobody touched, which
+ * they would then close by hand.
+ *
+ * It is a strict improvement on the single-repo path too: a barren `complete` that slipped
+ * past `verdict.ts` used to open exactly that empty pull request.
+ */
+export async function deliver(o: DeliverInput): Promise<DeliveryResult | null> {
   const remote = o.remote ?? 'origin';
   const range = `${o.base}..HEAD`;
 
@@ -82,6 +95,14 @@ export async function deliver(o: DeliverInput): Promise<DeliveryResult> {
   const changed = await o.runCommand('git', ['-C', o.worktreePath, 'diff', '--name-only', range]);
   const files = splitLines(changed.stdout);
   const diff = await o.runCommand('git', ['-C', o.worktreePath, 'diff', range]);
+
+  // 1b. Nothing to deliver. Decided from GIT, before the gates and long before the push —
+  //     never from the agent's own claim about which repositories it changed (that field
+  //     existed on the wire schema and was deleted rather than wired up; `verdict.ts` is
+  //     the rule of this file). Both reads are needed: a commit that only moves a file
+  //     mode shows in `--name-only` with an empty textual diff, and a merge commit can do
+  //     the reverse.
+  if (files.length === 0 && diff.stdout.trim().length === 0) return null;
 
   // 2. The gates, before a single push argument is constructed. A refusal or a block ends
   //    the run here — no push, no PR — and the reason goes out to the caller so Phase 5 can

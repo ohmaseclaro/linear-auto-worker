@@ -7,6 +7,8 @@
  * statements live in Phase 2's store implementation.
  */
 import { randomUUID } from 'node:crypto';
+import { rmdir } from 'node:fs/promises';
+import { basename } from 'node:path';
 
 import { canTransition, RUN_STATE_TABLE } from '../domain/state-machine.js';
 import { IllegalTransitionError } from '../domain/errors.js';
@@ -515,8 +517,12 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
   }
 
   function rollupLine(child: RepoRun): string {
-    const detail =
-      child.prUrl ?? (child.state === 'failed' ? (child.failureReason ?? 'no diagnosis') : '');
+    // Widened from `state === 'failed'` (M13): a `cancelled` child used to render as a bare
+    // state with no explanation, and under the shared-session path that is the NORMAL
+    // outcome for a repository the agent chose not to touch. `failureReason` is set on
+    // every state that has one, so reading it unconditionally improves every row rather
+    // than special-casing the new one.
+    const detail = child.prUrl ?? child.failureReason ?? '';
     return `- \`${child.repoSlug}\` — **${child.state}**${detail ? ` — ${detail}` : ''}`;
   }
 
@@ -578,6 +584,14 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
     for (const q of store.openQuestionsForIssue(run.issueId)) {
       if (q.runId === runId) store.updateQuestion(q.id, { status: 'cancelled' });
     }
+    // The reason on the ROW, not only in `run_events`. It was already this function's
+    // parameter and already went into the event log, so a cancelled run's explanation
+    // existed and was simply unreadable from anywhere an operator looks: `rollupLine` and
+    // `law watch` both read `failureReason`, so a cancelled child rendered as a bare state
+    // (M13). Written here, at the one choke point every cancel routes through, rather than
+    // at the new caller that noticed — the alternative is one caller that explains itself
+    // and three that do not.
+    store.updateRun(runId, { failureReason: reason, updatedAt: now() });
     await transition(runId, 'cancelled', reason);
     // An `awaiting_answer` run has no driver in flight -- it exited and is
     // waiting on a human -- so there is no `finally` to report its terminal
@@ -639,6 +653,79 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
     await transition(runId, 'failed', reason);
   }
 
+  /**
+   * Every run the one `claude` session covers, the caller's own first.
+   *
+   * A single-repo run is one run. A child of a multi-repo ticket shares ONE session with
+   * its siblings (`driveTicket` below), so the session's single result decides all of
+   * them — which repositories got a pull request is then judged per repository from git,
+   * inside `deliver`. Terminal siblings are excluded: a child whose worktree could not be
+   * prepared already `failed` and must not be resurrected by its siblings' success.
+   *
+   * The caller first, and that is load-bearing: it is the session OWNER, so it is the run
+   * a question is opened against and the run whose session a resume continues.
+   */
+  function sessionRuns(runId: RunId): RunId[] {
+    const run = repoRun(runId);
+    if (run.parentRunId === null) return [runId];
+    const siblings = store
+      .childRuns(run.parentRunId)
+      .filter(
+        (c): c is RepoRun =>
+          c.kind === 'repo' && c.id !== runId && !RUN_STATE_TABLE[c.state].terminal,
+      )
+      .map((c) => c.id);
+    return [runId, ...siblings];
+  }
+
+  /**
+   * Deliver ONE repository, or record honestly that there was nothing to deliver.
+   *
+   * `deliverer.deliver` returns `null` when `git diff <base>..HEAD` is empty — the agent
+   * left no commits in this repository. That judgement is made from git and never from the
+   * agent's own account of what it changed: `AgentResultSchema` used to carry a
+   * `changedRepos` field for exactly this and it was deleted rather than wired up, because
+   * trusting the agent's claim is the one thing `verdict.ts` exists to refuse.
+   *
+   * `cancelled` is the least-wrong of the nine states for that outcome: it is terminal, it
+   * is not a failure, and `deriveParentStatus` already maps "some shipped, some not" to
+   * `partial` and "nothing shipped, all cancelled" to `cancelled`.
+   */
+  async function deliverOne(
+    runId: RunId,
+    result: Extract<AgentResult, { status: 'complete' | 'partial' }>,
+  ): Promise<void> {
+    await transition(runId, 'delivering', result.summary);
+    const run = repoRun(runId);
+    const partial = result.status === 'partial';
+    const uncommitted =
+      partial && result.uncommittedPaths?.length
+        ? `\n\n> **Uncommitted when the turn ended:** ${result.uncommittedPaths.join(', ')}`
+        : '';
+    const pr = await deliverer.deliver(worktreeOf(run), repoOf(run), {
+      title: result.prTitle,
+      prBody: prBodyFor(
+        run,
+        partial
+          ? `> ⚠️ **Partial run.** The agent's turn ended before it reported completion, ` +
+              `but it left commits behind. Review before merging.${uncommitted}\n\n` +
+              result.prBody
+          : result.prBody,
+        partial ? 'partial' : 'delivered',
+      ),
+      // Forced, never the mapping's toggle: a truncated branch is not something the
+      // operator opted into shipping ready-for-review. This is the ONLY input to the
+      // draft decision -- `DeliverInput.verdict` is deliberately not set.
+      ...(partial ? { draft: true } : {}),
+    });
+    if (pr === null) {
+      await finishCancel(runId, 'the agent left no commits in this repository');
+      return;
+    }
+    store.updateRun(runId, { prUrl: pr.url, updatedAt: now() });
+    await transition(runId, partial ? 'partial' : 'delivered', pr.url);
+  }
+
   async function dispatch(runId: RunId, result: AgentResult, release: () => void): Promise<void> {
     // The daemon is shutting down and this child was reaped by `stop()`, not by the
     // operator. Writing anything here would turn a lossless stop into an abandoned run.
@@ -646,6 +733,9 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
       release();
       return;
     }
+    // ONE session, N repositories (`driveTicket`). Resolved once, here, rather than at
+    // each arm: a second resolution is a second answer to "who did this session cover".
+    const runs = sessionRuns(runId);
     switch (result.status) {
       case 'needs_input': {
         // The ordering that matters. Releasing after the write leaves a window
@@ -654,18 +744,28 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
         // mechanism is exit-and-resume: the child is already gone, so there is
         // nothing resident to keep alive while the human thinks.
         release();
+        // The siblings park with it, BEFORE the question is opened. One session asked one
+        // question; its siblings have no session of their own to answer into, and leaving
+        // them at `running` would leave three rows looking live with no process behind any
+        // of them — and holding slots (`HOLDS_SLOT`) that nothing will ever release.
+        // `resumeAfterAnswer` brings them back together.
+        for (const id of runs.slice(1)) await transition(id, 'awaiting_answer', 'shared session asked');
         await deps.questions().openQuestion(runId, result.question, result.assumption);
         return;
       }
       case 'complete': {
-        await transition(runId, 'delivering', result.summary);
-        const run = repoRun(runId);
-        const pr = await deliverer.deliver(worktreeOf(run), repoOf(run), {
-          title: result.prTitle,
-          prBody: prBodyFor(run, result.prBody, 'delivered'),
-        });
-        store.updateRun(runId, { prUrl: pr.url, updatedAt: now() });
-        await transition(runId, 'delivered', pr.url);
+        // One repository per iteration, and a repository that fails to deliver does not
+        // stop its siblings: repo A's pull request is already open by the time repo B's
+        // push is refused, and reclassifying it would be DELV-07's defect exactly. For a
+        // single-repo run this loop runs once and behaves as it always did.
+        for (const id of runs) {
+          try {
+            await deliverOne(id, result);
+          } catch (err) {
+            if (runs.length === 1) throw err;
+            await fail(id, classify(err), err);
+          }
+        }
         release();
         return;
       }
@@ -678,44 +778,30 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
         // Reaching `default` here instead would have posted a failure diagnosis over work
         // that is on disk and pushable -- which is exactly what happened for the whole of
         // this milestone, because nothing ever produced a `partial`.
-        await transition(runId, 'delivering', result.summary);
-        const run = repoRun(runId);
-        const uncommitted = result.uncommittedPaths?.length
-          ? `\n\n> **Uncommitted when the turn ended:** ${result.uncommittedPaths.join(', ')}`
-          : '';
-        const pr = await deliverer.deliver(worktreeOf(run), repoOf(run), {
-          title: result.prTitle,
-          // The banner rides inside `summary`, exactly where it already rode: `body` fed
-          // `summary` before. `verdict: 'partial'` additionally lights the renderer's
-          // cut-short branch under `## What I did not do`, which is new and correct.
-          prBody: prBodyFor(
-            run,
-            `> ⚠️ **Partial run.** The agent's turn ended before it reported completion, ` +
-              `but it left commits behind. Review before merging.${uncommitted}\n\n` +
-              result.prBody,
-            'partial',
-          ),
-          // Forced, never the mapping's toggle: a truncated branch is not something the
-          // operator opted into shipping ready-for-review. This is the ONLY input to the
-          // draft decision -- `DeliverInput.verdict` is deliberately not set.
-          draft: true,
-        });
-        store.updateRun(runId, { prUrl: pr.url, updatedAt: now() });
-        await transition(runId, 'partial', pr.url);
+        for (const id of runs) {
+          try {
+            await deliverOne(id, result);
+          } catch (err) {
+            if (runs.length === 1) throw err;
+            await fail(id, classify(err), err);
+          }
+        }
         release();
         return;
       }
       case 'cancelled': {
         // The child honored the abort. This is a cancellation, not a failure --
         // routing it to `failed` would post a diagnosis for work the operator
-        // deliberately stopped.
+        // deliberately stopped. One session, so every repository it covered stops.
         release();
-        await finishCancel(runId, 'agent reported cancelled');
+        for (const id of runs) await finishCancel(id, 'agent reported cancelled');
         return;
       }
-      default:
+      default: {
         release();
-        await fail(runId, 'failureReason' in result ? result.failureReason : result.status);
+        const reason = 'failureReason' in result ? result.failureReason : result.status;
+        for (const id of runs) await fail(id, reason);
+      }
     }
   }
 
@@ -789,7 +875,12 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
    * the delivery contract and the injection containment because Linear had a bad minute is
    * worse.
    */
-  async function briefFor(run: RepoRun, branch: string): Promise<string> {
+  async function briefFor(
+    run: RepoRun,
+    branch: string,
+    /** The repositories ONE shared session covers, as directory names under its cwd. */
+    repoDirs?: readonly string[],
+  ): Promise<string> {
     let issue: LinearIssue | undefined;
     try {
       issue = await linear.getIssue(run.issueId);
@@ -814,18 +905,49 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
       description: issue?.description ?? '',
       url: issue?.url ?? run.issueUrl,
       branch,
-      ...(siblings.length > 0 ? { siblingRepos: siblings } : {}),
+      // `repoDirs` and `siblingRepos` are exclusive, and the choice is the shape of the
+      // run: a shared session HAS the other repositories in its working directory, so
+      // warning it that it cannot reach them would be false.
+      ...(repoDirs && repoDirs.length > 0
+        ? { repoDirs }
+        : siblings.length > 0
+          ? { siblingRepos: siblings }
+          : {}),
     });
   }
 
+  /**
+   * The daemon-owned directory ONE ticket's worktrees live in, and the cwd its single
+   * `claude` session is started in. Keyed by the parent run id, so it holds exactly that
+   * ticket's repositories and nothing else — which is the literal statement of the
+   * isolation property, and the reason it is not `${daemonDir}/worktrees`.
+   */
+  function ticketDirOf(parentRunId: RunId): string {
+    return `${daemonDirOf(config)}/tickets/${parentRunId}`;
+  }
+
   function spawnRequest(run: RepoRun, prompt: string, resume: boolean) {
+    // A child of a multi-repo ticket is worked by a session whose cwd is the SHARED
+    // parent, not its own worktree — including on a resume, which is why this is derived
+    // here rather than passed in by each caller.
+    const cwd = run.parentRunId ? ticketDirOf(run.parentRunId) : run.worktreePath!;
+    // `LAW_REPO` names the repository this session is working in. For a shared session
+    // there are several, so it carries all of them: a single slug would be a label that
+    // is wrong for every repository but one, which is worse than a list.
+    const repo = run.parentRunId
+      ? store
+          .childRuns(run.parentRunId)
+          .filter((c): c is RepoRun => c.kind === 'repo' && c.worktreePath !== null)
+          .map((c) => c.repoSlug)
+          .join(',')
+      : run.repoSlug;
     return {
       runId: run.id,
       sessionId: run.sessionId!,
-      cwd: run.worktreePath!,
+      cwd,
       prompt,
       resume,
-      env: { LAW_RUN_ID: run.id, LAW_ISSUE_KEY: run.issueKey, LAW_REPO: run.repoSlug },
+      env: { LAW_RUN_ID: run.id, LAW_ISSUE_KEY: run.issueKey, LAW_REPO: repo },
     };
   }
 
@@ -908,6 +1030,110 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
   }
 
   /**
+   * The work path for a multi-repo ticket: ONE slot, N worktrees under one daemon-owned
+   * parent, ONE `claude` session, one pull request per repository it left commits in.
+   *
+   * The children survive unchanged, and that is what makes this affordable — every
+   * per-repo column the product already has (repo, slug, branch, worktree path, state,
+   * `prUrl`, `failureReason`, cost, tokens) keeps meaning exactly what it meant, so
+   * `deriveParentStatus`, `announceTicketRollup`, `law status` and the notifier need no
+   * new concept. What changed is who spawns the agent, not what a run is.
+   *
+   * Deliberately NOT `drive` with a flag: the two differ in their slot arity, their spawn
+   * arity and their cwd, and the single-repo path is every run the live instance makes
+   * (its four mappings hold one repo each, so `planSubRuns` returns no parent and this
+   * function is unreachable there). One `if` in `handle` keeps that path untouched.
+   */
+  async function driveTicket(
+    parentRunId: RunId,
+    childIds: readonly RunId[],
+    ackCommentId: string | null,
+    slot: Promise<() => void>,
+  ): Promise<void> {
+    // Every CHILD, not the parent: `dispatchQueued` reads this set to answer "is anyone
+    // already driving this row?", and the rows sitting at `queued` are the children. See
+    // the same comment in `drive` for why it is before `await slot`.
+    for (const id of childIds) driving.add(id);
+    const release = await slot;
+    const ac = new AbortController();
+    // ONE controller, registered under EVERY child id. `cancel(childId)` reaps through
+    // `aborts.get(runId)?.abort()`, so an operator who unassigns the ticket — or names any
+    // one of its N rows — must reach the one session. A single registration on the lead
+    // would leave `law` able to cancel a sibling into a state with a live process behind
+    // it that nothing ever reaps.
+    for (const id of childIds) aborts.set(id, ac);
+    const parentDir = ticketDirOf(parentRunId);
+    const prepared: RunId[] = [];
+    try {
+      for (const id of childIds) {
+        try {
+          checkpoint(id);
+          await transition(id, 'preparing', ackCommentId ?? 'slot acquired');
+          const queued = repoRun(id);
+          const wt = await worktrees.create(id, repoOf(queued), queued.branch, parentDir);
+          // The RESOLVED branch, path and base ref — same three, same reason as `drive`.
+          store.updateRun(id, {
+            branch: wt.branch,
+            worktreePath: wt.path,
+            baseRef: wt.baseBranch,
+            updatedAt: now(),
+          });
+          prepared.push(id);
+        } catch (err) {
+          if (err instanceof CancelledSignal) throw err;
+          // One repository failing to prepare does not stop the others (D-10). It fails
+          // with its own diagnosis and the ticket settles `partial` through
+          // `deriveParentStatus`, which is the property `fanout.ts` was written for.
+          if (!stopping) await fail(id, classify(err), err);
+        }
+      }
+      if (prepared.length === 0) {
+        throw new Error('no repository of this ticket could be prepared');
+      }
+      // M10: `preparing -> delivering` is not in the transition table, and `running` is
+      // the only route to it. That is honest rather than a workaround — a live `claude`
+      // process really is working in every one of these worktrees.
+      for (const id of prepared) await transition(id, 'running', repoRun(id).worktreePath!);
+      // The session OWNER: the one child `planSubRuns` gave a `sessionId` to. A MARK and
+      // not a position, because `childRuns` has no ORDER BY (M5) — "the first child" is
+      // not a stable notion.
+      const owner = prepared.find((id) => repoRun(id).sessionId !== null) ?? prepared[0]!;
+      const lead = repoRun(owner);
+      const repoDirs = prepared.map((id) => basename(repoRun(id).worktreePath!));
+      const result = await agent.run(
+        spawnRequest(lead, await briefFor(lead, lead.branch, repoDirs), false),
+        ac.signal,
+      );
+      checkpoint(owner);
+      // Fans out over every non-terminal child (`sessionRuns`), judging each repository
+      // from git inside `deliver`.
+      await dispatch(owner, result, release);
+    } catch (err) {
+      if (stopping) return;
+      for (const id of childIds) {
+        if (err instanceof CancelledSignal) await finishCancel(id, 'cancel requested');
+        else await fail(id, classify(err), err);
+      }
+    } finally {
+      for (const id of childIds) {
+        driving.delete(id);
+        aborts.delete(id);
+      }
+      release();
+      if (!stopping) {
+        // One rollup for the ticket, posted by `announceTerminal` on whichever child
+        // settles last and kv-guarded, so N children do not post N comments (M14).
+        for (const id of childIds) await announceTerminal(id);
+        await refreshQueuePositions();
+        // NON-recursive, and failure swallowed. A directory still holding a retained
+        // worktree from a failed run MUST survive — `finishWorktree`'s retention policy is
+        // what decides that, and it keeps the only artefact the operator can take over in.
+        await rmdir(parentDir).catch(() => undefined);
+      }
+    }
+  }
+
+  /**
    * `questionId` is null for QA-07's `run.resumed`: the disabled-question-flow branch has
    * no question row by construction, so there is nothing to mark answered. Everything
    * after that is identical, which is why it is this function and not a second one.
@@ -925,6 +1151,18 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
     try {
       if (questionId !== null) await deps.questions().applyAnswer(questionId, answer);
       const run = repoRun(runId);
+      // The siblings parked with this run when the shared session asked (`dispatch`'s
+      // `needs_input` arm) and come back with it. `questions.ts` moved THIS run back to
+      // `running`; nothing else knows the other rows exist.
+      if (run.parentRunId !== null) {
+        const parked = store
+          .childRuns(run.parentRunId)
+          .filter((c): c is RepoRun => c.kind === 'repo' && c.state === 'awaiting_answer');
+        for (const sibling of parked) {
+          aborts.set(sibling.id, ac);
+          await transition(sibling.id, 'running', `answer to ${questionId ?? 'resume'}`);
+        }
+      }
       // Framed, never raw. The answer is a Linear comment — see `buildAnswerPrompt`. This
       // was `answer` verbatim, which put the most likely injection vector in the product
       // through the only path with no delimiter around it.
@@ -939,13 +1177,28 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
       if (err instanceof CancelledSignal) await finishCancel(runId, 'cancel requested');
       else await fail(runId, classify(err), err);
     } finally {
-      aborts.delete(runId);
+      // Every id this resume registered, not just the one it was named with.
+      for (const [id, controller] of [...aborts]) if (controller === ac) aborts.delete(id);
       release();
       if (!stopping) {
-        await announceTerminal(runId);
+        for (const id of sessionRunsSettled(runId)) await announceTerminal(id);
         await refreshQueuePositions();
       }
     }
+  }
+
+  /**
+   * Every run of the resumed session, terminal ones included — `sessionRuns` excludes
+   * terminal rows because a dispatch must not resurrect a failed sibling, and an announce
+   * has to reach precisely the rows that just became terminal.
+   */
+  function sessionRunsSettled(runId: RunId): RunId[] {
+    const run = store.getRun(runId);
+    if (!run || run.kind !== 'repo' || run.parentRunId === null) return [runId];
+    return store
+      .childRuns(run.parentRunId)
+      .filter((c): c is RepoRun => c.kind === 'repo')
+      .map((c) => c.id);
   }
 
   return {
@@ -1073,14 +1326,6 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
             return;
           }
           insertPlan(plan);
-          // Park each child for its OWN slot (D-03). Each is a real `claude`
-          // process, so a ticket over three repos legitimately fills a
-          // three-slot daemon -- the cap bounds local RAM, and a design where
-          // N repos cost one slot would quietly break the thing it is for.
-          // The parent is a row, not a runnable thing: it is never enqueued.
-          // Parking holds nothing and returns immediately; it exists only so
-          // the acknowledgement below can carry a real `positionOf()`.
-          const slots = plan.children.map((child) => scheduler.acquire(child.id));
           // D-09, in order and before the worktree port is reachable at all:
           // insert at `queued` (above), acknowledge, In Progress, subscribe.
           //
@@ -1090,6 +1335,36 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
           // also the only one whose queue position edits it -- the others have
           // no ack entry and `refreshQueuePositions` already no-ops on that.
           const repos = plan.children.map((c) => c.repoSlug);
+
+          // THE branch, and this is the one site both producers reach: ingress requests a
+          // run on an assignment webhook, the boot sweep requests one for every
+          // bot-assigned open issue. Both arrive here, so the decision "one session or N"
+          // is made once. A plan with a parent has two or more mapped repositories
+          // (`planSubRuns` returns `parent: null` for one), and the live instance's four
+          // mappings hold one repo each — so the single-repo path below is what it runs,
+          // unchanged, and this branch is unreachable there. That is also why there is no
+          // toggle: a switch that protects an instance which structurally cannot reach the
+          // thing it switches off would exist only to be set to one value.
+          if (plan.parent) {
+            // ONE slot for the whole ticket, on the PARENT's id. N children, one `claude`
+            // process, one slot — the cap bounds local RAM and there is one process to
+            // bound. Parking holds nothing and returns immediately; it exists only so the
+            // acknowledgement below can carry a real `positionOf()`.
+            const slot = scheduler.acquire(plan.parent.id);
+            const ackCommentId = await acknowledge(plan.children[0], repos);
+            track(
+              driveTicket(
+                plan.parent.id,
+                plan.children.map((c) => c.id),
+                ackCommentId,
+                slot,
+              ),
+            );
+            return;
+          }
+
+          // Single repo: one run, its own slot, its own worktree, its own session.
+          const slots = plan.children.map((child) => scheduler.acquire(child.id));
           const ackCommentId = await acknowledge(plan.children[0], repos);
           plan.children.forEach((child, i) => {
             // No sequencing between children beyond the global semaphore.

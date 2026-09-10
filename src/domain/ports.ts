@@ -267,7 +267,13 @@ export interface Worktree {
 }
 
 export interface WorktreeManager {
-  create(runId: RunId, repo: RepoMapping, branch: string): Promise<Worktree>;
+  /**
+   * `parentDir` is a shared, daemon-owned directory a whole ticket's worktrees land side
+   * by side in, so the one `claude` session that covers them can be started with its cwd
+   * there and see nothing else. Absent — the single-repo path — keeps today's
+   * `${daemonDir}/worktrees/${repoSlug}/${branch}` layout unchanged.
+   */
+  create(runId: RunId, repo: RepoMapping, branch: string, parentDir?: string): Promise<Worktree>;
   remove(runId: RunId): Promise<void>;
   exists(runId: RunId): Promise<boolean>;
   /** Boot GC: drop worktrees with no non-terminal run. */
@@ -329,7 +335,14 @@ export interface PrBodySource {
 }
 
 export interface Deliverer {
-  /** Push the branch, then `gh pr create`. Idempotent: an existing PR is returned. */
+  /**
+   * Push the branch, then `gh pr create`. Idempotent: an existing PR is returned.
+   *
+   * `null` means the run left NO commits in this repository, judged from `git diff`, so
+   * nothing was pushed and no pull request was opened. Normal for one repository of a
+   * multi-repo ticket; the caller records the run as `cancelled` with that reason rather
+   * than handing the operator an empty pull request.
+   */
   deliver(
     wt: Worktree,
     repo: RepoMapping,
@@ -344,7 +357,7 @@ export interface Deliverer {
        */
       draft?: boolean;
     },
-  ): Promise<PullRequest>;
+  ): Promise<PullRequest | null>;
 }
 
 // ── L4 OUTBOUND ──────────────────────────────────────────────────────────────

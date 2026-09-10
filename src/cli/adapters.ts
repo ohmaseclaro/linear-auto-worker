@@ -85,7 +85,12 @@ export function createWorktreeManager(deps: ExecutionAdapterDeps): WorktreeManag
   const byRun = new Map<RunId, Worktree>();
 
   return {
-    async create(runId: RunId, repo: RepoMapping, branch: string): Promise<Worktree> {
+    async create(
+      runId: RunId,
+      repo: RepoMapping,
+      branch: string,
+      parentDir?: string,
+    ): Promise<Worktree> {
       const prepared = await prepareWorktree({
         runCommand,
         repoPath: repo.repoDir,
@@ -95,6 +100,7 @@ export function createWorktreeManager(deps: ExecutionAdapterDeps): WorktreeManag
         daemonDir,
         branchName: branch,
         base: repo.baseBranch,
+        ...(parentDir ? { parentDir } : {}),
       });
       // `prepared.branch` may carry a collision suffix (D-11): the requested name is used
       // verbatim when free and suffixed when taken, precisely so a retry cannot reset a
@@ -579,7 +585,7 @@ export function createDeliverer(deps: ExecutionAdapterDeps): Deliverer {
       wt: Worktree,
       repo: RepoMapping,
       pr: { title: string; prBody: PrBodySource; draft?: boolean },
-    ): Promise<PullRequest> {
+    ): Promise<PullRequest | null> {
       const toggles = togglesFor(deps.config, deps.index, repo.repoSlug);
       const result = await deliverPullRequest({
         runCommand,
@@ -594,6 +600,10 @@ export function createDeliverer(deps: ExecutionAdapterDeps): Deliverer {
         // `true`, for a `partial` run (T73). Normal deliveries omit it and get the toggle.
         draft: pr.draft ?? toggles.draftPr,
       });
+      // Nothing was pushed and no pull request was opened — the run left no commits in
+      // this repository. Passed straight through rather than dressed up as a failure: the
+      // caller is the only place that knows whether that is expected.
+      if (result === null) return null;
       return { url: result.prUrl, number: prNumberOf(result.prUrl) };
     },
   };

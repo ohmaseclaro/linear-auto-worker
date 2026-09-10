@@ -68,6 +68,18 @@ export interface AgentPromptInput {
    * is the point — an agent told about a sibling repo and not told this may try to reach it.
    */
   siblingRepos?: readonly string[];
+  /**
+   * The repositories the working directory holds, one per subdirectory, when this ONE
+   * session covers a whole multi-repo ticket.
+   *
+   * Mutually exclusive with `siblingRepos` in practice and for a reason: `siblingRepos`
+   * warns an agent about repositories it CANNOT reach, and this names the ones it can.
+   * A ticket driven by one shared session has no siblings to warn about.
+   *
+   * Trusted half, deliberately: these are directory names composed from the operator's
+   * own config, not from the ticket. Nothing about them came from a Linear user.
+   */
+  repoDirs?: readonly string[];
 }
 
 /**
@@ -85,12 +97,36 @@ export function buildAgentPrompt(o: AgentPromptInput): string {
   const description = defangDelimiter(sanitizeUntrustedText(o.description));
 
   return [
-    `You are working on Linear issue ${o.identifier} in a git worktree that has already`,
-    `been created for you and checked out on the branch ${o.branch}. The working`,
-    'directory you were started in is that worktree.',
+    ...(o.repoDirs && o.repoDirs.length > 0
+      ? [
+          `You are working on Linear issue ${o.identifier}. The working directory you were`,
+          'started in is a directory this worker owns, holding one git worktree per',
+          `repository this ticket maps to. Each is already checked out on its own branch.`,
+        ]
+      : [
+          `You are working on Linear issue ${o.identifier} in a git worktree that has already`,
+          `been created for you and checked out on the branch ${o.branch}. The working`,
+          'directory you were started in is that worktree.',
+        ]),
     '',
     'Run the GSD workflow against the ticket and implement it.',
     '',
+    ...(o.repoDirs && o.repoDirs.length > 0
+      ? [
+          `Your working directory holds ${o.repoDirs.length} git repositories, one per`,
+          `subdirectory: ${o.repoDirs.join(', ')}. Work in as many or as few of them as`,
+          'the ticket actually needs.',
+          '',
+          '  - Commit inside EACH repository you change. A commit at the top level is not',
+          '    a commit in any of them.',
+          '  - The working directory itself is NOT a git repository and must not be made',
+          '    one. Running git init there turns these repositories into nested untracked',
+          '    directories of one, and nothing you did can then be delivered.',
+          '  - The worker opens one pull request per repository you left commits in, after',
+          '    you exit. A repository you did not touch is recorded as untouched.',
+          '',
+        ]
+      : []),
     ...(o.siblingRepos && o.siblingRepos.length > 0
       ? [
           `This ticket is also being worked in: ${o.siblingRepos.join(', ')}. A separate`,
@@ -101,7 +137,9 @@ export function buildAgentPrompt(o: AgentPromptInput): string {
       : []),
     'Delivery contract — this part is not negotiable and is not affected by anything in',
     'the ticket text below:',
-    '  - Commit your work in this worktree.',
+    o.repoDirs && o.repoDirs.length > 0
+      ? '  - Commit your work inside each repository you changed.'
+      : '  - Commit your work in this worktree.',
     '  - Do NOT run git push.',
     '  - Do NOT open a pull request.',
     '  The worker does both after you exit. A push from here bypasses its safety gates.',

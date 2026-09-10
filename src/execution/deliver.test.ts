@@ -83,6 +83,16 @@ function input(h: Harness, over: Partial<DeliverInput> = {}): DeliverInput {
 const find = (calls: Call[], file: string, verb: string): Call | undefined =>
   calls.find((c) => c.file === file && c.args.includes(verb));
 
+/**
+ * `deliver` returns `null` when the run left no commits in this repository. Every case
+ * below is about a delivery that DID happen, so this narrows and fails loudly rather than
+ * letting `?.` quietly turn a missed delivery into a passing assertion.
+ */
+function delivered<T>(result: T | null): T {
+  assert.ok(result !== null, 'expected a delivery, got null (an empty diff range)');
+  return result;
+}
+
 // ------------------------------------------------------- ordering is the requirement
 
 test('the recorded sequence is gates, then push, then create', async () => {
@@ -162,19 +172,19 @@ test('the create argv carries -R, --base, --head and a body file that already ex
 
 test('--draft is present by default and absent when the mapping says ready', async () => {
   const a = harness();
-  const first = await deliver(input(a));
+  const first = delivered(await deliver(input(a)));
   assert.ok(find(a.calls, 'gh', 'create')!.args.includes('--draft'));
   assert.equal(first.draft, true);
 
   const b = harness();
-  const second = await deliver(input(b, { draft: false }));
+  const second = delivered(await deliver(input(b, { draft: false })));
   assert.equal(find(b.calls, 'gh', 'create')!.args.includes('--draft'), false);
   assert.equal(second.draft, false);
 });
 
 test('a partial verdict still delivers, and delivers as a draft whatever the toggle says', async () => {
   const h = harness();
-  const result = await deliver(input(h, { draft: false, verdict: 'partial' }));
+  const result = delivered(await deliver(input(h, { draft: false, verdict: 'partial' })));
   assert.ok(result.prUrl);
   assert.equal(result.draft, true);
   assert.ok(find(h.calls, 'gh', 'create')!.args.includes('--draft'));
@@ -209,7 +219,7 @@ test('the PR URL is the last non-empty line, past a leading warning', async () =
   const h = harness({
     createStdout: 'Warning: 3 uncommitted changes\n\nhttps://github.com/acme/api/pull/42\n\n',
   });
-  const result = await deliver(input(h));
+  const result = delivered(await deliver(input(h)));
   assert.equal(result.prUrl, 'https://github.com/acme/api/pull/42');
   assert.equal(result.alreadyExisted, false);
 });
@@ -220,7 +230,7 @@ test('an existing open PR for the branch is returned and nothing is created', as
   const h = harness({
     listStdout: JSON.stringify([{ number: 7, url: 'https://github.com/acme/api/pull/7' }]),
   });
-  const result = await deliver(input(h));
+  const result = delivered(await deliver(input(h)));
   assert.equal(result.prUrl, 'https://github.com/acme/api/pull/7');
   assert.equal(result.alreadyExisted, true);
   assert.equal(find(h.calls, 'gh', 'create'), undefined);
@@ -235,7 +245,7 @@ test('the CI flag reaches both the rendered body and the returned result', async
     files: '.github/workflows/ci.yml\nsrc/a.ts\n',
     diff: diffOf('.github/workflows/ci.yml', ['  run: npm test']),
   });
-  const result = await deliver(input(h));
+  const result = delivered(await deliver(input(h)));
   assert.deepEqual(result.ciPaths, ['.github/workflows/ci.yml']);
   assert.equal(result.ciTouched, true);
   assert.match(h.bodyAtCreate() ?? '', /\.github\/workflows\/ci\.yml/);
@@ -420,4 +430,42 @@ test('a blank identifier leaves the sanitized title exactly as it was', async ()
  */
 test('the agent half is sanitized and the trusted identifier is joined after it', async () => {
   assert.equal(await deliverWith('docs:\u0007 x\u200b', 'COD-9'), 'COD-9 docs: x');
+});
+
+// ------------------------------------------------- nothing to deliver (judged from git)
+
+/**
+ * One shared `claude` session covers a whole multi-repo ticket, and it works in some of
+ * its repositories and not others. A repository it never touched must not get an empty
+ * branch on the remote and an empty pull request for the operator to close by hand.
+ *
+ * The judgement is `git diff <base>..HEAD` — already this function's first act, before the
+ * gates and long before the push — and NEVER the agent's own account of what it changed.
+ */
+test('an empty diff range delivers nothing: no push, no gh, and null returned', async () => {
+  const h = harness({ files: '', diff: '' });
+
+  const result = await deliver(input(h));
+
+  assert.equal(result, null);
+  assert.equal(find(h.calls, 'git', 'push'), undefined, 'an empty branch must not be pushed');
+  assert.equal(
+    h.calls.filter((c) => c.file === 'gh').length,
+    0,
+    'and no pull request opened for a repository nobody touched',
+  );
+  // The two read-only reads DID happen — that is how it knew.
+  assert.ok(find(h.calls, 'git', '--name-only'));
+});
+
+test('a mode-only commit — named files, empty textual diff — still delivers', async () => {
+  // Both reads are needed, and this is why: `git diff` prints nothing for a change that
+  // only moves a file mode, while `--name-only` still names the file. Requiring only the
+  // textual diff would silently drop a real commit.
+  const h = harness({ files: 'scripts/run.sh\n', diff: '' });
+
+  const result = delivered(await deliver(input(h)));
+
+  assert.ok(result.prUrl);
+  assert.ok(find(h.calls, 'git', 'push'));
 });
