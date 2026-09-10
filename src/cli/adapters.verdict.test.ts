@@ -191,3 +191,71 @@ test('T73: a run reaped at its deadline with NOTHING to show is still `failed`',
   );
   assert.equal(result.status, 'failed', 'a deadline with no commits has no work to ship');
 });
+
+// ── T125: the commit count and the diff range must use the SAME ref string ───
+//
+// `gatherEvidence` read `mapping.repos.find(...).baseBranch` — the bare `"main"` — and
+// `verdict.ts` gates `commitCount === 0` on the result. T112 measured a clone 18 commits
+// behind its own `origin/main`; there, `main..HEAD` returns those 18 UPSTREAM commits for
+// a run that committed nothing, so `commitCount > 0` and the verdict declares the agent
+// committed. This is the assertion that pins the range to the ref the branch was cut from.
+
+/** Records the ranges `gatherEvidence` asks git for, and reports zero commits. */
+function gitRecordingRanges(ranges: string[]) {
+  return async (cmd: string, args: readonly string[]) => {
+    assert.equal(cmd, 'git');
+    if (args.includes('log')) {
+      const range = args[args.length - 1] ?? '';
+      ranges.push(range);
+      return { stdout: '', stderr: '', exitCode: 0 };
+    }
+    return { stdout: '', stderr: '', exitCode: 0 };
+  };
+}
+
+test('T125: the commit count is measured against the ref the run was branched from', async () => {
+  const ranges: string[] = [];
+  const runner = createAgentRunner({
+    // The run row remembers the RESOLVED ref, written by the driver at worktree creation
+    // — the same string `deliver.ts` builds its diff range from.
+    store: {
+      getRun: () => ({ kind: 'repo', repoSlug: 'o/r', baseRef: 'refs/remotes/origin/main' }),
+      updateRun: () => undefined,
+    } as never,
+    config,
+    log: silent,
+    index: mappingIndex(config),
+    runCommand: gitRecordingRanges(ranges) as never,
+    spawn: sessionClaimingComplete() as never,
+  });
+
+  await runner.run(request, new AbortController().signal);
+
+  assert.deepEqual(ranges, ['refs/remotes/origin/main..HEAD']);
+  assert.ok(!ranges.includes('main..HEAD'), 'the bare local name counts UPSTREAM commits as the run’s own');
+});
+
+test('T125: with no recorded ref the mapped repo’s own base branch is used, not the instance default', async () => {
+  const ranges: string[] = [];
+  const overriding = {
+    ...(config as unknown as Record<string, unknown>),
+    defaults: { ...(config.defaults as unknown as Record<string, unknown>), baseBranch: 'main' },
+    mappings: {
+      m1: { repos: [{ repoDir: '/tmp/r', repoSlug: 'o/r', baseBranch: 'master', enabled: true }] },
+    },
+  } as unknown as Config;
+
+  const runner = createAgentRunner({
+    // A row that predates the column — the recovery shape.
+    store: { getRun: () => ({ kind: 'repo', repoSlug: 'o/r' }), updateRun: () => undefined } as never,
+    config: overriding,
+    log: silent,
+    index: mappingIndex(overriding),
+    runCommand: gitRecordingRanges(ranges) as never,
+    spawn: sessionClaimingComplete() as never,
+  });
+
+  await runner.run(request, new AbortController().signal);
+
+  assert.deepEqual(ranges, ['master..HEAD']);
+});

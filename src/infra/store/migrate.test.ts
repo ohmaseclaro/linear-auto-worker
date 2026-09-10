@@ -137,7 +137,7 @@ test('a state outside the nine literals is rejected', () => {
 
 // -- gap D6's migration ------------------------------------------------------
 
-test('an existing v1 database upgrades to v2 without losing its history', () => {
+test('an existing v1 database upgrades to the latest version without losing its history', () => {
   // The operator case: a daemon that has been running keeps its runs, its pending
   // questions and its watermark across an upgrade. A migration that dropped and recreated
   // `runs` would pass every other test in this file and lose a live ticket here.
@@ -149,14 +149,26 @@ test('an existing v1 database upgrades to v2 without losing its history', () => 
   );
 
   const result = migrate(db);
-  assert.deepEqual(result.applied, [2], 'only the migration it was missing');
+  // Every migration above 1, derived from the list rather than hardcoded: this assertion
+  // is "it applied exactly what it was missing", and spelling that as a literal made it
+  // a test that fails on the day a THIRD migration lands, which is not a defect.
+  assert.deepEqual(
+    result.applied,
+    MIGRATIONS.filter((m) => m.version > 1).map((m) => m.version),
+    'only the migrations it was missing',
+  );
   assert.equal(result.from, 1);
   assert.equal(result.to, LATEST);
 
   const row = db
-    .prepare('SELECT id, state, cost_usd, tokens_used FROM runs WHERE id = ?')
-    .get('old') as { state: string; cost_usd: number; tokens_used: number } | undefined;
+    .prepare('SELECT id, state, cost_usd, tokens_used, base_ref FROM runs WHERE id = ?')
+    .get('old') as
+    | { state: string; cost_usd: number; tokens_used: number; base_ref: string | null }
+    | undefined;
   assert.equal(row?.state, 'delivered', 'the pre-existing run survived the upgrade');
   assert.equal(row?.cost_usd, 0, 'a row from before the column reads as a free run, not null');
   assert.equal(row?.tokens_used, 0);
+  // T125's column is NULLABLE, not `NOT NULL DEFAULT ''`. `null` means "this row predates
+  // the column" and the readers fall back; `''` would be a base ref, and a real one.
+  assert.equal(row?.base_ref, null, 'a row from before migration 003 has no recorded fork point');
 });

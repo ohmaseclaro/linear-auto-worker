@@ -208,6 +208,38 @@ describe('prepareWorktree', () => {
     const addCall = calls.find((c) => c.args.includes('add'));
     assert.equal(addCall?.args[addCall.args.length - 1], 'main');
   });
+
+  /**
+   * T125's third disagreement. The two cases above prove `worktree add` gets the right
+   * ref; they cannot see that the ref was then DISCARDED. `prepareWorktree` returned only
+   * `{ branch, path }`, so `deliver.ts` computed its diff range from the bare config
+   * string and measured against a local base that T112 measured sitting 18 commits behind
+   * its own origin. The returned value is the same variable the checkout used — not a
+   * re-derivation, which is what the two-lookup defect was in the first place.
+   */
+  test('the ref the checkout used is RETURNED, so the fork point and the diff range agree', async () => {
+    const { run, calls } = makeRunner((call) => {
+      if (call.args.includes('show-ref')) {
+        const ref = call.args[call.args.length - 1] ?? '';
+        return ref.startsWith('refs/remotes/') ? { exitCode: 0 } : { exitCode: 1 };
+      }
+      return { exitCode: 0 };
+    });
+
+    const result = await prepareWorktree({ ...BASE_INPUT, runCommand: run, branchName: 'ENG-1' });
+
+    const addCall = calls.find((c) => c.args.includes('add'));
+    assert.equal(result.base, 'refs/remotes/origin/main');
+    assert.equal(result.base, addCall?.args[addCall.args.length - 1], 'the SAME string, not a second answer');
+  });
+
+  test('the returned base is the bare fallback when no remote-tracking ref exists', async () => {
+    const { run } = makeRunner((call) => (call.args.includes('show-ref') ? { exitCode: 1 } : { exitCode: 0 }));
+
+    const result = await prepareWorktree({ ...BASE_INPUT, runCommand: run, branchName: 'ENG-1' });
+
+    assert.equal(result.base, 'main');
+  });
 });
 
 describe('finishWorktree', () => {

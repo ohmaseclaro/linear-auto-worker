@@ -369,3 +369,36 @@ test('the ngrok token is required only when the instance opens a tunnel', () => 
   );
   assert.throws(() => loadSecrets(root), /NGROK_AUTHTOKEN/, 'required by default');
 });
+
+// ── T125: a repo row with no `baseBranch` ────────────────────────────────────
+//
+// `types.ts` claimed "Required on the row; the loader fills it from
+// `Config.defaults.baseBranch`" while the schema required it, so the sentence was false
+// and every repo row had to carry a branch name the operator never chose.
+
+test('a repo row with no baseBranch loads, filled from defaults.baseBranch', () => {
+  const root = makeTempRoot();
+  fs.writeFileSync(
+    path.join(root, 'config.json'),
+    JSON.stringify({
+      ...validTop,
+      defaults: { ...validDefaults, baseBranch: 'trunk' },
+      mappings: {
+        'proj-1': {
+          linearProjectId: 'proj-1',
+          linearTeamId: null,
+          // No `baseBranch` on this one; the next carries its own.
+          repos: [
+            { repoDir: '/repos/api', repoSlug: 'org/api', enabled: true },
+            { repoDir: '/repos/legacy', repoSlug: 'org/legacy', baseBranch: 'master', enabled: true },
+          ],
+        },
+      },
+    }),
+  );
+
+  const loaded = loadConfig(root);
+  const repos = loaded.mappings['proj-1']!.repos;
+  assert.equal(repos[0]!.baseBranch, 'trunk', 'the omitted row takes the instance default');
+  assert.equal(repos[1]!.baseBranch, 'master', 'an explicit override is left alone');
+});

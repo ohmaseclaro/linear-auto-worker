@@ -117,6 +117,23 @@ export interface RepoRun extends RunBase {
    */
   costUsd?: number;
   tokensUsed?: number;
+  /**
+   * T125. The ref this run's branch was ACTUALLY cut from — `refs/remotes/<remote>/<base>`
+   * when it existed, the bare base name when it did not (`worktree.ts`'s T112 fallback).
+   *
+   * A column and not a re-derivation, and that is the whole point. Three readers need the
+   * fork point after the worktree is gone from memory: `deliver.ts`'s `<base>..HEAD` diff
+   * range, `gatherEvidence`'s commit count, and the recovery path's `worktreeFromStore`.
+   * Two of them used to compute it themselves and got different answers — a clone 18
+   * commits behind its own origin/main reported those 18 upstream commits as the run's own
+   * work. The function that CHOSE the ref returns it and the driver writes it here, so
+   * every reader gets the same string by construction rather than by agreeing.
+   *
+   * Optional for the same reason `costUsd` is: rows inserted before migration 003 read as
+   * absent, and the readers fall back to `repoMappingFor(...).baseBranch` — the pre-T125
+   * answer, which is no worse than what those rows already lived with.
+   */
+  baseRef?: string | null;
 }
 
 /**
@@ -227,7 +244,14 @@ export interface MappingToggles {
 export interface RepoMapping {
   repoDir: string; // absolute
   repoSlug: string; // "org/name", the form `gh` wants
-  /** Required on the row; the loader fills it from `Config.defaults.baseBranch`. */
+  /**
+   * Required on the row; the loader fills it from `Config.defaults.baseBranch`.
+   *
+   * That sentence used to be false — `infra/config.ts` REQUIRED the field, so no loader
+   * filled anything (T125). It is true now: the schema takes it optional and `loadConfig`
+   * fills it. A plain branch name, always: `gh pr create --base` names a GitHub branch,
+   * not a local ref. The ref a run was actually cut from is `RepoRun.baseRef`.
+   */
   baseBranch: string;
   enabled: boolean;
 }
@@ -497,4 +521,30 @@ export function questionShortCode(body: string): string | null {
   if (at < 0) return null;
   const code = body.slice(at + QUESTION_MARKER_PREFIX.length, at + QUESTION_MARKER_PREFIX.length + 8);
   return /^[0-9a-f]{8}$/.test(code) ? code : null;
+}
+
+/**
+ * T125 — the ONE answer to "what is this repository's base branch".
+ *
+ * Three callers used to answer it three ways: `run-engine.repoOf` and `run-engine.worktreeOf`
+ * hardcoded `config.defaults.baseBranch`, discarding the mapped repo's own value, while
+ * `adapters.gatherEvidence` read that value. A repository whose default branch is `master`
+ * was therefore branched from `main`, pushed with `--base main`, and had its commit count
+ * measured against `master`. Three implementations of one rule is this repo's most repeated
+ * defect (T72/T92/T96/T99/T101/T119); this is the one implementation.
+ *
+ * Callers: `run-engine.repoOf`, `run-engine.worktreeOf`, `adapters.gatherEvidence`. Each
+ * falls back to `config.defaults.baseBranch` for a slug the config no longer names —
+ * a mapping edited mid-run must not strand a live run.
+ *
+ * It lives here because `types.ts` imports nothing, so every layer can reach it without
+ * one of them growing a private copy.
+ */
+export function repoMappingFor(config: Config, repoSlug: string | null): RepoMapping | undefined {
+  if (repoSlug === null) return undefined;
+  for (const mapping of Object.values(config.mappings)) {
+    const repo = mapping.repos.find((r) => r.repoSlug === repoSlug);
+    if (repo) return repo;
+  }
+  return undefined;
 }

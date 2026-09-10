@@ -87,3 +87,36 @@ test('a repo with no origin at all still gets a worktree — the fallback is req
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+/**
+ * T125, through the same real-git instrument. The two cases above prove the worktree
+ * lands on the remote tip; neither can see whether the ref that put it there survives to
+ * the diff range. `Worktree.baseBranch` is what `deliver.ts` computes `<base>..HEAD` from
+ * and what `gatherEvidence` counts commits against, so this is the assertion that catches
+ * the fork point and the diff range being two different strings.
+ */
+test('the ref actually branched from reaches Worktree.baseBranch, not the bare config name', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'law-wt-baseref-'));
+  try {
+    const upstream = await makeScratchRepo(dir, 'main');
+    const clone = join(dir, 'clone');
+    await defaultRunCommand('git', ['clone', '--quiet', upstream, clone]);
+    await git(upstream, 'commit', '--quiet', '--allow-empty', '-m', 'ahead of the clone');
+    const upstreamTip = await headOf(upstream);
+
+    const worktree = await managerFor(dir).create('run-3' as RunId, mappingFor(clone), 'ENG-3');
+
+    assert.equal(worktree.baseBranch, 'refs/remotes/origin/main');
+    // And it is a ref git can actually resolve FROM INSIDE the worktree, to the commit the
+    // branch was cut at — which is what makes `<base>..HEAD` mean "this run's commits".
+    assert.equal((await git(worktree.path, 'rev-parse', worktree.baseBranch)).stdout.trim(), upstreamTip);
+    // The bare local name resolves to the STALE commit. That is the wrong answer, on disk,
+    // measured — 1 phantom commit in the range where the run committed nothing.
+    const stale = (await git(worktree.path, 'rev-parse', 'main')).stdout.trim();
+    assert.notEqual(stale, upstreamTip);
+    const phantom = await git(worktree.path, 'log', '--oneline', 'main..HEAD');
+    assert.equal(phantom.stdout.trim().split('\n').filter((l) => l.length > 0).length, 1);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

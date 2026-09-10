@@ -14,6 +14,15 @@ import type { RunCommand, ExecutionVerdict } from './execute-run.js';
 export interface PreparedWorktree {
   branch: string;
   path: string;
+  /**
+   * T125. The ref the checkout ACTUALLY used — `refs/remotes/<remote>/<base>` when it
+   * existed, the bare `base` when it did not. It is the same variable `worktree add`
+   * received, not a second derivation, so the fork point and every later diff range are
+   * one string by construction. This function used to discard it, which is how
+   * `deliver.ts` came to measure `<bare-local-name>..HEAD` against a base that T112
+   * measured sitting 18 commits behind its own origin.
+   */
+  base: string;
 }
 
 export interface PrepareWorktreeInput {
@@ -161,7 +170,8 @@ export async function prepareWorktree(o: PrepareWorktreeInput): Promise<Prepared
       );
     }
 
-    return { branch, path: worktreePath };
+    // `base`, not `o.base`: the RESOLVED ref, so no reader has to redo the probe above.
+    return { branch, path: worktreePath, base };
   });
 }
 

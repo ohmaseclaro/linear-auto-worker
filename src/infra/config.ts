@@ -38,12 +38,24 @@ export const TogglesSchema = z.object({
   questionTimeoutMs: z.number().int().positive(),
 }) satisfies z.ZodType<MappingToggles>;
 
+/**
+ * T125. `baseBranch` is optional ON THE WIRE and required in the domain: `loadConfig`
+ * fills an absent one from `Config.defaults.baseBranch`, which is what makes
+ * `types.ts`'s "the loader fills it from `Config.defaults.baseBranch`" true. It required
+ * the field before, so that sentence was false and every repo row had to carry a branch
+ * name the operator never chose.
+ *
+ * The `satisfies` clause spells the WIRE shape rather than `RepoMapping` — the fill
+ * happens after parse, so declaring the parsed type as `RepoMapping` would be a lie in
+ * exactly the place this clause exists to prevent one. `fillBaseBranches` below is typed
+ * to return the domain shape, so `tsc` still gates the seam.
+ */
 const RepoMappingSchema = z.object({
   repoDir: z.string().min(1),
   repoSlug: z.string().min(1),
-  baseBranch: z.string().min(1),
+  baseBranch: z.string().min(1).optional(),
   enabled: z.boolean(),
-}) satisfies z.ZodType<RepoMapping>;
+}) satisfies z.ZodType<Omit<RepoMapping, 'baseBranch'> & { baseBranch?: string }>;
 
 /**
  * One `pickupStates` entry: a workflow-state id, or a workflow-state TYPE. Never a name.
@@ -117,6 +129,30 @@ export function defaultRoot(): string {
   return path.join(os.homedir(), '.linear-auto-worker');
 }
 
+/**
+ * T125's loader half: every repo row leaves here with a `baseBranch`.
+ *
+ * Done after parse rather than in a zod `.transform()` because the transform would make
+ * `ConfigSchema` a pipe, and `config-writer.ts` and `config.test.ts` both `safeParse` the
+ * schema directly to validate what the wizard is about to write — they want the wire
+ * shape. This is the one place the wire shape becomes the domain shape.
+ */
+function fillBaseBranches(parsed: z.infer<typeof ConfigSchema>): Config {
+  const fallback = parsed.defaults.baseBranch;
+  return {
+    ...parsed,
+    mappings: Object.fromEntries(
+      Object.entries(parsed.mappings).map(([key, mapping]) => [
+        key,
+        {
+          ...mapping,
+          repos: mapping.repos.map((repo) => ({ ...repo, baseBranch: repo.baseBranch ?? fallback })),
+        },
+      ]),
+    ),
+  };
+}
+
 export function loadConfig(root: string = defaultRoot()): Config {
   const configPath = path.join(root, 'config.json');
   const raw = JSON.parse(fs.readFileSync(configPath, 'utf8'));
@@ -124,7 +160,7 @@ export function loadConfig(root: string = defaultRoot()): Config {
   if (!result.success) {
     throw new ConfigError(`Invalid config at ${configPath}:\n${z.prettifyError(result.error)}`);
   }
-  return result.data;
+  return fillBaseBranches(result.data);
 }
 
 export interface ResolvedMapping extends MappingToggles {

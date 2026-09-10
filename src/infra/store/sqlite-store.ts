@@ -47,6 +47,12 @@ export interface RunRow {
    */
   costUsd?: number;
   tokensUsed?: number;
+  /**
+   * T125. The ref the run's branch was cut from — `refs/remotes/origin/main`, or the bare
+   * base name when no remote-tracking ref existed. Nullable (migration 003), so `null`
+   * genuinely means "not recorded" and the readers can fall back rather than guess.
+   */
+  baseRef?: string | null;
   createdAt: number | string;
   updatedAt: number | string;
 }

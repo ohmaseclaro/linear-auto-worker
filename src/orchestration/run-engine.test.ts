@@ -56,7 +56,11 @@ function issue(n: number) {
 
 // Shaped against the ADDENDUM; cast because the exact field set lands with
 // Phase 1 and these tests must not pin it.
-function configWith(concurrency: number, pickupStates?: string[]): Config {
+function configWith(
+  concurrency: number,
+  pickupStates?: string[],
+  repos?: Array<{ repoDir: string; repoSlug: string; baseBranch?: string; enabled: boolean }>,
+): Config {
   return {
     operatorUserId: 'operator-1',
     worktreeRoot: '/home/op/.linear-auto-worker/worktrees',
@@ -75,7 +79,7 @@ function configWith(concurrency: number, pickupStates?: string[]): Config {
     },
     mappings: {
       'proj-1': {
-        repos: [{ repoDir: '/repo/api', repoSlug: 'org/api', baseBranch: 'main', enabled: true }],
+        repos: repos ?? [{ repoDir: '/repo/api', repoSlug: 'org/api', baseBranch: 'main', enabled: true }],
         ...(pickupStates ? { pickupStates } : {}),
       },
     },
@@ -167,16 +171,27 @@ function spyWorktrees(order: string[], opts: { requireAck?: boolean } = {}) {
   const requireAck = opts.requireAck ?? true;
   const removed: string[] = [];
   const created: string[] = [];
+  /** Every `create` call in full — the argument the base-ref cases (T125) assert on. */
+  const calls: Array<{ runId: string; repo: { repoDir: string; baseBranch: string }; branch: string }> = [];
 
   const wt = {
-    async create(runId: string, repo: { repoDir: string }, branch: string) {
+    async create(runId: string, repo: { repoDir: string; baseBranch: string }, branch: string) {
       const missing = requireAck ? ACK_SEQUENCE.filter((s) => !order.includes(s)) : [];
       if (missing.length > 0) {
         throw new Error(`worktree reached before the acknowledgement sequence: missing ${missing.join(', ')}`);
       }
       order.push('worktree.create');
       created.push(runId);
-      return { runId, repoDir: repo.repoDir, path: `/wt/${runId}`, branch, baseBranch: 'main' };
+      calls.push({ runId, repo, branch });
+      // The resolved remote-tracking ref, which is what the real adapter returns since
+      // T125 — not the bare name it was handed.
+      return {
+        runId,
+        repoDir: repo.repoDir,
+        path: `/wt/${runId}`,
+        branch,
+        baseBranch: `refs/remotes/origin/${repo.baseBranch}`,
+      };
     },
     async remove(runId: string) {
       removed.push(runId);
@@ -189,7 +204,7 @@ function spyWorktrees(order: string[], opts: { requireAck?: boolean } = {}) {
     },
   };
 
-  return { worktrees: wt as unknown as WorktreeManager, removed, created };
+  return { worktrees: wt as unknown as WorktreeManager, removed, created, calls };
 }
 
 function harness(opts: {
@@ -207,8 +222,10 @@ function harness(opts: {
    * keep in step, and the wire under test is "the engine got the wrapped client".
    */
   quiet?: { postLinearComments: boolean; updateLinearIssue: boolean };
+  /** Override the mapping's repo list — the multi-repo and base-ref cases need it. */
+  repos?: Array<{ repoDir: string; repoSlug: string; baseBranch?: string; enabled: boolean }>;
 }) {
-  const config = configWith(opts.concurrency ?? 3, opts.pickupStates);
+  const config = configWith(opts.concurrency ?? 3, opts.pickupStates, opts.repos);
   const store = new InMemoryStore();
   const scheduler = createScheduler({ config, log: silent });
   const agent = new FakeAgentRunner(opts.script);
@@ -862,4 +879,60 @@ test('a dropped pickup is LOGGED with both state fields and the configured list'
   assert.equal(drop.fields.stateType, 'unstarted');
   assert.equal(drop.fields.stateId, 'state-todo');
   assert.deepEqual(drop.fields.pickupStates, ['started']);
+});
+
+// ---------------------------------------------------------------------------
+// T125 — one run, ONE answer to "which branch did this fork from"
+// ---------------------------------------------------------------------------
+
+/**
+ * `repoOf` and `worktreeOf` both hardcoded `config.defaults.baseBranch`, discarding the
+ * mapped repo's own `baseBranch` — which the wizard fills from the repository's REAL
+ * default branch. So a repo whose default branch is `master` was branched from `main`,
+ * pushed with `--base main`, and had its commit count measured against `master`.
+ */
+test('T125: a repo whose own baseBranch differs from the default is branched from ITS OWN', async () => {
+  const { engine, spy } = harness({
+    script: [COMPLETE],
+    issues: [issue(1)],
+    repos: [{ repoDir: '/repo/legacy', repoSlug: 'org/legacy', baseBranch: 'master', enabled: true }],
+  });
+
+  await engine.handle({ kind: 'run.requested', trigger: 'assignment', issueId: 'issue-1' });
+  await engine.settle();
+
+  assert.equal(spy.calls.length, 1);
+  assert.equal(spy.calls[0]!.repo.baseBranch, 'master', 'the mapping is the answer, not defaults');
+});
+
+/**
+ * The other half, and the one BLOCK 1 is about: the resolved ref has to leave the worktree
+ * adapter and reach BOTH readers. The row is the channel — `gatherEvidence` counts commits
+ * from it and `deliver.ts` builds `<base>..HEAD` from it, so one string, one range.
+ */
+test('T125: the RESOLVED ref is recorded on the run row and is what delivery measures against', async () => {
+  const { engine, store, deliverer } = harness({
+    script: [COMPLETE],
+    issues: [issue(1)],
+    repos: [{ repoDir: '/repo/legacy', repoSlug: 'org/legacy', baseBranch: 'master', enabled: true }],
+  });
+
+  await engine.handle({ kind: 'run.requested', trigger: 'assignment', issueId: 'issue-1' });
+  await engine.settle();
+
+  const [run] = store.listByState('delivered');
+  assert.ok(run && run.kind === 'repo');
+  assert.equal(
+    (run as unknown as { baseRef?: string }).baseRef,
+    'refs/remotes/origin/master',
+    'the ref the checkout actually used, persisted — not re-derived later from config',
+  );
+  assert.equal(deliverer.calls.length, 1);
+  assert.equal(
+    deliverer.calls[0]!.wt.baseBranch,
+    'refs/remotes/origin/master',
+    'the diff range and the fork point are the same string',
+  );
+  // And `gh pr create --base` still names a GitHub BRANCH, never a local ref.
+  assert.equal(deliverer.calls[0]!.repo.baseBranch, 'master');
 });

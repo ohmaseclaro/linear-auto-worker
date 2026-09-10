@@ -16,7 +16,7 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 
 import { parseAgentResult } from '../domain/agent-result.js';
-import { daemonDirOf, resolveToggles } from '../domain/types.js';
+import { daemonDirOf, repoMappingFor, resolveToggles } from '../domain/types.js';
 import { AGENT_RESULT_JSON_SCHEMA, buildClaudeArgs, buildResumeArgs } from '../execution/agent-args.js';
 import { buildChildEnv } from '../execution/agent-env.js';
 import { deliver as deliverPullRequest } from '../execution/deliver.js';
@@ -100,12 +100,17 @@ export function createWorktreeManager(deps: ExecutionAdapterDeps): WorktreeManag
       // verbatim when free and suffixed when taken, precisely so a retry cannot reset a
       // previous attempt's branch. The caller must record the RESOLVED name or the push
       // later goes to a ref that does not exist.
+      // T125: `prepared.base`, not `repo.baseBranch`. This field is what `deliver.ts`
+      // builds `<base>..HEAD` from, so it must be the ref the branch was cut from and not
+      // the bare config name — the local `refs/heads/<base>` can sit arbitrarily far
+      // behind its own origin, and it does. `RepoMapping.baseBranch` stays plain, because
+      // `gh pr create --base` names a GitHub branch (see `createDeliverer` below).
       const worktree: Worktree = {
         runId,
         repoDir: repo.repoDir,
         path: prepared.path,
         branch: prepared.branch,
-        baseBranch: repo.baseBranch,
+        baseBranch: prepared.base,
       };
       byRun.set(runId, worktree);
       return worktree;
@@ -177,7 +182,16 @@ function worktreeFromStore(deps: ExecutionAdapterDeps, runId: RunId): Worktree |
     repoDir: run.repoDir,
     path: run.worktreePath,
     branch: run.branch,
-    baseBranch: togglesFor(deps.config, deps.index, run.repoSlug).baseBranch,
+    // T125. The RECORDED ref first: this is the recovery shape, where the worktree that
+    // knew the answer is long gone. `togglesFor(...).baseBranch` was a THIRD answer to the
+    // fork-point question — resolved from the toggles rather than from the ref the
+    // checkout used — reachable only through `exists()`/`gc()`, which read `.path` alone.
+    // Fixed here anyway rather than reported: leaving a known-wrong third answer in place
+    // is how the next reader reaches for it.
+    baseBranch:
+      run.baseRef ??
+      repoMappingFor(deps.config, run.repoSlug)?.baseBranch ??
+      deps.config.defaults.baseBranch,
   };
 }
 
@@ -233,11 +247,17 @@ async function gatherEvidence(
   deps: AgentRunnerDeps,
   worktreePath: string,
   repoSlug: string | null,
+  /**
+   * T125. The ref the run's branch was cut from, off the run row. Passed in rather than
+   * looked up here: this function had its OWN copy of the mapping lookup, which is how it
+   * came to measure a different range than `deliver.ts`. Absent only for a row that
+   * predates migration 003, which falls back below.
+   */
+  baseRef?: string | null,
 ): Promise<WorktreeEvidence | undefined> {
   const runCommand = deps.runCommand ?? defaultRunCommand;
-  const mappingId = repoSlug === null ? undefined : deps.index.get(repoSlug);
-  const mapping = mappingId ? deps.config.mappings[mappingId] : undefined;
-  const base = mapping?.repos.find((r) => r.repoSlug === repoSlug)?.baseBranch;
+  // One lookup, shared with `run-engine.repoOf`/`worktreeOf` — see `repoMappingFor`.
+  const base = baseRef ?? repoMappingFor(deps.config, repoSlug)?.baseBranch;
   if (!base) return undefined;
   try {
     const committed = await runCommand('git', [
@@ -403,6 +423,9 @@ export function createAgentRunner(deps: AgentRunnerDeps): AgentRunner {
 
       const run = deps.store.getRun(req.runId);
       const repoSlug = run?.kind === 'repo' ? run.repoSlug : null;
+      // T125: the same string `deliver.ts` measures against, read off the row the driver
+      // wrote it to. Two answers to "which ref did this fork from" is what shipped.
+      const baseRef = run?.kind === 'repo' ? run.baseRef : undefined;
       const toggles = togglesFor(deps.config, deps.index, repoSlug);
       // What is LEFT of the run's budget, not the configured total (see `ClaudeArgsInput`).
       // `run.costUsd` is what gap D6 records; before D6 there was no way to compute this at
@@ -427,7 +450,7 @@ export function createAgentRunner(deps: AgentRunnerDeps): AgentRunner {
         // `toAgentResult`: no session ran, and a fake event with no `structured_output`
         // parses as "the agent returned no usable result object" — which is a different,
         // and wrong, diagnosis. `cutShort` is the same decision the deadline reap makes.
-        const evidence = await gatherEvidence(deps, req.cwd, repoSlug);
+        const evidence = await gatherEvidence(deps, req.cwd, repoSlug, baseRef);
         return cutShort(
           `the run reached its $${budget} budget`,
           `This run had spent $${spent.toFixed(4)} of its $${budget} budget, so no further ` +
@@ -529,7 +552,7 @@ export function createAgentRunner(deps: AgentRunnerDeps): AgentRunner {
         // judge by evidence in the worktree, never by exit code or self-report). The
         // evidence-based classifier existed in `verdict.ts` from Phase 4 and nothing on the
         // live path called it. Gather the worktree facts and let it decide.
-        const evidence = await gatherEvidence(deps, req.cwd, repoSlug);
+        const evidence = await gatherEvidence(deps, req.cwd, repoSlug, baseRef);
         return toAgentResult(outcome, evidence);
       } finally {
         // In a `finally` so a throwing run still flushes what it managed to say.

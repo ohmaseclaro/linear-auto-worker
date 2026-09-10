@@ -15,7 +15,7 @@ import { IllegalTransitionError } from '../domain/errors.js';
 // cannot tell the bot's own comments from a human's and the bot answers itself.
 import { BOT_COMMENT_MARKER } from '../domain/index.js';
 import type { RepoRun, Run, RunId, RunState } from '../domain/types.js';
-import { daemonDirOf } from '../domain/types.js';
+import { daemonDirOf, repoMappingFor } from '../domain/types.js';
 import { runLogPath } from '../execution/run-log.js';
 import type {
   AgentResult,
@@ -723,12 +723,19 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
    * The repo this run owns. Recorded on the run row at creation, so recovering
    * it never has to re-resolve config -- a mapping edited mid-run cannot move
    * a live run to a different repository.
+   *
+   * T125: `baseBranch` comes from `repoMappingFor` — the ONE lookup — and not from
+   * `config.defaults.baseBranch`. This function and `worktreeOf` below both hardcoded the
+   * default, discarding the mapped repository's own value, while `adapters.gatherEvidence`
+   * read that value. So a repo whose default branch is `master` was branched from `main`
+   * and had its commits counted against `master`. The fallback is for a slug the config no
+   * longer names: a mapping edited mid-run must not strand a live run.
    */
   function repoOf(run: RepoRun) {
     return {
       repoDir: run.repoDir,
       repoSlug: run.repoSlug,
-      baseBranch: config.defaults.baseBranch,
+      baseBranch: repoMappingFor(config, run.repoSlug)?.baseBranch ?? config.defaults.baseBranch,
       enabled: true,
     };
   }
@@ -739,7 +746,18 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
       repoDir: run.repoDir,
       path: run.worktreePath!,
       branch: run.branch,
-      baseBranch: config.defaults.baseBranch,
+      // T125, and this one is the live bug rather than the latent one. `baseBranch` here is
+      // the LEFT SIDE OF THE DIFF RANGE `deliver.ts` computes, so it must be the ref the
+      // branch was actually cut from — `run.baseRef`, written by the driver from the value
+      // `prepareWorktree` returned. Re-deriving it from config gives the bare local name,
+      // which T112 measured sitting 18 commits behind its own origin: the pull request's
+      // diff, its file list and the secret scan's input all widen to include upstream
+      // commits the run never made. The `??` arm is only for a row that predates
+      // migration 003.
+      baseBranch:
+        run.baseRef ??
+        repoMappingFor(config, run.repoSlug)?.baseBranch ??
+        config.defaults.baseBranch,
     };
   }
 
@@ -850,7 +868,16 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
       // on exactly the retries that matter. Recording only the path leaves the run row
       // naming a ref that was never created, and `worktreeOf()` then hands the deliverer
       // that dead name at push time.
-      store.updateRun(runId, { branch: wt.branch, worktreePath: wt.path, updatedAt: now() });
+      // T125: `baseRef` rides along with the resolved branch and path, for the same
+      // reason and at the same moment. It is the ref `prepareWorktree` actually checked
+      // out from, and the row is how it reaches `deliver.ts`'s diff range and
+      // `gatherEvidence`'s commit count — two readers, one string, no second derivation.
+      store.updateRun(runId, {
+        branch: wt.branch,
+        worktreePath: wt.path,
+        baseRef: wt.baseBranch,
+        updatedAt: now(),
+      });
       checkpoint(runId);
       const prepared = await transition(runId, 'running', wt.path);
       const result = await agent.run(
