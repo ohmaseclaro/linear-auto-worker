@@ -13,10 +13,14 @@ import assert from 'node:assert/strict';
 
 import {
   ALLOWED_TOOLS,
+  DISCOVERY_MAX_TURNS,
+  DISCOVERY_TIMEOUT_MS,
+  INPUT_FORMAT,
   OUTPUT_FORMAT,
   PERMISSION_MODE,
   PERMISSION_PROMPTS,
   buildClaudeArgs,
+  buildDiscoveryArgs,
   buildResumeArgs,
   userMessageLine,
   type ClaudeArgsInput,
@@ -283,4 +287,41 @@ test('ALLOWED_TOOLS holds exactly the six names a real GSD run was measured to n
   // enough for a GSD run. Only `scripts/probe-gsd-allowlist.ts`, which spawns a real
   // `claude`, can say that, and it did on 2026-09-08 against CLI 2.1.263.
   assert.deepEqual(ALLOWED_TOOLS, ['Write', 'Edit', 'Bash', 'Read', 'Skill', 'Task']);
+});
+
+// ── the discovery invocation ────────────────────────────────────────────────
+
+test('the discovery session grants NONE of Write, Edit or Bash', () => {
+  const args = buildDiscoveryArgs({ sessionId: 's', schema: {}, maxTurns: 3 });
+
+  // Asserted on ABSENCE, explicitly and by name. A read-only classification session that
+  // quietly has a shell is the whole risk here: its prompt carries attacker-authorable
+  // ticket text, and it needs no tool at all to answer from that text.
+  for (const tool of ['Write', 'Edit', 'Bash', 'Task', 'Skill']) {
+    assert.equal(args.includes(tool), false, `${tool} must not appear anywhere in the discovery argv`);
+  }
+  // And not through the flag either — an empty allowlist would leave a bare `--allowedTools`
+  // that swallows whatever flag follows it.
+  assert.equal(args.includes('--allowedTools'), false);
+});
+
+test('the discovery session keeps every non-negotiable of a normal one', () => {
+  const args = buildDiscoveryArgs({ sessionId: 's-1', schema: { type: 'object' }, maxTurns: 3 });
+
+  assert.equal(args.includes('--verbose'), true, 'stream-json without it is a hard startup error (T3)');
+  assert.equal(after(args, '--output-format'), OUTPUT_FORMAT);
+  assert.equal(after(args, '--input-format'), INPUT_FORMAT);
+  assert.equal(after(args, '--session-id'), 's-1');
+  assert.equal(args.at(-1), '-p', 'bare, and last (T113/M3)');
+  assert.equal(args.includes('--bare'), false, 'D-02/T2 — never, on any path');
+  assert.equal(after(args, '--json-schema'), JSON.stringify({ type: 'object' }));
+});
+
+test('the discovery deadline is its own, and is NOT the work session’s maxRunMs', () => {
+  // `defaults.maxRunMs` is the WORK session's budget — 45 minutes on a default install. A
+  // discovery session that hangs for that long burns the ticket's whole window before the
+  // real session starts, and a large ticket body is how an attacker induces exactly that.
+  assert.ok(DISCOVERY_TIMEOUT_MS > 0);
+  assert.ok(DISCOVERY_TIMEOUT_MS <= 3 * 60_000, 'a classification that takes minutes has failed');
+  assert.ok(DISCOVERY_MAX_TURNS <= 5, 'it reads a ticket and answers; it does not iterate');
 });

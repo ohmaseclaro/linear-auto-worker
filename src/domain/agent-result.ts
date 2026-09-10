@@ -69,13 +69,80 @@ export const AgentResultSchema = {
       description: 'The reasonable default you will proceed with if nobody answers.',
     },
     // present iff status === "complete"
-    changedRepos: { type: 'array', items: { type: 'string' } },
+    //
+    // T126. `changedRepos: { type: 'array', items: { type: 'string' } }` was here, under a
+    // comment saying "present iff status === 'complete'". The `complete` arm of
+    // `parseAgentResult` read three other fields and `AgentResult` had no such member, so
+    // the agent could return it and it was discarded.
+    //
+    // Deleted in the same commit as the feature it would have been misused for. It is the
+    // obvious lever for "one pull request per repository the agent touched", and taking it
+    // makes delivery trust the agent's own account of what it changed — the single thing
+    // `verdict.ts` exists to refuse, in a codebase where `claude -p` has been measured
+    // exiting 0 having been denied every edit (T1/T27). `deliver.ts` already runs
+    // `git diff --name-only <base>..HEAD` as its first act, so the honest answer cost one
+    // early return and no new call. Do not reintroduce it.
     prTitle: { type: 'string' },
     prBody: { type: 'string' },
     // present iff status === "failed"
     failureReason: { type: 'string' },
   },
 } as const;
+
+/**
+ * The repo-discovery reply. Its own schema, deliberately separate from `AgentResultSchema`:
+ * a discovery session is a different turn with a different contract, and one schema serving
+ * two turns is how a field meant for one becomes reachable from the other.
+ *
+ * `additionalProperties: false` for the same reason its sibling has it — a field this
+ * document does not list is a field the agent physically cannot return.
+ */
+export const RepoDiscoverySchema = {
+  type: 'object',
+  required: ['repos'],
+  additionalProperties: false,
+  properties: {
+    repos: {
+      type: 'array',
+      items: { type: 'string' },
+      description: 'The repositories this ticket needs changes in, named ONLY from the list you were given.',
+    },
+  },
+} as const;
+
+/**
+ * Narrow a discovery reply, or throw.
+ *
+ * This output decides which repositories the real session may WRITE to, and it comes from a
+ * session that read attacker-authorable ticket text — so nothing is inferred and a
+ * partly-valid answer is a rejection, not a partial acceptance. It is NOT the privilege
+ * boundary: the operator's own mapping is (see `run-engine`'s intersection). This is only
+ * the parse.
+ *
+ * An EMPTY list is valid and parses. "The classifier named nothing" is the caller's
+ * fallback case, not a malformed reply, and conflating the two would route a legitimate
+ * answer through the error path.
+ */
+export function parseRepoDiscovery(raw: unknown): string[] {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new AgentResultParseError(`repo discovery result is not an object: ${typeof raw}`);
+  }
+  const repos = (raw as Record<string, unknown>).repos;
+  if (repos === undefined) {
+    throw new AgentResultParseError('repo discovery result is missing "repos"');
+  }
+  if (!Array.isArray(repos)) {
+    throw new AgentResultParseError(`repo discovery "repos" is not an array: ${typeof repos}`);
+  }
+  for (const entry of repos) {
+    if (typeof entry !== 'string' || entry.length === 0) {
+      throw new AgentResultParseError(
+        `repo discovery "repos" holds a non-string member: ${JSON.stringify(entry)}`,
+      );
+    }
+  }
+  return repos as string[];
+}
 
 function str(o: Record<string, unknown>, key: string, status: string): string {
   const v = o[key];

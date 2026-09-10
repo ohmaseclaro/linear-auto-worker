@@ -12,13 +12,23 @@
  * binary reachable, and a constructor that probed for either would turn it red. That is
  * deliberate: the smoke's whole value is that it can run everywhere, every time.
  */
+import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 
-import { parseAgentResult } from '../domain/agent-result.js';
+import { parseAgentResult, parseRepoDiscovery } from '../domain/agent-result.js';
 import { daemonDirOf, repoMappingFor, resolveToggles } from '../domain/types.js';
-import { AGENT_RESULT_JSON_SCHEMA, buildClaudeArgs, buildResumeArgs } from '../execution/agent-args.js';
+import {
+  AGENT_RESULT_JSON_SCHEMA,
+  DISCOVERY_MAX_TURNS,
+  DISCOVERY_TIMEOUT_MS,
+  REPO_DISCOVERY_JSON_SCHEMA,
+  buildClaudeArgs,
+  buildDiscoveryArgs,
+  buildResumeArgs,
+} from '../execution/agent-args.js';
 import { buildChildEnv } from '../execution/agent-env.js';
+import { buildRepoDiscoveryPrompt } from '../execution/prompt.js';
 import { deliver as deliverPullRequest } from '../execution/deliver.js';
 import { defaultRunCommand, type RunCommand } from '../execution/execute-run.js';
 import type { ProgressUpdate } from '../execution/event-router.js';
@@ -37,6 +47,7 @@ import type {
   MappingToggles,
   PrBodySource,
   PullRequest,
+  RepoDiscoveryRequest,
   RepoMapping,
   RunId,
   Store,
@@ -422,6 +433,72 @@ export function createAgentRunner(deps: AgentRunnerDeps): AgentRunner {
   return {
     onProgress(cb: (runId: RunId, line: string) => void): void {
       onProgress = cb;
+    },
+
+    /**
+     * The read-only triage session (phase one of a multi-repo ticket).
+     *
+     * It NEVER throws for a session that failed: the caller's fallback is the operator's
+     * whole mapping, and a throw here would make a flaky classifier able to kill a ticket.
+     * Every failure arm returns `undefined` and says why in the log.
+     */
+    async discoverRepos(req: RepoDiscoveryRequest): Promise<string[] | undefined> {
+      const daemonDir = daemonDirOf(deps.config);
+      // A daemon-owned SCRATCH directory: never a repository, never the operator's parent
+      // directory, and empty. The session is granted no tools, so there is nothing for it
+      // to do here — this is the second layer, so that a future widening of the allowlist
+      // does not silently hand it someone's source tree.
+      const cwd = path.join(daemonDir, 'discovery');
+      await fs.mkdir(cwd, { recursive: true });
+
+      const sessionId = randomUUID();
+      // Its own id, so it gets its own run log. A discovery that went wrong is then
+      // inspectable rather than a black box — and it cannot overwrite a real run's trace.
+      const logId = `discovery-${sessionId}`;
+      const runLog = openRunLog(daemonDir, logId);
+      try {
+        const outcome = await runAgent({
+          cwd,
+          args: buildDiscoveryArgs({
+            sessionId,
+            schema: REPO_DISCOVERY_JSON_SCHEMA,
+            maxTurns: DISCOVERY_MAX_TURNS,
+          }),
+          env: buildChildEnv(logId),
+          sessionId,
+          prompt: buildRepoDiscoveryPrompt({
+            identifier: req.identifier,
+            title: req.title,
+            description: req.description,
+            url: req.url,
+            repoSlugs: req.repoSlugs,
+          }),
+          // Its OWN deadline. `toggles.maxRunMs` is the WORK session's budget — see
+          // `DISCOVERY_TIMEOUT_MS`.
+          maxRunMs: DISCOVERY_TIMEOUT_MS,
+          log: deps.log.child({ issueId: req.issueId, sessionId, phase: 'discovery' }),
+          spawn: deps.spawn,
+          signal: new AbortController().signal,
+          onEvent: (e) => runLog.write(e),
+        });
+
+        if (outcome.timedOut || !outcome.resultEvent) {
+          deps.log.warn(
+            { issueId: req.issueId, timedOut: outcome.timedOut, exitCode: outcome.exitCode },
+            'repo discovery session produced no result',
+          );
+          return undefined;
+        }
+        return parseRepoDiscovery(outcome.resultEvent.structured_output);
+      } catch (err) {
+        deps.log.warn(
+          { issueId: req.issueId, err: String(err) },
+          'repo discovery session failed or returned garbage',
+        );
+        return undefined;
+      } finally {
+        runLog.close();
+      }
     },
 
     async run(req: AgentSpawnRequest, signal: AbortSignal): Promise<AgentResult> {

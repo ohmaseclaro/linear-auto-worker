@@ -236,6 +236,86 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
     });
   }
 
+  /**
+   * Narrow a mapping's repositories to the ones a ticket actually needs.
+   *
+   * **The operator's mapping is the privilege boundary.** It is his declaration of which
+   * repositories this bot may write to, and nothing here can add to it. The intersection
+   * below is the ENFORCEMENT of that boundary: a discovery session reads attacker-authorable
+   * ticket text, so an unvalidated name from it would be a Linear user choosing which
+   * repository the daemon writes into. It can only ever make the set SMALLER.
+   *
+   * Every arm of the fallback lands on the mapping's own list, which is why fail-open is
+   * not an escalation here: the worst case is the wasteful-but-correct shape the ticket
+   * path already ships. The alternative — refusing to run — would let a flaky classifier
+   * silently kill every ticket, which is the failure this product category is judged on.
+   *
+   * Each arm is logged distinctly. A fallback that cannot be told from a success in the log
+   * is a fallback nobody will ever notice firing.
+   */
+  async function narrowRepos(
+    issue: LinearIssue,
+    repos: readonly Config['mappings'][string]['repos'][number][],
+  ): Promise<Config['mappings'][string]['repos']> {
+    // Nothing to narrow, and no session to pay for. `planSubRuns` does not fan out below
+    // two repos anyway, so a discovery session here would buy a classification nobody
+    // could act on.
+    if (repos.length < 2) return [...repos];
+
+    const slugs = repos.map((r) => r.repoSlug);
+    let answer: string[] | undefined;
+    try {
+      answer = await agent.discoverRepos({
+        issueId: issue.id,
+        identifier: issue.identifier,
+        title: issue.title,
+        description: issue.description ?? '',
+        url: issue.url,
+        repoSlugs: slugs,
+      });
+    } catch (err) {
+      // The adapter already swallows a session that failed; this catches the rest — a
+      // crash in the adapter itself must not be able to kill a ticket either.
+      log.warn(
+        { issueId: issue.id, err: String(err) },
+        'repo discovery threw; using every mapped repository',
+      );
+      return [...repos];
+    }
+
+    if (answer === undefined) {
+      log.warn(
+        { issueId: issue.id, repos: slugs },
+        'repo discovery could not answer; using every mapped repository',
+      );
+      return [...repos];
+    }
+
+    // THE PRIVILEGE BOUNDARY'S ENFORCEMENT. `slugs` is the operator's own list; anything
+    // the session named that is not on it is discarded, by name, loudly.
+    const mapped = new Set(slugs);
+    const invented = answer.filter((name) => !mapped.has(name));
+    if (invented.length > 0) {
+      log.warn(
+        { issueId: issue.id, invented, mapped: slugs },
+        'repo discovery named repositories that are not in this mapping; dropping them',
+      );
+    }
+    const kept = repos.filter((r) => answer.includes(r.repoSlug));
+    if (kept.length === 0) {
+      log.warn(
+        { issueId: issue.id, answered: answer, mapped: slugs },
+        'repo discovery narrowed to nothing; using every mapped repository',
+      );
+      return [...repos];
+    }
+    log.info(
+      { issueId: issue.id, kept: kept.map((r) => r.repoSlug), mapped: slugs },
+      'repo discovery narrowed the ticket',
+    );
+    return kept;
+  }
+
   /** D-07: project-keyed with a team-level fallback, so a project-less issue
    *  is not silently dropped. */
   function resolveMapping(issue: LinearIssue) {
@@ -1316,11 +1396,17 @@ export function createRunEngine(deps: RunEngineDeps): RunEngine {
             );
             return;
           }
+          // Phase one of a multi-repo ticket: a cheap read-only session reads the ticket
+          // and names which of the mapped repositories it needs. HERE, after the pickup
+          // filter and before any worktree exists, and only for a mapping that has
+          // something to narrow.
+          const narrowed = await narrowRepos(issue, mapping.repos);
+
           // D-12 / DELV-06. Fan-out happens HERE, at the engine, and never
           // inside an agent session: one child run per mapped repo, each with
           // its own worktree, branch, session and state. One repo stays one run
           // with no parent, exactly as before.
-          const plan = planSubRuns(issue, mapping, { now });
+          const plan = planSubRuns(issue, { repos: narrowed }, { now });
           if (plan.children.length === 0) {
             log.warn({ issueId: issue.id }, 'mapping has no repos; ignoring');
             return;

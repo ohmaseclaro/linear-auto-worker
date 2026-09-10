@@ -25,7 +25,7 @@
 // no schema of its own and never did; it re-exports the domain value under the name
 // `execute-run.ts` imports. `additionalProperties: false` still means the agent cannot
 // return a field the domain schema does not list, so add there, never here.
-import { AgentResultSchema } from '../domain/agent-result.js';
+import { AgentResultSchema, RepoDiscoverySchema } from '../domain/agent-result.js';
 
 /**
  * D-01 (amended). Exported so `event-router.ts` can assert that `system/init` echoed the
@@ -103,6 +103,47 @@ export const PERMISSION_PROMPTS = 'none';
  */
 export const AGENT_RESULT_JSON_SCHEMA: object = AgentResultSchema;
 
+/** The discovery turn's schema, re-exported beside its sibling for the same reason. */
+export const REPO_DISCOVERY_JSON_SCHEMA: object = RepoDiscoverySchema;
+
+/**
+ * The discovery session's allowlist: EMPTY, by design.
+ *
+ * It reads a ticket and names repositories from a list it was given. It needs no shell, no
+ * editor and no filesystem — and granting one would put attacker-authored ticket text in
+ * front of a shell for the sake of a classification. Its cwd is a daemon-owned scratch
+ * directory with nothing in it, so there is nothing there to read either.
+ *
+ * What that costs, stated rather than glossed: with no repository access the session
+ * decides from the ticket text and the repository NAMES alone. ponytail: if accuracy proves
+ * insufficient, the upgrade path is each repository's `AGENTS.md` first lines in the
+ * prompt — INSIDE the untrusted delimiter, at the same trust level as the ticket body,
+ * never beside it. Widening the allowlist is not on that path.
+ *
+ * The mode still denies everything on its own (`dontAsk` alone refused Write with
+ * `decision_reason_type: "mode"`, T27) — the empty list is the second, explicit layer.
+ */
+export const DISCOVERY_TOOLS: readonly string[] = [];
+
+/**
+ * The discovery session's turn budget. It reads a ticket and answers; it does not iterate.
+ */
+export const DISCOVERY_MAX_TURNS = 3;
+
+/**
+ * The discovery session's own wall-clock deadline, and it is deliberately NOT
+ * `defaults.maxRunMs`.
+ *
+ * `maxRunMs` is the WORK session's budget — 45 minutes on a default install, hours if the
+ * operator raised it. A discovery session that hangs would burn the ticket's entire window
+ * before the real session even starts, and a large or adversarial ticket body is precisely
+ * how someone induces that: the classification is cheap, so anything that makes it slow is
+ * a signal, not a workload. Ninety seconds is generous for one turn against a ticket body
+ * and short enough that the fallback (use the operator's whole mapping) fires while the
+ * ticket still has a day in front of it.
+ */
+export const DISCOVERY_TIMEOUT_MS = 90_000;
+
 export interface ClaudeArgsInput {
   sessionId: string;
   schema: object;
@@ -137,13 +178,20 @@ export interface ClaudeArgsInput {
    * passed down as `0`. `cli/adapters.ts` does that.
    */
   maxBudgetUsd?: number;
+  /**
+   * The tools this session may use. Defaults to `ALLOWED_TOOLS` — the fresh and resumed
+   * work paths must never differ, which is why they take the default rather than passing
+   * a list each. Only the discovery session overrides it, with an empty list.
+   */
+  allowedTools?: readonly string[];
 }
 
 /**
- * Everything both paths share. Built once so the fresh and the resumed session cannot be
- * granted different permissions, different output handling, or different schemas.
+ * Everything every path shares. Built once so a fresh, a resumed and a discovery session
+ * cannot be given different output handling, a different permission mode, or a `--bare`.
  */
 function commonArgs(o: ClaudeArgsInput): string[] {
+  const tools = o.allowedTools ?? ALLOWED_TOOLS;
   return [
     // Both caps ride on `commonArgs` rather than on one path, for the same reason the
     // permissions do: a resumed session must not be granted a budget a fresh one is not.
@@ -175,8 +223,11 @@ function commonArgs(o: ClaudeArgsInput): string[] {
     // The identical probe with the allowlist below had zero denials and produced a real
     // git commit. The mode and the allowlist ship together or the product silently
     // produces nothing and reports success. Do not remove it.
-    '--allowedTools',
-    ...ALLOWED_TOOLS,
+    // Conditional, and the condition matters: `'--allowedTools', ...[]` leaves a bare flag
+    // that swallows whatever option follows it. An empty list means "grant nothing", which
+    // is spelled by omitting the flag entirely and letting `--permission-mode dontAsk`
+    // deny on its own.
+    ...(tools.length > 0 ? ['--allowedTools', ...tools] : []),
     // Verified redundant alongside the mode today rather than contradictory; it is here to
     // guard against a future change of default, not to fix a present bug.
     '--permission-prompts',
@@ -265,4 +316,27 @@ export function userMessageLine(text: string): string {
  */
 export function buildResumeArgs(o: ClaudeArgsInput): string[] {
   return ['--resume', o.sessionId, ...commonArgs(o), '-p'];
+}
+
+/**
+ * Phase one of a multi-repo ticket: a cheap, READ-ONLY session that reads the ticket and
+ * names which of the mapped repositories it needs.
+ *
+ * Identical to a fresh work session in everything non-negotiable — `--verbose`, the output
+ * and input formats, the bare trailing `-p`, no `--bare` — and different in exactly three
+ * things: its schema, its turn budget, and its allowlist (`DISCOVERY_TOOLS`, empty). Built
+ * on `commonArgs` rather than beside it so a flag amended for the work path reaches this
+ * one too; two argument lists is how a session ends up quietly holding a permission its
+ * sibling does not.
+ *
+ * Its wall clock is `DISCOVERY_TIMEOUT_MS`, applied by the caller, and NOT the work
+ * session's `maxRunMs` — see that constant.
+ */
+export function buildDiscoveryArgs(o: ClaudeArgsInput): string[] {
+  return [
+    '--session-id',
+    o.sessionId,
+    ...commonArgs({ ...o, allowedTools: DISCOVERY_TOOLS }),
+    '-p',
+  ];
 }

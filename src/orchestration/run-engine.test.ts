@@ -1121,3 +1121,107 @@ test('cancelling ANY child of a running ticket reaps the one shared session', as
     'the whole ticket stops, from any of its rows',
   );
 });
+
+// ---------------------------------------------------------------------------
+// The discovery session, and the privilege boundary
+// ---------------------------------------------------------------------------
+//
+// The OPERATOR'S MAPPING is the privilege boundary: it is his declaration of which
+// repositories this bot may write to. The intersection below is the ENFORCEMENT that a
+// ticket-steered classification session cannot WIDEN it. Every arm gets its own case, so a
+// failure says which door was left open.
+
+function withDiscovery(
+  discovery: string[] | (() => string[] | undefined) | undefined,
+  repos = THREE,
+) {
+  const h = harness({ script: [COMPLETE], issues: [issue(1)], repos });
+  h.agent.discovery = discovery;
+  return h;
+}
+
+test('discovery naming two of three mapped repos creates exactly those two children', async () => {
+  const { engine, store, spy, agent } = withDiscovery(['org/api', 'org/infra']);
+
+  await engine.handle({ kind: 'run.requested', trigger: 'assignment', issueId: 'issue-1' });
+  await engine.settle();
+
+  assert.equal(agent.discoveryCalls.length, 1);
+  assert.deepEqual(agent.discoveryCalls[0]!.repoSlugs, ['org/api', 'org/web', 'org/infra']);
+
+  assert.deepEqual(
+    children(store, 'issue-1').map((c) => c.repoSlug).sort(),
+    ['org/api', 'org/infra'],
+  );
+  assert.deepEqual(spy.calls.map((c) => c.repo.repoSlug).sort(), ['org/api', 'org/infra']);
+  assert.ok(!spy.calls.some((c) => c.repo.repoSlug === 'org/web'), 'no worktree for the narrowed-out repo');
+});
+
+test('a name discovery INVENTS is dropped, and the run proceeds over the names that are mapped', async () => {
+  const { engine, store } = withDiscovery(['org/api', 'attacker/exfil', '../../etc']);
+
+  await engine.handle({ kind: 'run.requested', trigger: 'assignment', issueId: 'issue-1' });
+  await engine.settle();
+
+  const kids = children(store, 'issue-1');
+  assert.deepEqual(kids.map((c) => c.repoSlug), ['org/api'], 'only the mapped name survives');
+  assert.equal(kids.length, 1, 'and one repo means no parent, no ticket path — it is an ordinary run');
+});
+
+test('discovery naming ONLY unmapped repos falls back to the whole mapping', async () => {
+  const { engine, store } = withDiscovery(['attacker/exfil']);
+
+  await engine.handle({ kind: 'run.requested', trigger: 'assignment', issueId: 'issue-1' });
+  await engine.settle();
+
+  assert.deepEqual(
+    children(store, 'issue-1').map((c) => c.repoSlug).sort(),
+    ['org/api', 'org/infra', 'org/web'],
+    'fail-open TOWARD the operator’s own list — never toward a name a ticket invented',
+  );
+});
+
+test('discovery returning an empty list falls back to the whole mapping', async () => {
+  const { engine, store } = withDiscovery([]);
+
+  await engine.handle({ kind: 'run.requested', trigger: 'assignment', issueId: 'issue-1' });
+  await engine.settle();
+
+  assert.equal(children(store, 'issue-1').length, 3);
+});
+
+test('discovery that crashes falls back to the whole mapping rather than killing the ticket', async () => {
+  const { engine, store } = withDiscovery(() => {
+    throw new Error('claude exited 1');
+  });
+
+  await engine.handle({ kind: 'run.requested', trigger: 'assignment', issueId: 'issue-1' });
+  await engine.settle();
+
+  // Refusing to run would let a flaky classifier silently kill every ticket, which is the
+  // failure this product category is judged on. The worst case here is the wasteful-but-
+  // correct shape the ticket path already ships.
+  assert.equal(children(store, 'issue-1').length, 3);
+});
+
+test('discovery that answers nothing at all falls back to the whole mapping', async () => {
+  const { engine, store } = withDiscovery(undefined);
+
+  await engine.handle({ kind: 'run.requested', trigger: 'assignment', issueId: 'issue-1' });
+  await engine.settle();
+
+  assert.equal(children(store, 'issue-1').length, 3);
+});
+
+test('a ONE-repo mapping pays for no discovery session at all', async () => {
+  const { engine, agent } = withDiscovery(['org/api'], [THREE[0]!]);
+
+  await engine.handle({ kind: 'run.requested', trigger: 'assignment', issueId: 'issue-1' });
+  await engine.settle();
+
+  assert.equal(
+    agent.discoveryCalls.length,
+    0,
+    'there is nothing to narrow, and paying for a session to be told so is the cost the operator accepted for the multi-repo case only',
+  );
+});

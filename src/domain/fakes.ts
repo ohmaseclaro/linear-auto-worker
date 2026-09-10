@@ -38,6 +38,7 @@ import type {
   Logger,
   Notifier,
   PullRequest,
+  RepoDiscoveryRequest,
   Receiver,
   RunEngine,
   RunEvent,
@@ -591,14 +592,26 @@ export class FakeWorktreeManager implements WorktreeManager {
 export class FakeAgentRunner implements AgentRunner {
   /** Every spawn this fake was asked for, in order. */
   readonly calls: AgentSpawnRequest[];
+  /** Every discovery request, in order — including the ones a single-repo ticket must NOT make. */
+  readonly discoveryCalls: RepoDiscoveryRequest[];
+  /**
+   * What the discovery session answers.
+   *
+   * `undefined` (the default) is "no discovery session ran or it could not answer", which
+   * is the caller's fallback case. A function lets a test throw, to script a crash.
+   */
+  discovery: string[] | undefined | (() => string[] | undefined);
   private readonly script: AgentResult[];
   private cursor: number;
   private progressCb: ((runId: RunId, line: string) => void) | null;
 
   constructor(
     script: AgentResult[] = [{ status: 'complete', summary: 'fake run', prTitle: 'fake', prBody: 'fake' }],
+    discovery?: string[] | (() => string[] | undefined),
   ) {
     this.calls = [];
+    this.discoveryCalls = [];
+    this.discovery = discovery;
     this.script = script;
     this.cursor = 0;
     this.progressCb = null;
@@ -628,6 +641,14 @@ export class FakeAgentRunner implements AgentRunner {
         resolve(result);
       });
     });
+  }
+
+  discoverRepos(req: RepoDiscoveryRequest): Promise<string[] | undefined> {
+    this.discoveryCalls.push(req);
+    // The real adapter never throws for a session that failed — it logs and returns
+    // undefined — so a thrown script here is the CALLER's crash arm, exercised on purpose.
+    const answer = typeof this.discovery === 'function' ? this.discovery() : this.discovery;
+    return Promise.resolve(answer);
   }
 
   onProgress(cb: (runId: RunId, line: string) => void): void {

@@ -81,6 +81,16 @@ type Step =
 
 /** `AgentRunner` scripted with one result per call, repeating the last once exhausted. */
 class ScriptedAgent implements AgentRunner {
+  /**
+   * These integration fixtures all map ONE repository, so the engine never reaches
+   * discovery — `narrowRepos` returns early below two repos. `undefined` is nonetheless the
+   * honest answer rather than a throw: it is the "could not answer" arm, and the caller
+   * falls back to the operator's mapping.
+   */
+  discoverRepos(): Promise<string[] | undefined> {
+    return Promise.resolve(undefined);
+  }
+
   readonly calls: AgentSpawnRequest[] = [];
   private readonly script: Array<AgentResult | Error>;
   private readonly trace: Step[];

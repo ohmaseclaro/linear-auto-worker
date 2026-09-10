@@ -294,9 +294,33 @@ export interface AgentSpawnRequest {
   env: Record<string, string>;
 }
 
+/** What a discovery session is asked. Everything untrusted is the ticket's own text. */
+export interface RepoDiscoveryRequest {
+  issueId: IssueId;
+  identifier: string;
+  title: string;
+  description: string;
+  url: string;
+  /** The repositories the operator's mapping names — the candidates, and the only valid answers. */
+  repoSlugs: readonly string[];
+}
+
 export interface AgentRunner {
   run(req: AgentSpawnRequest, signal: AbortSignal): Promise<AgentResult>;
   onProgress(cb: (runId: RunId, line: string) => void): void;
+  /**
+   * Phase one of a multi-repo ticket: a cheap, read-only session that reads the ticket and
+   * names which of `repoSlugs` it needs, before any worktree exists.
+   *
+   * Returns the names it gave, VERBATIM and unvalidated. Validation is deliberately not
+   * here: the caller intersects with the operator's own mapping, and putting that in the
+   * adapter would make this look like it returns a trustworthy set.
+   *
+   * `undefined` means the session could not answer — it crashed, timed out, or returned
+   * something unparseable — which the caller treats identically to an empty answer. It
+   * never throws for those, because a flaky classifier must not be able to kill a ticket.
+   */
+  discoverRepos(req: RepoDiscoveryRequest): Promise<string[] | undefined>;
 }
 
 export interface PullRequest {
