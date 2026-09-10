@@ -221,3 +221,66 @@ test('the ambiguity → retype → resolved loop closes through `runSay` itself'
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+// ── the shared session, reached from any of a ticket's rows ───────────────────
+
+const TICKET_PARENT = 'bbbbbbbb-3333-4333-8333-00000000000f';
+const TICKET_LEAD = 'cccccccc-4444-4444-8444-000000000011';
+const TICKET_SIB = 'dddddddd-5555-4555-8555-000000000012';
+
+/** A ticket parent and two children; only the lead has a session, so only it has a socket. */
+function ticketWorkspace(): string {
+  const root = mkdtempSync(join(tmpdir(), 'law-say-ticket-'));
+  const store = createSqliteStore(openStore(join(root, 'store.db')));
+  const base = {
+    kind: 'repo' as const,
+    issueId: 'issue-9',
+    issueKey: 'LAW-9',
+    issueTitle: 't',
+    issueUrl: 'https://linear.app/x/LAW-9',
+    repoDir: '/tmp/r',
+    branch: 'b',
+    worktreePath: null,
+    pid: null,
+    attempt: 0,
+    questionRound: 0,
+    prUrl: null,
+    failureReason: null,
+    createdAt: 1,
+    updatedAt: 1,
+  };
+  store.insertRun({ ...base, id: TICKET_PARENT, kind: 'ticket', parentRunId: null, repoSlug: null, branch: null, sessionId: null, state: null } as RunRow);
+  store.insertRun({ ...base, id: TICKET_LEAD, parentRunId: TICKET_PARENT, repoSlug: 'o/api', sessionId: 'sess-lead', state: 'running' } as RunRow);
+  store.insertRun({ ...base, id: TICKET_SIB, parentRunId: TICKET_PARENT, repoSlug: 'o/web', sessionId: null, state: 'running' } as RunRow);
+  store.close();
+  return root;
+}
+
+test('`law say` on a SIBLING reaches the one live session and says it redirected', async () => {
+  const root = ticketWorkspace();
+  const injector = createInjector();
+  const said: string[] = [];
+  // Registered under the LEAD only — a sibling has no session, so it has nothing to
+  // register. At HEAD this produced `no live agent for run …`.
+  injector.register(TICKET_LEAD, (text) => {
+    said.push(text);
+    return true;
+  });
+  const server = await serveInjections({ injector, root, log: silent });
+  try {
+    const lines: string[] = [];
+    const code = await runSay({ root, target: TICKET_SIB.slice(0, 8), text: 'use the v2 endpoint', print: (l) => lines.push(l) });
+
+    assert.equal(code, 0);
+    assert.deepEqual(said, ['use the v2 endpoint']);
+    assert.match(lines[0]!, /speaking to LAW-9 o\/api's session, shared with o\/web/);
+    // T118's second half: the `law watch` suggestion comes from the RESOLVER's target, not
+    // from a second copy of the naming rule — `run.issueKey` is ambiguous across siblings
+    // and would hand the operator back the dead end they just avoided.
+    assert.match(lines.join('\n'), /`law watch [0-9a-f]{4,}` to see it land/);
+    assert.ok(!lines.join('\n').includes('law watch LAW-9'), 'an ambiguous key is not a target here');
+  } finally {
+    await server.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});

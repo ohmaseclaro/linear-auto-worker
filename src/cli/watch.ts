@@ -19,7 +19,7 @@ import { TERMINAL } from '../domain/types.js';
 import { runLogPath } from '../execution/run-log.js';
 import { makeLineParser } from '../execution/stream-parser.js';
 import { sanitizeUntrustedText } from '../execution/prompt.js';
-import { resolveRunTarget } from './resolve-run.js';
+import { resolveRunTarget, sessionOwner, sharedWith } from './resolve-run.js';
 
 /** One terminal line. Same shape of cap `status.ts` puts on its label. */
 const MAX_LINE = 160;
@@ -180,7 +180,20 @@ export async function runWatch(deps: WatchDeps = {}): Promise<number> {
       return 1;
     }
 
-    const run = resolved.run;
+    // Resolution is done; NOW redirect. A multi-repo ticket is worked by ONE `claude`
+    // session, so any of its rows means that session — and the row the operator named may
+    // have no log of its own at all. Strictly after `resolveRunTarget`, which is what keeps
+    // T118 intact: nothing here touches `matches` or `runTarget`.
+    const run = sessionOwner(store, resolved.run);
+    if (run.id !== resolved.run.id) {
+      // Reported, never silent. An operator who typed one repository's token and is shown
+      // another's session has to be told why, or the output looks like the wrong run.
+      const others = sharedWith(store, resolved.run).filter((slug) => slug !== run.repoSlug);
+      print(
+        `following ${label(run)}'s session, shared with ${others.join(' and ')}` +
+          ` — one agent works this whole ticket`,
+      );
+    }
     const file = runLogPath(root, run.id);
     const parser = makeLineParser(
       (event) => {

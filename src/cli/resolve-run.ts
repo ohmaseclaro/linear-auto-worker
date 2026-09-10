@@ -127,3 +127,40 @@ export function resolveRunTarget(store: Store, target?: string): ResolveResult {
 
   return { error: `no run matching \`${target}\` — try \`law status\`` };
 }
+
+/**
+ * The run that owns the `claude` session behind `run` — the run itself, or, for a child of
+ * a multi-repo ticket, whichever sibling carries the session id.
+ *
+ * A ticket over N repositories is worked by ONE session in a directory holding all N
+ * worktrees, so only the LEAD child has a session of its own. An operator who types any of
+ * the ticket's rows means that session; without this, `law watch` on a sibling reports
+ * there is no activity log for it and `law say` reports no live agent — both true of that
+ * ROW and useless as an answer.
+ *
+ * **It runs strictly AFTER resolution, and touches neither `matches` nor `runTarget`.**
+ * T118's guarantee is about RESOLUTION — every token a listing prints reaches exactly one
+ * run — and it says nothing about what a command then does with the run it resolved.
+ * Folding this into `matches` would make two rows answer to one token, which is precisely
+ * the ambiguity T118 exists to forbid.
+ *
+ * The owner is found by the session-id MARK, never by position: `childRuns` is
+ * `SELECT * FROM runs WHERE parent_run_id = ?` with no `ORDER BY`, so "the first child" is
+ * not a stable notion. With no sibling carrying one — every child still `queued`, no spawn
+ * yet — it returns the run it was given, because there is nothing to redirect to and
+ * inventing a target would send the operator somewhere emptier than where they typed.
+ */
+export function sessionOwner(store: Store, run: RunRow): RunRow {
+  if (run.parentRunId === null) return run;
+  const owner = store.childRuns(run.parentRunId).find((c) => c.sessionId !== null);
+  return owner ?? run;
+}
+
+/** Every repository the one session covers, for the line that says the redirect happened. */
+export function sharedWith(store: Store, run: RunRow): string[] {
+  if (run.parentRunId === null) return [];
+  return store
+    .childRuns(run.parentRunId)
+    .map((c) => c.repoSlug)
+    .filter((slug): slug is string => slug !== null);
+}

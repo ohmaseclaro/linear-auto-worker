@@ -1225,3 +1225,29 @@ test('a ONE-repo mapping pays for no discovery session at all', async () => {
     'there is nothing to narrow, and paying for a session to be told so is the cost the operator accepted for the multi-repo case only',
   );
 });
+
+/**
+ * M1/D-04, proven rather than changed. The sub-question assumed the run that owns N pull
+ * requests is a `RepoRun`; it is not. One `RepoRun` is one repository is one pull request,
+ * and the ticket PARENT — which has no `prUrl` field at all — already renders N of them
+ * through `rollupLine`. Nothing about the column changes.
+ *
+ * The value of this case is that it goes RED the day someone collapses the children.
+ */
+test('D-04: a three-repo ticket records three DISTINCT prUrls on three rows, and the parent has none', async () => {
+  const { engine, store } = harness({ script: [COMPLETE], issues: [issue(1)], repos: THREE });
+
+  await engine.handle({ kind: 'run.requested', trigger: 'assignment', issueId: 'issue-1' });
+  await engine.settle();
+
+  const kids = children(store, 'issue-1');
+  const urls = kids.map((c) => c.prUrl);
+  assert.equal(urls.filter(Boolean).length, 3);
+  assert.equal(new Set(urls).size, 3, 'three rows, three urls — no overloading of one column');
+
+  const [parent] = store.findRunsByIssue('issue-1').filter((r) => r.kind === 'ticket');
+  assert.ok(parent && !('prUrl' in parent && parent.prUrl), 'TicketRun has no prUrl field to overload');
+
+  // And each url names its own repository, so the rollup's per-repo lines cannot cross.
+  for (const kid of kids) assert.match(kid.prUrl!, new RegExp(kid.repoSlug));
+});

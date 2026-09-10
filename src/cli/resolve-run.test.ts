@@ -13,7 +13,7 @@ import test from 'node:test';
 
 import { openStore } from '../infra/store/db.js';
 import { createSqliteStore, type RunRow, type Store } from '../infra/store/sqlite-store.js';
-import { ACTIVE, resolveRunTarget } from './resolve-run.js';
+import { ACTIVE, resolveRunTarget, sessionOwner, sharedWith } from './resolve-run.js';
 
 const dir = mkdtempSync(join(tmpdir(), 'law-resolve-'));
 process.on('exit', () => rmSync(dir, { recursive: true, force: true }));
@@ -226,4 +226,81 @@ test('no target: the same holds for two runs sharing a REPO across two tickets',
   const ids = roundTrip(store);
   assert.equal(ids.length, 2);
   store.close();
+});
+
+// ---------------------------------------------------------------------------------------
+// sessionOwner — reaching the ONE live session from any of a ticket's rows
+// ---------------------------------------------------------------------------------------
+//
+// A multi-repo ticket is worked by ONE `claude` session, owned by one child. `law watch`
+// and `law say` resolve exactly as they always did and then redirect through this — AFTER
+// resolution, so T118's guarantee (every printed token resolves to exactly one RUN) is
+// untouched: the redirect changes nothing about `matches` or `runTarget`.
+
+const PARENT = 'aaaaaaaa-1111-4111-8111-00000000000f';
+
+function ticketRows() {
+  return [
+    row({
+      id: PARENT,
+      kind: 'ticket',
+      issueKey: 'LAW-9',
+      repoSlug: null,
+      branch: null,
+      state: null,
+    }),
+    row({ id: 'e1e1e1e1-5555-4555-8555-000000000001', parentRunId: PARENT, issueKey: 'LAW-9', repoSlug: 'o/api', sessionId: 'sess-lead' }),
+    row({ id: 'f2f2f2f2-6666-4666-8666-000000000002', parentRunId: PARENT, issueKey: 'LAW-9', repoSlug: 'o/web' }),
+    row({ id: '03030303-7777-4777-8777-000000000003', parentRunId: PARENT, issueKey: 'LAW-9', repoSlug: 'o/infra' }),
+  ];
+}
+
+test('sessionOwner from a SIBLING returns the one child that owns the session', () => {
+  const rows = ticketRows();
+  const store = storeWith(...rows);
+
+  const owner = sessionOwner(store, rows[2]!);
+
+  assert.equal(owner.id, rows[1]!.id, 'the marked child, not the first row the query returned');
+  assert.equal(owner.sessionId, 'sess-lead');
+  // The mark, not a position: `childRuns` is `SELECT * ... WHERE parent_run_id = ?` with no
+  // ORDER BY, so "the first child" is not a stable notion (M5).
+  assert.equal(sessionOwner(store, rows[1]!).id, rows[1]!.id, 'and the owner resolves to itself');
+});
+
+test('sessionOwner on a single-repo run is that run — no ticket, no redirect', () => {
+  const solo = row({ id: '14141414-8888-4888-8888-000000000004', sessionId: 'sess-solo' });
+  const store = storeWith(solo);
+  assert.equal(sessionOwner(store, solo).id, solo.id);
+});
+
+test('sessionOwner falls back to the run itself when no sibling carries a session', () => {
+  // Every child still `queued`: the ticket has not spawned yet, so there is no session to
+  // redirect to and inventing one would send the operator somewhere emptier than where
+  // they typed.
+  const rows = ticketRows().map((r) => (r.sessionId ? { ...r, sessionId: null } : r));
+  const store = storeWith(...rows);
+  assert.equal(sessionOwner(store, rows[2]!).id, rows[2]!.id);
+});
+
+test('sessionOwner names the repositories the session is shared with', () => {
+  const rows = ticketRows();
+  const store = storeWith(...rows);
+  assert.deepEqual(sharedWith(store, rows[2]!).sort(), ['o/api', 'o/infra', 'o/web']);
+  assert.deepEqual(sharedWith(store, row({ id: '25252525-9999-4999-8999-000000000005' })), []);
+});
+
+/**
+ * T118's oracle, run against a ticket's rows. The redirect happens strictly AFTER
+ * resolution and touches neither `matches` nor `runTarget`, so this must be green — if it
+ * ever goes red, the redirect has leaked into resolution and belongs back after it.
+ */
+test('T118 still holds across a ticket’s siblings: every printed token resolves to one run', () => {
+  // The parent row is inserted too — `parent_run_id` is a real foreign key — but it has no
+  // state, so `listByState` structurally cannot return it and the listing never names it.
+  const rows = ticketRows();
+  const store = storeWith(...rows);
+  const ids = roundTrip(store);
+  assert.equal(ids.length, 3, 'three children, three distinct targets, no parent among them');
+  assert.ok(!ids.includes(PARENT));
 });

@@ -244,3 +244,80 @@ test('a live run is followed: appended lines are picked up, and the terminal sta
   assert.deepEqual(lines, ['one', 'two', '── failed LAW-9 o/r it broke']);
   rmSync(root, { recursive: true, force: true });
 });
+
+// ── the shared session, reached from any of a ticket's rows ───────────────────
+
+/** A ticket parent and three children; only the lead has a session and a log. */
+function seedTicket(store: ReturnType<typeof createSqliteStore>) {
+  const parent = seed(store, { id: 'p0000000-0000', kind: 'ticket', state: null, repoSlug: null, branch: null });
+  const lead = seed(store, {
+    id: 'c1111111-1111',
+    parentRunId: parent.id,
+    repoSlug: 'o/api',
+    sessionId: 'sess-lead',
+    state: 'running',
+    issueKey: 'LAW-9',
+  });
+  const sibling = seed(store, {
+    id: 'c2222222-2222',
+    parentRunId: parent.id,
+    repoSlug: 'o/web',
+    state: 'running',
+    issueKey: 'LAW-9',
+  });
+  seed(store, {
+    id: 'c3333333-3333',
+    parentRunId: parent.id,
+    repoSlug: 'o/infra',
+    state: 'delivered',
+    issueKey: 'LAW-9',
+  });
+  return { lead, sibling };
+}
+
+test('`law watch` on a SIBLING follows the shared session and says whose it is', async () => {
+  const { root, store } = workspace();
+  const { lead, sibling } = seedTicket(store);
+  store.close();
+
+  mkdirSync(runLogDir(root), { recursive: true });
+  writeFileSync(
+    runLogPath(root, lead.id),
+    JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: 'working' }] } }) + '\n',
+  );
+
+  const lines: string[] = [];
+  // Watch the sibling, which has no log of its own. At HEAD this reported there was no
+  // activity log for it — true of that ROW and useless as an answer.
+  const watching = runWatch({ root, target: sibling.id.slice(0, 8), print: (l) => lines.push(l), pollMs: 5 });
+  await new Promise((r) => setTimeout(r, 60));
+  const live = createSqliteStore(openStore(join(root, 'store.db')));
+  live.updateRun(lead.id, { state: 'delivered' });
+  live.close();
+  await watching;
+
+  assert.match(lines[0]!, /following LAW-9 o\/api's session/, 'the redirect is announced, never silent');
+  assert.match(lines[0]!, /o\/web/);
+  assert.match(lines[0]!, /o\/infra/);
+  assert.ok(lines.includes('working'), 'and it really followed the shared log');
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('`law watch` on the session OWNER, and on a single-repo run, prints no redirect', async () => {
+  const { root, store } = workspace();
+  const { lead } = seedTicket(store);
+  store.close();
+  mkdirSync(runLogDir(root), { recursive: true });
+  writeFileSync(runLogPath(root, lead.id), JSON.stringify({ type: 'result', subtype: 'success', num_turns: 1, total_cost_usd: 0 }) + '\n');
+
+  const lines: string[] = [];
+  const watching = runWatch({ root, target: lead.id.slice(0, 8), print: (l) => lines.push(l), pollMs: 5 });
+  await new Promise((r) => setTimeout(r, 40));
+  const live = createSqliteStore(openStore(join(root, 'store.db')));
+  live.updateRun(lead.id, { state: 'delivered' });
+  live.close();
+  await watching;
+
+  assert.ok(!lines.some((l) => l.includes('session, shared with')), 'no redirect to announce');
+  rmSync(root, { recursive: true, force: true });
+});

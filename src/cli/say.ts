@@ -14,7 +14,7 @@ import { openStore } from '../infra/store/db.js';
 import { createSqliteStore, type RunRow } from '../infra/store/sqlite-store.js';
 import { TERMINAL } from '../domain/types.js';
 import { sendInjection } from '../execution/inject.js';
-import { resolveRunTarget } from './resolve-run.js';
+import { resolveRunTarget, sessionOwner, sharedWith } from './resolve-run.js';
 
 export interface SayDeps {
   root?: string;
@@ -46,7 +46,16 @@ export async function runSay(deps: SayDeps): Promise<number> {
       print(resolved.error);
       return 1;
     }
-    const run = resolved.run;
+    // The same redirect as `law watch`, and for the same reason: one ticket, one session,
+    // and only the lead child has a socket to speak into. After resolution, never inside it.
+    const run = sessionOwner(store, resolved.run);
+    if (run.id !== resolved.run.id) {
+      const others = sharedWith(store, resolved.run).filter((slug) => slug !== run.repoSlug);
+      print(
+        `speaking to ${label(run)}'s session, shared with ${others.join(' and ')}` +
+          ` — one agent works this whole ticket`,
+      );
+    }
 
     if (TERMINAL.includes(run.state as never)) {
       print(`run ${label(run)} already finished (${run.state ?? '?'}) — nothing to say to`);

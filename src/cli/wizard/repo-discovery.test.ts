@@ -4,6 +4,7 @@ import { mkdtemp, mkdir, rm, symlink, writeFile, chmod } from 'node:fs/promises'
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { discoverRepos } from './repo-discovery.js';
+import { defaultRunCommand } from '../../execution/execute-run.js';
 
 // NOTE (RUSH MODE): not executed during this milestone's parallel build — no
 // node_modules exist on this branch yet. Written complete and correct for the
@@ -98,4 +99,89 @@ test('discoverRepos: an unreadable subdirectory is skipped, not thrown', async (
   const root = join(tmp, 'mixed');
   // Should resolve without throwing even though "unreadable" has no permissions.
   await assert.doesNotReject(discoverRepos(root));
+});
+
+// ── T127: a linked worktree is not a repository to map ───────────────────────
+//
+// `hasGitEntry` asked only whether an entry NAMED `.git` existed; `readdir` had already
+// told it whether that entry was a file or a directory. Measured on the operator's own
+// root: 33 directories bear a `.git` entry, of which 12 have it as a DIRECTORY (real
+// clones) and 21 as a FILE (linked worktrees) — and `git rev-parse --git-common-dir`
+// resolves all 33 to 12 repositories.
+//
+// Built with real `git worktree add`, deliberately: the property under test is what git
+// actually produces, and a hand-written `.git` file would pass against a rule that only
+// happens to match the shape someone typed.
+
+const git = (cwd: string, ...args: string[]): Promise<unknown> =>
+  defaultRunCommand('git', ['-C', cwd, ...args]);
+
+async function realRepo(dir: string, name: string): Promise<string> {
+  const repo = join(dir, name);
+  await mkdir(repo, { recursive: true });
+  await defaultRunCommand('git', ['init', '--quiet', '--initial-branch=main', repo]);
+  await git(repo, 'config', 'user.email', 'fixture@example.invalid');
+  await git(repo, 'config', 'user.name', 'Fixture');
+  await writeFile(join(repo, 'README.md'), '# x\n', 'utf8');
+  await git(repo, 'add', 'README.md');
+  await git(repo, 'commit', '--quiet', '-m', 'initial');
+  return repo;
+}
+
+test('a real clone and a linked worktree OF IT: only the clone is offered', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'law-wt-picker-'));
+  try {
+    const clone = await realRepo(root, 'app');
+    // Sibling of the clone, inside the scanned root — exactly the operator's layout.
+    await git(clone, 'worktree', 'add', '--quiet', '-b', 'feature-x', join(root, 'app-feature-x'));
+
+    const found = await discoverRepos(root);
+
+    assert.deepEqual(found.map((r) => r.name), ['app']);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('a submodule is not offered as a repository of its own', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'law-sub-picker-'));
+  try {
+    const child = await realRepo(root, 'lib-src');
+    const parent = await realRepo(join(root, 'nest'), 'parent');
+    await git(parent, '-c', 'protocol.file.allow=always', 'submodule', '--quiet', 'add', child, 'vendor/lib');
+    await git(parent, 'commit', '--quiet', '-m', 'add submodule');
+
+    // Scan the parent's own directory: `vendor/lib` carries `.git` as a FILE.
+    const found = await discoverRepos(join(root, 'nest'));
+
+    assert.deepEqual(found.map((r) => r.name), ['parent'], 'the parent clone, and nothing inside it');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+/**
+ * The behaviour change the type check brings with it, chosen and asserted rather than
+ * discovered: `scan` used to `return` at any `.git` entry, so a linked worktree SHADOWED
+ * whatever was nested inside it. Making a worktree "not a repo" could have turned that
+ * shadow off and started surfacing nested clones the operator never asked about.
+ *
+ * It does not: a directory whose `.git` is a FILE is skipped AND not descended into. A
+ * clone nested inside a worktree is vendored or scratch work, not something to map.
+ */
+test('a nested clone inside a linked worktree stays shadowed, not newly surfaced', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'law-wt-nested-'));
+  try {
+    const clone = await realRepo(root, 'app');
+    const wt = join(root, 'app-feature-x');
+    await git(clone, 'worktree', 'add', '--quiet', '-b', 'feature-x', wt);
+    await realRepo(wt, 'vendored');
+
+    const found = await discoverRepos(root);
+
+    assert.deepEqual(found.map((r) => r.name), ['app']);
+    assert.ok(!found.some((r) => r.name === 'vendored'), 'the worktree is skipped, not descended into');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
