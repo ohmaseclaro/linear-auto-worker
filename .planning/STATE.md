@@ -6,9 +6,9 @@ current_phase: 8
 current_phase_name: Setup Wizard & Safety Pass
 status: milestone_complete
 stopped_at: v1.0 shipped, published, and live-verified end to end
-last_updated: "2026-09-09T12:00:00.000Z"
-last_activity: 2026-09-09
-last_activity_desc: "Quick task 260907-voh: `law watch` / `law say`, prompt on stdin (T113-T115)"
+last_updated: "2026-09-10T23:59:00.000Z"
+last_activity: 2026-09-10
+last_activity_desc: "Quick task 260910-sm5: prAttribution gates the PR footer and the Run log path (T128)"
 progress:
   total_phases: 8
   completed_phases: 8
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-09-06)
 Phase: 8 of 8 (Setup Wizard & Safety Pass) — milestone complete
 Plan: 35 of 35 complete
 Status: Shipped. Published at ohmaseclaro/linear-auto-worker (MIT, public), CI green on Node 22/24 x Ubuntu/macOS.
-Last activity: 2026-09-07 — Live UAT re-run confirmed the T107 and T108 fixes on the real path
+Last activity: 2026-09-10 — Quick task 260910-sm5: the PR body no longer names the tool or prints local paths when an instance is silent
 
 Progress: [██████████] 100%
 
@@ -114,12 +114,13 @@ Items acknowledged and carried forward from previous milestone close:
 | 260907-voh | `law watch` and `law say` — live run observability and mid-flight interaction | P2 | `24bf09c`, `9712297`, `7e97c67`, `5ffc811`, `22c857d` | 2026-09-07 |
 | 260908-bms | `ALLOWED_TOOLS` under-grants (Skill, Read) and the probe that would prove it crashes | P1 | `c81df58`, `2c0b700`, `988b037` | 2026-09-08 |
 | 260908-crx | The disambiguation listing prints a field that is not a target, so ambiguity is a dead end | P1 | `e51a388`, `4691669`, `527d325` | 2026-09-08 |
-| 260909-lvl | Wire the dead PR body, the issue key in the PR title, and the leaked bot marker | 2026-09-09 | 8837d11 | [260909-lvl-wire-the-dead-pr-body-issue-key-in-pr-ti](./quick/260909-lvl-wire-the-dead-pr-body-issue-key-in-pr-ti/) |
+| 260909-lvl | Wire the dead PR body, the issue key in the PR title, and the leaked bot marker | P1 | `f8debdf`, `78f4116`, `48f3eff`, `2fddf6d` | 2026-09-09 |
 | 260909-nh6 | A second, silent, poll-only daemon instance for the Lahzo workspace | P2 | `24d05a7`, `b04973c`, `e8cf1f6`, `6f07bf8` | 2026-09-09 |
 | 260909-tfm | Parent-directory multi-repo mode: one agent session, one PR per repo | P2 | `02258c4`, `f625ecd`, `862563e`, `d0d3fa5`, `95ef561` | 2026-09-09 |
+| 260910-sm5 | The PR body named the tool and printed the operator's local paths, on every PR a silent instance opens | P1 | `82c85fb`, `500d011`, `315b0dd` | 2026-09-10 |
 
 ## Session Continuity
 
-Last session: 2026-09-09T00:00:00.000Z
-Stopped at: Completed quick task 260909-tfm (one ticket = one agent session = one PR per repo; 765/765 + smoke)
+Last session: 2026-09-10T23:59:00.000Z
+Stopped at: Completed quick task 260910-sm5 (the PR body is silent when the instance is; 771/771 + both smokes)
 Resume file: None
