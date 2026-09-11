@@ -45,6 +45,12 @@ export interface DeliverInput {
   draft: boolean;
   /** A `partial` run is always a draft, whatever the mapping toggle says. */
   verdict?: 'delivered' | 'partial';
+  /**
+   * REQUIRED, per T120: an optional field here is a field a caller can forget to set, and
+   * this one decides whether the PR body leaks the tool's name and the operator's local
+   * filesystem paths. Required makes `tsc` the gate, the same fix T120 applied to `prBody`.
+   */
+  prAttribution: boolean;
 }
 
 export interface DeliveryResult {
@@ -142,7 +148,7 @@ export async function deliver(o: DeliverInput): Promise<DeliveryResult | null> {
   }
 
   // 5. `--body-file` needs a real path, so the body lands on disk first.
-  const body = renderPrBody({ ...o.prBody, ciPaths: gates.ciPaths });
+  const body = renderPrBody({ ...o.prBody, ciPaths: gates.ciPaths, prAttribution: o.prAttribution });
   const bodyPath = path.join(tmpdir(), `law-pr-body-${randomUUID()}.md`);
   await writeFile(bodyPath, body, 'utf8');
 

@@ -1,6 +1,6 @@
 # Traps
 
-One hundred and twenty-seven footguns found while building this daemon, kept as a running ledger
+One hundred and twenty-eight footguns found while building this daemon, kept as a running ledger
 so no two parallel work streams had to rediscover the same one.
 
 **Every entry here was measured, not recalled.** Versions come from the npm registry, API
@@ -15,7 +15,7 @@ spawn processes, several of them will cost you an afternoon each.
 Measured against: `@linear/sdk@93.0.1`, `@ngrok/ngrok@1.7.0`, `better-sqlite3@13.0.3`,
 `execa@10.0.1`, Claude Code CLI `2.1.259`, `gh` `2.98.0`, Node `22.23.1`, macOS.
 
-The complete internal ledger — all 127 rows with per-phase attribution and the evidence for
+The complete internal ledger — all 128 rows with per-phase attribution and the evidence for
 each — is in [`.planning/TRAPS.md`](../.planning/TRAPS.md). This page is the subset that
 generalises.
 
@@ -655,3 +655,12 @@ the declaration is the claim, not the evidence. When two modules claim one job, 
 *caller* before reading either header. And when a toggle must actually take effect, gate it
 at the one place every path goes through rather than at each call site: six guards is six
 chances to forget, and the seventh site arrives with no guard at all.
+
+A ninth trap in this same family turned out to live in a comment rather than in code. A PR
+renderer's own doc comment asserted "all five sections, none of them ever empty" — true when
+written, silently false the moment a legitimate caller needed a body that omitted two of
+them on purpose. `tsc` and the full suite stayed green with the claim already wrong, because
+nothing checks a doc comment against the code sitting directly beneath it. The fix is not a
+tool — it is treating an edited invariant as the same defect class as a dead export: when a
+change makes a nearby comment's claim false, correct the comment in the same commit, not a
+later one.

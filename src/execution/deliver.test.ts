@@ -71,6 +71,7 @@ function input(h: Harness, over: Partial<DeliverInput> = {}): DeliverInput {
     defaultBranch: 'main',
     title: 'ENG-1: do the thing',
     draft: true,
+    prAttribution: true,
     prBody: {
       ticketIdentifier: 'ENG-1',
       ticketUrl: 'https://linear.app/x/issue/ENG-1',
@@ -249,6 +250,24 @@ test('the CI flag reaches both the rendered body and the returned result', async
   assert.deepEqual(result.ciPaths, ['.github/workflows/ci.yml']);
   assert.equal(result.ciTouched, true);
   assert.match(h.bodyAtCreate() ?? '', /\.github\/workflows\/ci\.yml/);
+});
+
+// ============================================ 260910-sm5: prAttribution reaches deliver()
+
+test('prAttribution: false reaches the real gh body through deliver()', async () => {
+  const h = harness();
+  await deliver(input(h, { prAttribution: false }));
+  const body = h.bodyAtCreate() ?? '';
+  assert.equal(body.includes('## Run log'), false);
+  assert.equal(body.includes('Opened by linear-auto-worker'), false);
+});
+
+test('prAttribution not overridden reaches the real gh body through deliver(), attributed', async () => {
+  const h = harness();
+  await deliver(input(h));
+  const body = h.bodyAtCreate() ?? '';
+  assert.match(body, /## Run log/);
+  assert.match(body, /Opened by linear-auto-worker/);
 });
 
 // ================================================================ pr-body.ts, pure

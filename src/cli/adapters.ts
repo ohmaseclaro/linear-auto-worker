@@ -676,6 +676,9 @@ export function createDeliverer(deps: ExecutionAdapterDeps): Deliverer {
         // A caller-forced draft wins over the mapping's toggle; it is only ever set to
         // `true`, for a `partial` run (T73). Normal deliveries omit it and get the toggle.
         draft: pr.draft ?? toggles.draftPr,
+        // No caller-forced override for this one, unlike `draft`'s `partial`-run case: it
+        // is resolved from config every time.
+        prAttribution: toggles.prAttribution,
       });
       // Nothing was pushed and no pull request was opened — the run left no commits in
       // this repository. Passed straight through rather than dressed up as a failure: the
