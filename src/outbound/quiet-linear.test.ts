@@ -175,6 +175,29 @@ test('a mapping override that DISAGREES with defaults refuses the boot, naming b
   );
 });
 
+test('a mapping override of prAttribution that DISAGREES with defaults refuses the boot', () => {
+  const config = {
+    defaults: { postLinearComments: false, updateLinearIssue: false, prAttribution: true },
+    mappings: {
+      'proj-1': {
+        displayName: 'Alpha',
+        overrides: { prAttribution: false },
+      },
+    },
+  } as unknown as Config;
+
+  assert.throws(
+    () => assertInstanceLevelToggles(config),
+    (err: unknown) => {
+      assert.ok(err instanceof Error);
+      assert.match(err.message, /Alpha/, 'names the mapping');
+      assert.match(err.message, /prAttribution/, 'names the field');
+      assert.match(err.message, /instance-level/);
+      return true;
+    },
+  );
+});
+
 test('an override that AGREES is inert and is left alone', () => {
   // This is what keeps the refusal from breaking the live config, whose wizard-written
   // overrides may well carry `postLinearComments: true` (config-writer.ts:158).

@@ -205,12 +205,13 @@ export interface PendingQuestion {
 // `src/domain/` imports no third-party package, zod included.
 
 /**
- * The six CONF-02 toggles — Linear comments, Slack notification, base branch, draft
- * versus ready pull requests, the question flow, and maximum run time — plus the question
- * deadline, which the orchestration layer reads per mapping.
+ * The nine CONF-02 toggles — Linear comments, issue-record writes, PR attribution, Slack
+ * notification, base branch, draft versus ready pull requests, the question flow, and
+ * maximum run time — plus the question deadline, which the orchestration layer reads per
+ * mapping.
  *
  * Named once, here, and nowhere else. `Config.defaults` holds a full set; a mapping's
- * `overrides` holds a sparse subset (D-09), so adding a seventh toggle later does not
+ * `overrides` holds a sparse subset (D-09), so adding a tenth toggle later does not
  * require rewriting every existing mapping.
  *
  * `concurrency` is deliberately NOT one of these. It is a global cap bounding local RAM
@@ -232,6 +233,19 @@ export interface MappingToggles {
    * Gated at the Linear client (`outbound/quiet-linear.ts`), not at the call sites.
    */
   updateLinearIssue: boolean;
+  /**
+   * Whether `renderPrBody` (`execution/pr-body.ts`) includes `## Run log` and the trailing
+   * `_Opened by linear-auto-worker_` footer — the two places a PR names the tool and the
+   * operator's local filesystem paths.
+   *
+   * INSTANCE-level for a different reason than `updateLinearIssue`'s round-trip cost: it is
+   * genuinely per-mapping resolvable at its read site (`cli/adapters.ts:createDeliverer`
+   * already has a `RepoMapping` in hand), but a workspace where the tool is silent must not
+   * have one repo's PRs speak while a sibling's stay quiet — a product decision, not a
+   * technical one. Enforced at `outbound/quiet-linear.ts`'s `assertInstanceLevelToggles`,
+   * not at the Linear client.
+   */
+  prAttribution: boolean;
   notifySlack: boolean;
   baseBranch: string;
   draftPr: boolean;

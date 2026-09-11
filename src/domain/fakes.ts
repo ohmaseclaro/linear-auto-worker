@@ -218,6 +218,7 @@ export class InMemoryStore implements Store {
 const DEFAULT_TOGGLES: MappingToggles = {
   postLinearComments: true,
   updateLinearIssue: true,
+  prAttribution: true,
   notifySlack: true,
   baseBranch: 'main',
   draftPr: true,

@@ -18,6 +18,7 @@ function makeTempRoot(): string {
 const validDefaults = {
   postLinearComments: true,
   updateLinearIssue: true,
+  prAttribution: true,
   notifySlack: false,
   baseBranch: 'main',
   draftPr: true,
@@ -261,10 +262,12 @@ function loadFromDisk(raw: unknown): Config {
 }
 
 test('a config written before today loads and resolves to today\'s behaviour', () => {
-  // No `ingress`, no `updateLinearIssue`, no `pickupStates` — the operator's live file.
-  // `updateLinearIssue` is stripped rather than omitted from the shared fixture, so this
-  // stays a test about the SCHEMA DEFAULT and not about what the fixture happens to hold.
-  const { updateLinearIssue: _dropped, ...preTodayDefaults } = validDefaults;
+  // No `ingress`, no `updateLinearIssue`, no `prAttribution`, no `pickupStates` — the
+  // operator's live file. Both toggles are stripped rather than omitted from the shared
+  // fixture, so this stays a test about the SCHEMA DEFAULT and not about what the fixture
+  // happens to hold.
+  const { updateLinearIssue: _dropped, prAttribution: _dropped2, ...preTodayDefaults } =
+    validDefaults;
   const parsed = loadFromDisk({
     ...config({
       'proj-1': { linearProjectId: 'proj-1', linearTeamId: null, repos: [repo('/r', 'org/r')] },
@@ -276,6 +279,7 @@ test('a config written before today loads and resolves to today\'s behaviour', (
   const resolved = resolveToggles(parsed.defaults, parsed.mappings['proj-1']);
   assert.equal(resolved.postLinearComments, true);
   assert.equal(resolved.updateLinearIssue, true, 'the new toggle defaults to today: issues move');
+  assert.equal(resolved.prAttribution, true, 'the new toggle defaults to today: the body is fully attributed');
   assert.equal(parsed.mappings['proj-1'].pickupStates, undefined, 'no pickup filter');
 });
 

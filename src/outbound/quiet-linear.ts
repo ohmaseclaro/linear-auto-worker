@@ -25,6 +25,12 @@
  * agrees is inert and harmless and is left alone — which is what keeps this from breaking
  * the live config, whose wizard-written overrides may carry `postLinearComments: true`.
  *
+ * `assertInstanceLevelToggles` also guards a THIRD field, `prAttribution`, for a different
+ * reason than the round-trip cost above: it is resolved at `cli/adapters.ts:createDeliverer`,
+ * which already has a `RepoMapping` in hand, so it is genuinely per-mapping RESOLVABLE at its
+ * actual read site. It is pinned to instance-level anyway, by product decision — a silent
+ * workspace must not have one repo's PRs speak while a sibling's stay quiet.
+ *
  * ## Every suppression logs
  *
  * Silence that cannot be observed is indistinguishable from breakage — the same reasoning
@@ -125,17 +131,16 @@ export function quietLinear(
  * doing the opposite of what the file says.
  */
 export function assertInstanceLevelToggles(config: Config): void {
-  const fields = ['postLinearComments', 'updateLinearIssue'] as const;
+  const fields = ['postLinearComments', 'updateLinearIssue', 'prAttribution'] as const;
   for (const [key, mapping] of Object.entries(config.mappings)) {
     for (const field of fields) {
       const override = mapping.overrides?.[field];
       if (override === undefined || override === config.defaults[field]) continue;
       throw new Error(
         `mapping ${mapping.displayName ?? key} overrides \`${field}\` to ${String(override)}, ` +
-          `but defaults says ${String(config.defaults[field])}. These two toggles are ` +
-          'instance-level: they are enforced at the Linear client, which is handed an issue ' +
-          'id and cannot resolve a mapping without a round trip per comment. Move the value ' +
-          'to `defaults`, or drop the override.',
+          `but defaults says ${String(config.defaults[field])}. \`${field}\` is ` +
+          'instance-level: resolved once from `defaults` rather than per mapping. Move the ' +
+          'value to `defaults`, or drop the override.',
       );
     }
   }

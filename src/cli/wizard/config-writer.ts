@@ -52,6 +52,7 @@ import type { EnrichedMapping, RepoSafetyInfo } from './repo-safety.js';
 export const DEFAULT_TOGGLES: MappingToggles = {
   postLinearComments: true,
   updateLinearIssue: true,
+  prAttribution: true,
   notifySlack: false,
   baseBranch: 'main',
   draftPr: true,
@@ -104,6 +105,7 @@ function mergeToggles(existing: unknown): MappingToggles {
   return {
     postLinearComments: pickBoolean(e.postLinearComments, DEFAULT_TOGGLES.postLinearComments),
     updateLinearIssue: pickBoolean(e.updateLinearIssue, DEFAULT_TOGGLES.updateLinearIssue),
+    prAttribution: pickBoolean(e.prAttribution, DEFAULT_TOGGLES.prAttribution),
     notifySlack: pickBoolean(e.notifySlack, DEFAULT_TOGGLES.notifySlack),
     baseBranch: pickString(e.baseBranch, DEFAULT_TOGGLES.baseBranch),
     draftPr: pickBoolean(e.draftPr, DEFAULT_TOGGLES.draftPr),
@@ -125,6 +127,13 @@ function mergeToggles(existing: unknown): MappingToggles {
  * additions requested" as well, because Phase 1's owner may prefer to collapse the two.
  * Note 08-03 has no name for `questionsEnabled`: it rendered D-09's "question flow" as
  * `questionTimeoutMs`, so `questionsEnabled` is settable only as a global default today.
+ *
+ * `updateLinearIssue` and `prAttribution` both have no case below, and that omission is a
+ * decision made twice for the same reason: both are pinned instance-level (M5/M9 in
+ * 260910-sm5's PLAN.md) — a per-mapping value would be inert by product decision — so a
+ * wizard-local override name for either would invite an operator to configure something
+ * that can never take effect. `assertInstanceLevelToggles` is what catches a hand-edited
+ * `config.json` that tries anyway.
  */
 function toDomainOverrides(toggles?: ToggleOverrides): Partial<MappingToggles> | undefined {
   if (!toggles) return undefined;

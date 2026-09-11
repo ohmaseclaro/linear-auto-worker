@@ -26,6 +26,9 @@ export const TogglesSchema = z.object({
   // must still load, and must load as today's behaviour. The live instance picks these
   // changes up on its next restart and must not notice.
   updateLinearIssue: z.boolean().default(true),
+  // Same compatibility contract as `updateLinearIssue`: every config written before this
+  // field existed must still load, and must load as today's (fully attributed) behaviour.
+  prAttribution: z.boolean().default(true),
   notifySlack: z.boolean(),
   baseBranch: z.string().min(1).max(255),
   draftPr: z.boolean(),

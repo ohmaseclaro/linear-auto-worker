@@ -392,6 +392,7 @@ test('a law setup re-run preserves ingress, pickupStates and updateLinearIssue',
   existing.ingress = 'poll';
   existing.defaults.updateLinearIssue = false;
   existing.defaults.postLinearComments = false;
+  existing.defaults.prAttribution = false;
   existing.mappings['proj-1'].pickupStates = ['unstarted'];
 
   // The full round trip the wizard actually takes: Config -> Mapping[] -> Config.
@@ -403,6 +404,7 @@ test('a law setup re-run preserves ingress, pickupStates and updateLinearIssue',
   assert.equal(again.ingress, 'poll', 'a top-level ingress survives assembly');
   assert.equal(again.defaults.updateLinearIssue, false, 'mergeToggles names the new toggle');
   assert.equal(again.defaults.postLinearComments, false);
+  assert.equal(again.defaults.prAttribution, false, 'mergeToggles names the new toggle');
   assert.deepEqual(
     again.mappings['proj-1'].pickupStates,
     ['unstarted'],

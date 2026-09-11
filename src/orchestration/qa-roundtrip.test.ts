@@ -62,6 +62,7 @@ const CONFIG: Config = {
     baseBranch: 'main',
     postLinearComments: false,
     updateLinearIssue: true,
+    prAttribution: true,
     notifySlack: false,
     draftPr: true,
     questionsEnabled: true,
