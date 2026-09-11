@@ -45,11 +45,9 @@ import type { Scheduler } from './scheduler.js';
 import type { AnswerComment, Questions } from './questions.js';
 
 /**
- * The `kv` key holding the last-seen poll watermark. **Shared with Phase 3's
- * `pollForMissedWork()`** (03-CONTEXT D-04, plan 03-04) -- the two halves of
- * this obligation must read and write the same key or each will re-cover the
- * other's window forever. Exported so the integration gate can assert one
- * string, not two spellings.
+ * The `kv` key holding the last-seen poll watermark. `pollForMissedWork()` was T122's
+ * dead twin and had no caller; it is deleted (quick 260911-i3p), so this key is read and
+ * written only here now.
  */
 export const POLL_WATERMARK_KEY = 'poll_watermark';
 

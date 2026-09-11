@@ -1,6 +1,6 @@
 # Traps
 
-One hundred and twenty-eight footguns found while building this daemon, kept as a running ledger
+One hundred and twenty-nine footguns found while building this daemon, kept as a running ledger
 so no two parallel work streams had to rediscover the same one.
 
 **Every entry here was measured, not recalled.** Versions come from the npm registry, API
@@ -15,7 +15,7 @@ spawn processes, several of them will cost you an afternoon each.
 Measured against: `@linear/sdk@93.0.1`, `@ngrok/ngrok@1.7.0`, `better-sqlite3@13.0.3`,
 `execa@10.0.1`, Claude Code CLI `2.1.259`, `gh` `2.98.0`, Node `22.23.1`, macOS.
 
-The complete internal ledger — all 128 rows with per-phase attribution and the evidence for
+The complete internal ledger — all 129 rows with per-phase attribution and the evidence for
 each — is in [`.planning/TRAPS.md`](../.planning/TRAPS.md). This page is the subset that
 generalises.
 
@@ -171,6 +171,16 @@ the first page twice.
 
 **Every `webhooks()` call pulls signing secrets into memory** — `WebhookFragment` selects
 `secret`. Register it with your log redactor before the first call, not after.
+
+**Resolving an issue's relations costs one request per relation, even when nobody reads
+them.** Mapping an issue through its `assignee`/`project`/`team`/`state` lazy references
+resolves each with a real GraphQL call — measured at 3.9 requests per issue. A poll that
+hydrates every page of assigned issues that way, then filters client-side on `updatedAt`,
+pays that cost before the filter ever runs: a 12-issue poll cost ~48 requests, ~2870/hour
+against the 2,500/hour cap, with one instance's watermark frozen for four hours. The fix is
+a narrowed return type (`Pick<Issue, 'id' | 'updatedAt'>`) plus pushing the watermark into
+the query as a server-side `updatedAt: { gt: since }` predicate — closing a dead-but-correct
+twin implementation that had already gotten the query right and was never called.
 
 **Creating a webhook requires workspace admin.** Worth confirming before designing around a
 dedicated non-admin bot account.
