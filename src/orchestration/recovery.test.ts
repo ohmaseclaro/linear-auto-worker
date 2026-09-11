@@ -77,6 +77,10 @@ interface Harness {
   comments: Map<string, ListedComment[]>;
   /** Set to make the next Linear call throw. */
   failLinear: { on: boolean };
+  /** Every `since` argument `listAssignedOpenIssues` received, in call order. */
+  sinceReceived: Array<string | undefined>;
+  /** Set to make the fake actually filter by `since`, modeling a server-side predicate. */
+  filterServerSide: { on: boolean };
   scheduler: ReturnType<typeof createScheduler>;
 }
 
@@ -89,6 +93,8 @@ function harness(): Harness {
   const issues: ListedIssue[] = [];
   const comments = new Map<string, ListedComment[]>();
   const failLinear = { on: false };
+  const sinceReceived: Array<string | undefined> = [];
+  const filterServerSide = { on: false };
   let engineRuns = 0;
 
   const config = {
@@ -165,9 +171,13 @@ function harness(): Harness {
   };
 
   const linear = {
-    async listAssignedOpenIssues(botUserId: string) {
+    async listAssignedOpenIssues(botUserId: string, since?: string) {
       if (failLinear.on) throw new Error('linear is down');
       assert.equal(botUserId, BOT);
+      sinceReceived.push(since);
+      if (filterServerSide.on && since !== undefined) {
+        return issues.filter((i) => i.updatedAt > since);
+      }
       return issues;
     },
     async listComments(issueId: string, since?: string) {
@@ -204,6 +214,8 @@ function harness(): Harness {
     issues,
     comments,
     failLinear,
+    sinceReceived,
+    filterServerSide,
     scheduler,
   };
 }
@@ -465,6 +477,33 @@ test('an issue below the watermark is not re-enqueued on the next pass', async (
   // watermark can prevent the second enqueue. That is the assertion.
   const second = await reconcile(h.deps, NOW);
   assert.deepEqual(second.enqueued, []);
+});
+
+test('reconcile() sends the current watermark as `since`, not merely a filtered result (mandatory falsification #2)', async () => {
+  const h = harness();
+  h.store.kvSet(POLL_WATERMARK_KEY, OLD);
+  h.issues.push({ id: 'ISS-new', identifier: 'ENG-99', updatedAt: FRESH });
+
+  await reconcile(h.deps, NOW);
+
+  assert.equal(
+    h.sinceReceived.at(-1),
+    OLD,
+    'the watermark must be SENT as the since argument, not merely inferred from a filtered result',
+  );
+});
+
+test('server-side filtering advances the watermark to the same value client-side filtering did, at the boundary (mandatory falsification #3)', async () => {
+  const h = harness();
+  h.filterServerSide.on = true;
+  h.store.kvSet(POLL_WATERMARK_KEY, OLD);
+  h.issues.push({ id: 'ISS-at-watermark', identifier: 'ENG-100', updatedAt: OLD });
+  h.issues.push({ id: 'ISS-after', identifier: 'ENG-101', updatedAt: FRESH });
+
+  const report = await reconcile(h.deps, NOW);
+
+  assert.deepEqual(report.enqueued, ['ISS-after']);
+  assert.equal(report.watermark, FRESH);
 });
 
 test('a reply posted while the daemon was down resumes its run on the first poll, deadline unexpired', async () => {
