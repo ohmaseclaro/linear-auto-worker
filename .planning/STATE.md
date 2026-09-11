@@ -6,9 +6,9 @@ current_phase: 8
 current_phase_name: Setup Wizard & Safety Pass
 status: milestone_complete
 stopped_at: v1.0 shipped, published, and live-verified end to end
-last_updated: "2026-09-10T23:59:00.000Z"
-last_activity: 2026-09-10
-last_activity_desc: "Quick task 260910-sm5: prAttribution gates the PR footer and the Run log path (T128)"
+last_updated: "2026-09-11T16:30:00.000Z"
+last_activity: 2026-09-11
+last_activity_desc: "Quick task 260911-i3p: the poll is O(1) in issue count; dead twin poll.ts deleted (T129)"
 progress:
   total_phases: 8
   completed_phases: 8
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-09-06)
 Phase: 8 of 8 (Setup Wizard & Safety Pass) — milestone complete
 Plan: 35 of 35 complete
 Status: Shipped. Published at ohmaseclaro/linear-auto-worker (MIT, public), CI green on Node 22/24 x Ubuntu/macOS.
-Last activity: 2026-09-10 — Quick task 260910-sm5: the PR body no longer names the tool or prints local paths when an instance is silent
+Last activity: 2026-09-11 — Quick task 260911-i3p: the reconciliation poll costs 1 request per tick instead of 48 (T129)
 
 Progress: [██████████] 100%
 
@@ -118,9 +118,10 @@ Items acknowledged and carried forward from previous milestone close:
 | 260909-nh6 | A second, silent, poll-only daemon instance for the Lahzo workspace | P2 | `24d05a7`, `b04973c`, `e8cf1f6`, `6f07bf8` | 2026-09-09 |
 | 260909-tfm | Parent-directory multi-repo mode: one agent session, one PR per repo | P2 | `02258c4`, `f625ecd`, `862563e`, `d0d3fa5`, `95ef561` | 2026-09-09 |
 | 260910-sm5 | The PR body named the tool and printed the operator's local paths, on every PR a silent instance opens | P1 | `82c85fb`, `500d011`, `315b0dd` | 2026-09-10 |
+| 260911-i3p | The reconciliation poll cost 3.9 requests per issue for two fields, exceeding Linear's 2500/hour cap by construction | P0 | `bcae21e`, `26d4950`, `61863d8` | 2026-09-11 |
 
 ## Session Continuity
 
-Last session: 2026-09-10T23:59:00.000Z
-Stopped at: Completed quick task 260910-sm5 (the PR body is silent when the instance is; 771/771 + both smokes)
+Last session: 2026-09-11T16:30:00.000Z
+Stopped at: Completed quick task 260911-i3p (poll cost 48 req -> 1 req, measured live; 768/768 + both smokes)
 Resume file: None
