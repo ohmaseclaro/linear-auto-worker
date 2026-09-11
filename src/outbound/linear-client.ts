@@ -237,7 +237,10 @@ export class LinearClientImpl implements LinearClient {
     return this.call('getIssue', async () => toLinearIssue(await this.sdk.issue(issueId)));
   }
 
-  async listAssignedOpenIssues(botUserId: string): Promise<LinearIssue[]> {
+  async listAssignedOpenIssues(
+    botUserId: string,
+    since?: string,
+  ): Promise<Pick<LinearIssue, 'id' | 'updatedAt'>[]> {
     return this.call('listAssignedOpenIssues', async () => {
       const issues = await pageAll<Issue>((after) =>
         this.sdk.issues({
@@ -246,10 +249,11 @@ export class LinearClientImpl implements LinearClient {
           filter: {
             assignee: { id: { eq: botUserId } },
             state: { type: { nin: ['completed', 'canceled'] } },
+            ...(since !== undefined ? { updatedAt: { gt: new Date(since) } } : {}),
           },
         }),
       );
-      return Promise.all(issues.map(toLinearIssue));
+      return issues.map((issue) => ({ id: issue.id, updatedAt: issue.updatedAt.toISOString() }));
     });
   }
 

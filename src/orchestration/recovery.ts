@@ -254,11 +254,10 @@ export async function reconcile(deps: RecoveryDeps, now: number): Promise<Reconc
   try {
     // --- half one: assignments whose webhook never arrived (INTK-07) --------
     //
-    // ponytail: filtered client-side rather than with a server-side
-    // `updatedAt >` predicate. The bot's open assigned issues are a handful for
-    // a single-operator tool, and one filter is one place to be wrong. Push the
-    // predicate into the query if that set ever grows past a page or two.
-    const issues = await linear.listAssignedOpenIssues(config.botUserId);
+    // The watermark is now sent as a server-side `updatedAt` predicate (quick
+    // 260911-i3p); the `continue` below is defense-in-depth for a Linear clock
+    // skewed against ours, not the primary filter.
+    const issues = await linear.listAssignedOpenIssues(config.botUserId, watermark);
     for (const issue of issues) {
       seen(issue.updatedAt);
       if (issue.updatedAt <= watermark) continue;

@@ -764,8 +764,15 @@ export class FakeLinearClient implements LinearClient {
     if (!issue) return Promise.reject(new LinearApiError(`fake: no such issue ${id}`));
     return Promise.resolve(issue);
   }
-  listAssignedOpenIssues(botUserId: string): Promise<LinearIssue[]> {
-    return Promise.resolve([...this.issues.values()].filter((i) => i.assigneeId === botUserId));
+  listAssignedOpenIssues(
+    botUserId: string,
+    since?: string,
+  ): Promise<Pick<LinearIssue, 'id' | 'updatedAt'>[]> {
+    return Promise.resolve(
+      [...this.issues.values()]
+        .filter((i) => i.assigneeId === botUserId && (since === undefined || i.updatedAt > since))
+        .map((i) => ({ id: i.id, updatedAt: i.updatedAt })),
+    );
   }
   /**
    * Deterministic, and non-empty for every team — a fake that could return '' would make

@@ -83,7 +83,8 @@ export function quietLinear(
     // at all — and a poll-only instance never reaches the webhook methods anyway.
     viewer: () => inner.viewer(),
     getIssue: (id: IssueId): Promise<LinearIssue> => inner.getIssue(id),
-    listAssignedOpenIssues: (botUserId: string) => inner.listAssignedOpenIssues(botUserId),
+    listAssignedOpenIssues: (botUserId: string, since?: string) =>
+      inner.listAssignedOpenIssues(botUserId, since),
     listComments: (issueId: IssueId, since?: string): Promise<LinearComment[]> =>
       inner.listComments(issueId, since),
     resolveWorkflowStateId: (teamId: string, stateType: WorkflowStateType) =>

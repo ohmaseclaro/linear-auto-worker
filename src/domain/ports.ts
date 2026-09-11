@@ -470,8 +470,12 @@ export interface LinearClient {
   viewer(): Promise<{ id: string; name: string }>;
   /** The re-fetch: the webhook is a hint, this is the truth. */
   getIssue(id: IssueId): Promise<LinearIssue>;
-  /** Boot sweep. */
-  listAssignedOpenIssues(botUserId: string): Promise<LinearIssue[]>;
+  /**
+   * Boot sweep and reconciliation poll. Narrowed on purpose: widening this back to
+   * `LinearIssue[]` reintroduces per-issue relation hydration the one caller never reads,
+   * measured at 3.9 requests/issue (quick 260911-i3p).
+   */
+  listAssignedOpenIssues(botUserId: string, since?: string): Promise<Pick<LinearIssue, 'id' | 'updatedAt'>[]>;
   /**
    * Resolve a team's state of a given TYPE to its id, lowest workflow position first.
    *

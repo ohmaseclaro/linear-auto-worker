@@ -236,7 +236,7 @@ describe('listAssignedOpenIssues', () => {
     const issues = await client.listAssignedOpenIssues('user-bot');
 
     assert.equal(issues.length, 1);
-    assert.equal(issues[0]?.identifier, 'ENG-42');
+    assert.deepEqual(issues[0], { id: 'issue-1', updatedAt: '2026-09-06T12:00:00.000Z' });
     assert.deepEqual(filter, {
       assignee: { id: { eq: 'user-bot' } },
       state: { type: { nin: ['completed', 'canceled'] } },
@@ -267,6 +267,79 @@ describe('listAssignedOpenIssues', () => {
       issues.map((i) => i.id),
       ['a', 'b'],
     );
+  });
+
+  /**
+   * Models the real SDK's lazy relation resolution: each of `assignee`/`project`/`team`/
+   * `state` is a real GraphQL request the moment it is read (T120's fetch-and-read-back
+   * discipline; this is the deterministic test-seam substitute per M8). `countingIssue`
+   * increments a shared counter on ACCESS, not on construction.
+   */
+  function countingIssue(counter: { requests: number }, over: Record<string, unknown> = {}) {
+    const base = fakeIssue(over);
+    const issue: Record<string, unknown> = { id: base.id, updatedAt: base.updatedAt };
+    for (const rel of ['assignee', 'project', 'team', 'state']) {
+      Object.defineProperty(issue, rel, {
+        enumerable: true,
+        get() {
+          counter.requests += 1;
+          return (base as Record<string, unknown>)[rel];
+        },
+      });
+    }
+    return issue;
+  }
+
+  it('does not scale request cost with the number of issues on the page (mandatory falsification #1)', async () => {
+    const counter = { requests: 0 };
+    const clientFor = (n: number) =>
+      new LinearClientImpl({
+        apiKey: API_KEY,
+        sdk: asSdk({
+          issues: async () => {
+            counter.requests += 1; // the one page fetch
+            return onePage(
+              Array.from({ length: n }, (_, i) => countingIssue(counter, { id: `issue-${i}` })),
+            );
+          },
+        }),
+      });
+
+    const costFor = async (n: number): Promise<number> => {
+      counter.requests = 0;
+      await clientFor(n).listAssignedOpenIssues('user-bot');
+      return counter.requests;
+    };
+
+    const oneIssueCost = await costFor(1);
+    const twentyIssueCost = await costFor(20);
+    assert.equal(
+      twentyIssueCost,
+      oneIssueCost,
+      `1 issue cost ${oneIssueCost} requests, 20 issues cost ${twentyIssueCost} requests -- ` +
+        'per-issue relation hydration would scale the second number with N',
+    );
+  });
+
+  it('sends the watermark as a server-side updatedAt predicate (mandatory falsification #2)', async () => {
+    let filter: unknown;
+    const client = new LinearClientImpl({
+      apiKey: API_KEY,
+      sdk: asSdk({
+        issues: async (args: { filter: unknown }) => {
+          filter = args.filter;
+          return onePage([fakeIssue()]);
+        },
+      }),
+    });
+
+    await client.listAssignedOpenIssues('user-bot', '2026-09-10T22:30:00.000Z');
+
+    assert.deepEqual(filter, {
+      assignee: { id: { eq: 'user-bot' } },
+      state: { type: { nin: ['completed', 'canceled'] } },
+      updatedAt: { gt: new Date('2026-09-10T22:30:00.000Z') },
+    });
   });
 });
 
