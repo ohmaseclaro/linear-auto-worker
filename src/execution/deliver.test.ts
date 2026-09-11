@@ -316,6 +316,29 @@ test('agent-authored text cannot break out of the template structure', () => {
   assert.match(body, /Result: \*\*not run\*\*/);
 });
 
+// ================================================== 260910-sm5: prAttribution gates M1
+
+test('falsification #1: prAttribution false drops the footer', () => {
+  const body = renderPrBody({ verdict: 'delivered', prAttribution: false });
+  assert.equal(body.includes('Opened by linear-auto-worker'), false);
+});
+
+test('falsification #2: prAttribution false drops Run log independently of the footer', () => {
+  const body = renderPrBody({
+    verdict: 'delivered',
+    prAttribution: false,
+    runLogPath: '/var/law/run-1.log',
+  });
+  assert.equal(body.includes('## Run log'), false);
+  assert.equal(body.includes('/var/law/run-1.log'), false);
+});
+
+test('regression: an ABSENT prAttribution renders byte-identically to an explicit true', () => {
+  const absent = renderPrBody({ verdict: 'delivered', runLogPath: '/x' });
+  const explicitTrue = renderPrBody({ verdict: 'delivered', runLogPath: '/x', prAttribution: true });
+  assert.equal(absent, explicitTrue);
+});
+
 function headingsOutsideFences(body: string): string[] {
   const out: string[] = [];
   let closer: string | undefined;

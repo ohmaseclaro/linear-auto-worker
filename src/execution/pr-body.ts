@@ -16,6 +16,14 @@ import { sanitizeUntrustedText } from './prompt.js';
 export interface PrBodyInput extends Partial<PrBodySource> {
   /** From `runPrePushGates`. Non-empty means the body OPENS with the flag. */
   ciPaths?: readonly string[];
+  /**
+   * `MappingToggles.prAttribution`, instance-level. Defaults to `true` when omitted, so
+   * every existing direct caller of `renderPrBody` — including every test in this file
+   * that predates this field — renders byte-identically. `false` drops `## Run log` and
+   * the trailing attribution line: the two places a PR names the tool and the operator's
+   * local filesystem paths.
+   */
+  prAttribution?: boolean;
 }
 
 /**
@@ -41,9 +49,14 @@ function present(s: string | undefined): string | undefined {
 }
 
 /**
- * All five DELV-03 sections, none of them optional and none of them ever empty.
+ * DELV-03's five sections render unconditionally, except two: `## Run log` and the
+ * trailing attribution line are gated by the instance-level `prAttribution` toggle
+ * (default `true`). A deliberately silent instance must not print the tool's name or the
+ * operator's local filesystem paths into a PR it opens, so with the toggle off both are
+ * omitted rather than blanked.
  *
- * Two of the five are what make the PR reviewable rather than decorative:
+ * Two of the remaining, unconditional sections are what make the PR reviewable rather than
+ * decorative:
  *  - *What I did not do* — an empty section and "nothing" are different statements, and a
  *    reviewer who cannot tell them apart reviews the diff assuming the wrong one.
  *  - *Tests* — under this milestone's constraints the honest answer is often "not run".
@@ -51,6 +64,7 @@ function present(s: string | undefined): string | undefined {
  */
 export function renderPrBody(o: PrBodyInput): string {
   const out: string[] = [];
+  const showAttribution = o.prAttribution ?? true;
 
   // DELV-08. Prominent means FIRST, not present: a warning below the fold is a warning
   // nobody reads. A ticket that quietly edits CI is the highest-consequence diff this
@@ -99,12 +113,16 @@ export function renderPrBody(o: PrBodyInput): string {
   }
   out.push('');
 
-  out.push('## Run log');
-  out.push(present(o.runLogPath) ? `\`${present(o.runLogPath)}\`` : '(no run log path recorded)');
-  out.push('');
+  if (showAttribution) {
+    out.push('## Run log');
+    out.push(present(o.runLogPath) ? `\`${present(o.runLogPath)}\`` : '(no run log path recorded)');
+    out.push('');
+  }
 
-  out.push('---');
-  out.push('_Opened by linear-auto-worker. The worker pushed and opened this PR, not the agent._');
+  if (showAttribution) {
+    out.push('---');
+    out.push('_Opened by linear-auto-worker. The worker pushed and opened this PR, not the agent._');
+  }
 
   return out.join('\n');
 }
